@@ -488,6 +488,7 @@ bool load_app_settings_toml(const std::filesystem::path& path, AppSettings& sett
         return false;
     }
     settings.recent_projects.clear();
+    settings.settings_revision = 1; // files without the key predate revisioning
     std::string section;
     std::string line;
     while (std::getline(ifs, line)) {
@@ -527,6 +528,8 @@ bool load_app_settings_toml(const std::filesystem::path& path, AppSettings& sett
                 settings.ws_auth_token = unquote_toml_str(val);
             } else if (key == "telemetry_show_substats") {
                 settings.telemetry_show_substats = (val == "true");
+            } else if (key == "settings_revision") {
+                settings.settings_revision = static_cast<uint32_t>(std::strtoul(val.c_str(), nullptr, 10));
             }
         } else if (section == "params") {
             if (const ParamSpec* spec = find_param_by_id(key)) {
@@ -541,6 +544,14 @@ bool load_app_settings_toml(const std::filesystem::path& path, AppSettings& sett
             settings.record_recent_project(unquote_toml_str(val));
         }
     }
+    if (settings.settings_revision < 2U) {
+        // Revision 2: older wizard builds persisted CPU (36 ms/frame) as the tracking EP. Restore the Auto cascade so
+        // the router picks the NPU/GPU tier; a CPU choice made explicitly after this migration is kept.
+        if (params.get_int(ParamId::TrackingEpMode) == 4) {
+            (void)params.set(ParamId::TrackingEpMode, 0.0);
+        }
+    }
+    settings.settings_revision = AppSettings::kCurrentRevision;
     return true;
 }
 
@@ -555,7 +566,8 @@ bool save_app_settings_toml(const std::filesystem::path& path, const AppSettings
     oss << "preferred_gpu_name = " << quote_toml_str(settings.preferred_gpu_name) << "\n";
     oss << "active_project_path = " << quote_toml_str(settings.active_project_path) << "\n";
     oss << "ws_auth_token = " << quote_toml_str(settings.ws_auth_token) << "\n";
-    oss << "telemetry_show_substats = " << (settings.telemetry_show_substats ? "true" : "false") << "\n\n";
+    oss << "telemetry_show_substats = " << (settings.telemetry_show_substats ? "true" : "false") << "\n";
+    oss << "settings_revision = " << AppSettings::kCurrentRevision << "\n\n";
 
     oss << "[params]\n";
     for (const ParamSpec& spec : all_param_specs()) {

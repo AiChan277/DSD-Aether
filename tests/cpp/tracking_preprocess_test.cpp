@@ -233,8 +233,14 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
             const float d = std::max(-pz, 0.05f);
             const float u_cam = cx + fx * (px / d);
             const float v_cam = cy - fy * (py / d);
-            const float u_m2 = (((u_cam / static_cast<float>(kCamW)) - crop_roi.cx) / crop_roi.width + 0.5f) * 256.0f;
-            const float v_m2 = (((v_cam / static_cast<float>(kCamH)) - crop_roi.cy) / crop_roi.height + 0.5f) * 256.0f;
+            // Inverse of map_m2_crop_to_cam_px (square-pixel crop rotated by crop_roi.rotation_rad)
+            const float dx_px = u_cam - crop_roi.cx * static_cast<float>(kCamW);
+            const float dy_px = v_cam - crop_roi.cy * static_cast<float>(kCamH);
+            const float side_px = crop_roi.width * static_cast<float>(kCamW);
+            const float rc = std::cos(crop_roi.rotation_rad);
+            const float rs = std::sin(crop_roi.rotation_rad);
+            const float u_m2 = ((rc * dx_px + rs * dy_px) / side_px + 0.5f) * 256.0f;
+            const float v_m2 = ((-rs * dx_px + rc * dy_px) / side_px + 0.5f) * 256.0f;
             out_lm[i * 3 + 0] = u_m2;
             out_lm[i * 3 + 1] = v_m2;
             out_lm[i * 3 + 2] = 0.0f; // intentionally zero M2 pseudo-Z to prove PnP ignores it!
@@ -285,6 +291,32 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
     CHECK(roi1.cx == roi0.cx);
     CHECK(roi1.cy == roi0.cy);
     CHECK(roi1.width == roi0.width);
+    CHECK(roi1.rotation_rad == roi0.rotation_rad);
+
+    // MediaPipe crop convention: a strongly rolled head yields a crop rotated so the eye line (33 -> 263) is level
+    // inside the 256x256 M2 input, and the crop spans ~1.5x the landmark extent (not a tight 1.32x box).
+    {
+        // Face at 0.9 m so the 1.5x crop stays below enforce_square_pixel_roi's 56%-of-frame size clamp.
+        const float t_far[3]{0.02f, -0.04f, -0.90f};
+        std::array<float, 478 * 3> lm_roll{};
+        project_canonical_into_m2(roi, 0.0f, 0.0f, 0.30f, t_far, lm_roll.data());
+        RoiRectNorm r = roi;
+        for (int it = 0; it < 3; ++it) {
+            r = solver.compute_next_face_roi(lm_roll.data(), r, 0.95f, kCamW, kCamH);
+            REQUIRE(r.valid);
+            project_canonical_into_m2(r, 0.0f, 0.0f, 0.30f, t_far, lm_roll.data());
+        }
+        const float ex = lm_roll[263 * 3 + 0] - lm_roll[33 * 3 + 0];
+        const float ey = lm_roll[263 * 3 + 1] - lm_roll[33 * 3 + 1];
+        CHECK(std::abs(std::atan2(ey, ex)) * (180.0f / 3.14159265f) < 2.5f);
+        CHECK(std::abs(r.rotation_rad) * (180.0f / 3.14159265f) > 12.0f);
+        float min_x = 1e9f, max_x = -1e9f;
+        for (uint32_t i = 0; i < 468U; ++i) {
+            min_x = std::min(min_x, lm_roll[i * 3 + 0]);
+            max_x = std::max(max_x, lm_roll[i * 3 + 0]);
+        }
+        CHECK((max_x - min_x) / 256.0f < 0.72f); // face occupies ~1/1.5 of the crop, leaving model context margin
+    }
 
     // Auto-neutral lock after 15 consecutive stable frames zeroes out initial camera tilt
     project_canonical_into_m2(roi, base_yaw, base_pitch, base_roll, t_tilted, lm.data());

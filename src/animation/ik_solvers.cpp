@@ -256,7 +256,9 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
                 break;
             }
         }
-        // Map FABRIK chain directions back to Spine/Chest/Neck local rotations
+        // Map FABRIK chain directions back to Spine/Chest/Neck local rotations. Re-run FK after each joint so the
+        // next joint sees its parent's updated world rotation; anatomical limits are applied rest-relative inside
+        // compute_fk() (clamping the full local quaternion here would break VRM 1.0 rigs with non-identity rest).
         for (size_t i = 0; i < 3; ++i) {
             const size_t b = kChain[i];
             const size_t child = kChain[i + 1];
@@ -265,10 +267,9 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
             const Vec3 cur_dir = normalize_safe(out_world_positions[child] - out_world_positions[b]);
             const Vec3 new_dir = normalize_safe(pts[i + 1] - pts[i]);
             const Quat new_world = normalize(quat_from_to(cur_dir, new_dir) * out_world_rotations[b]);
-            io_local_rots[b] = clamp_rotation_to_limits(normalize(conjugate(p_world) * new_world),
-                                                        joint_limit_for_bone(static_cast<AetherHumanoidBone>(b)));
+            io_local_rots[b] = normalize(conjugate(p_world) * new_world);
+            compute_fk();
         }
-        compute_fk();
     }
 
     // 3. Analytic 2-bone IK for Left & Right Arms + Legs (`§9.5`)

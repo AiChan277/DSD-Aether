@@ -594,6 +594,42 @@ fn cpp_default_6_node_graph_json_parses_and_compiles_cleanly()
         .ok_or("dsp_audio rms_db pin readout present")?;
     assert_eq!(readout.pin_kinds[rms_slot], AETHER_PIN_VALUE_FLOAT);
     assert!((readout.pin_values[rms_slot][0] - (-12.0)).abs() < 1e-3);
+
+    // Regression: the default NPU -> Visibility-First -> Output Pose chain is a pass-through of tracking, which
+    // the C++ solver already consumes. It must NOT re-emit the raw head rotation as a bone offset (double
+    // rotation + unfiltered jitter) nor map tracked Hips/Spine positions onto the head/hand IK slots
+    // (which pulled the avatar's head and torso down toward the hips).
+    let mut tf = aether_ffi::AetherTrackingFrame {
+        capture_timestamp_us: 1,
+        inference_complete_us: 1,
+        active_execution_provider: 0,
+        upper_body_confidence: 0.95,
+        left_hand_confidence: 0.0,
+        right_hand_confidence: 0.0,
+        lower_body_confidence: 0.0,
+        arkit_blendshapes: [0.0; 52],
+        joint_positions_ws: [[0.0; 4]; 55],
+        joint_rotations_quat: [[0.0, 0.0, 0.0, 1.0]; 55],
+        frame_sequence: 7,
+        valid_flags: 0x01 | 0x08,
+        _reserved: [0; 36],
+    };
+    tf.joint_rotations_quat[5] = [0.17, -0.12, 0.05, 0.977];
+    tf.joint_positions_ws[0] = [0.02, 0.91, -0.03, 0.95];
+    tf.joint_positions_ws[1][3] = 0.95;
+    tf.joint_positions_ws[5] = [0.01, 1.50, 0.02, 0.99];
+    let mut track_inp = default_inputs(1.0 / 240.0);
+    track_inp.tracking = Some(&tf);
+    host.evaluate_active(&track_inp, &mut out)?;
+    for (b, q) in out.bone_rotation_offsets.iter().enumerate() {
+        assert!(
+            q[0].abs() < 1e-5 && q[1].abs() < 1e-5 && q[2].abs() < 1e-5 && (q[3] - 1.0).abs() < 1e-5,
+            "bone {b} offset must be identity for a tracking pass-through, got {q:?}"
+        );
+    }
+    for (slot, t) in out.ik_targets.iter().take(6).enumerate() {
+        assert!(t[7].abs() < 1e-6, "IK slot {slot} must stay inactive for a pass-through, got {t:?}");
+    }
     Ok(())
 }
 

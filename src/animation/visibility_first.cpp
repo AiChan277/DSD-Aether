@@ -127,6 +127,11 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     }
     phase_time_s_ += safe_dt;
     out.foot_step_triggered_this_tick = {false, false};
+    // Graph IK overrides are per-tick: never let a weight latched by an earlier graph evaluation keep the
+    // FABRIK head chain (or wrist orientation) pinned after the graph stops driving it.
+    out.head_target_weight = 0.0f;
+    out.left_wrist_rot_ws = Quat::identity();
+    out.right_wrist_rot_ws = Quat::identity();
 
     // 1. Evaluate optional ultra-smooth 0.22 Hz chest breathing oscillator (`enable_idle_breathing`)
     const float phase = kTwoPi * cfg.breathing_hz * phase_time_s_;
@@ -406,27 +411,41 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
         out.joint_blend_weights[b] = w_rhand;
     }
 
-    // Apply Rust node graph per-joint rotation offsets (`graph_out.bone_rotation_offsets[55][4]`, `§5.2`)
+    // Apply Rust node graph per-joint rotation offsets (`graph_out.bone_rotation_offsets[55][4]`, `§5.2`).
+    // Offsets are character-frame deltas (like tracking), so map them through the bone's rest frame instead of
+    // right-multiplying in raw bone-local axes (which differ per VRM rig).
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
         const float gx = graph_out.bone_rotation_offsets[b][0];
         const float gy = graph_out.bone_rotation_offsets[b][1];
         const float gz = graph_out.bone_rotation_offsets[b][2];
         const float gw = graph_out.bone_rotation_offsets[b][3];
-        if (gx * gx + gy * gy + gz * gz + gw * gw > 0.25f) {
-            const Quat gq = normalize(Quat{gx, gy, gz, gw});
-            out.local_rotations[b] = normalize(out.local_rotations[b] * gq);
+        const float g2 = gx * gx + gy * gy + gz * gz + gw * gw;
+        if (!(g2 > 0.25f) || !std::isfinite(g2)) {
+            continue;
         }
+        const Quat gq = normalize(Quat{gx, gy, gz, gw});
+        if (std::abs(gq.w) >= 0.9999995f) {
+            continue; // identity offset (default pass-through graph)
+        }
+        const Quat rw = rest_metrics_.rest_world_rotations[b];
+        const float rw2 = rw.w * rw.w + rw.x * rw.x + rw.y * rw.y + rw.z * rw.z;
+        const Quat rest_world = (rw2 > 1e-6f) ? normalize(rw) : Quat::identity();
+        const Quat delta_local = normalize(conjugate(rest_world) * gq * rest_world);
+        out.local_rotations[b] = normalize(out.local_rotations[b] * delta_local);
     }
 
     // Check head IK target override (`AETHER_IK_HEAD = 0`, `AETHER_IK_LEFT_HAND = 1`, `AETHER_IK_RIGHT_HAND = 2`)
     const auto apply_ik_override = [&](uint32_t slot, Vec3& io_pos, Quat& io_rot, float* opt_weight) {
         const float iw = std::clamp(graph_out.ik_targets[slot][7], 0.0f, 1.0f);
-        if (iw > 0.0f) {
-            const Vec3 gp{
-                graph_out.ik_targets[slot][0],
-                graph_out.ik_targets[slot][1],
-                graph_out.ik_targets[slot][2],
-            };
+        const Vec3 gp{
+            graph_out.ik_targets[slot][0],
+            graph_out.ik_targets[slot][1],
+            graph_out.ik_targets[slot][2],
+        };
+        // An unset slot (origin / non-finite) would drag the chain to the floor: ignore it.
+        const bool target_ok = std::isfinite(gp.x) && std::isfinite(gp.y) && std::isfinite(gp.z) &&
+                               length_sq(gp) > 1e-6f;
+        if (iw > 0.0f && target_ok) {
             const Quat gq = normalize(Quat{
                 graph_out.ik_targets[slot][3],
                 graph_out.ik_targets[slot][4],

@@ -221,6 +221,33 @@ fn quat_slerp_norm(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     }
 }
 
+/// Humanoid bone (Appendix A) feeding each `AetherGraphOutputs::ik_targets` slot `0..6`.
+const IK_SLOT_BONES: [usize; 6] = [5, 20, 24, 11, 15, 0];
+
+#[inline]
+fn quat_conj(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// Hamilton product `a * b` (xyzw), normalized; degenerate input collapses to identity.
+#[inline]
+fn quat_mul_norm(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let r = [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ];
+    let len_sq = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3];
+    if !len_sq.is_finite() || len_sq <= 1e-12 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        let inv = len_sq.sqrt().recip();
+        let s = if r[3] < 0.0 { -inv } else { inv };
+        [r[0] * s, r[1] * s, r[2] * s, r[3] * s]
+    }
+}
+
 #[inline]
 fn push_event(outputs: &mut AetherGraphOutputs, event_id: u32) {
     let idx = usize::try_from(outputs.event_count).unwrap_or(16);
@@ -336,6 +363,7 @@ fn eval_op(
                 let pose = PoseData {
                     pos: tr.joint_positions_ws,
                     rot: tr.joint_rotations_quat,
+                    from_tracking: true,
                 };
                 arena.poses[out_pose] = pose;
 
@@ -475,11 +503,12 @@ fn eval_op(
             let mut pose = arena.poses[in_pose];
             let hand_w = arena.floats[in_hand_conf].clamp(0.0, 1.0);
             let body_w = arena.floats[in_body_conf].clamp(0.0, 1.0);
-            // Scale left/right hand bones (slots 24..53) by hand confidence and lower body (<12) by body confidence.
-            for p in &mut pose.pos[1..12] {
+            // Appendix A: legs/feet/toes are bones 9..=16; hands are 20 and 24, fingers 25..=54.
+            for p in &mut pose.pos[9..17] {
                 p[3] *= body_w;
             }
-            for p in &mut pose.pos[24..54] {
+            pose.pos[20][3] *= hand_w;
+            for p in &mut pose.pos[24..55] {
                 p[3] *= hand_w;
             }
             arena.poses[out_pose] = pose;
@@ -934,12 +963,38 @@ fn eval_op(
 
         Op::OutputPose { in_pose } => {
             let pose = &arena.poses[in_pose];
-            outputs.bone_rotation_offsets = pose.rot;
-            for (dst, &src) in outputs.ik_targets.iter_mut().take(6).zip(pose.pos.iter()) {
-                dst[0] = src[0];
-                dst[1] = src[1];
-                dst[2] = src[2];
-                dst[7] = src[3];
+            // A pose sourced from `NpuPose` is the raw tracking frame: the C++ Visibility-First solver already
+            // consumes and filters that, so only emit what the graph *changed* relative to it. Passing the raw
+            // pose through would re-apply the unfiltered 30 Hz head rotation on top of the spring-smoothed one
+            // (double rotation + jitter).
+            let track = if pose.from_tracking {
+                inputs.tracking
+            } else {
+                None
+            };
+            for (b, dst) in outputs.bone_rotation_offsets.iter_mut().enumerate() {
+                *dst = match track {
+                    Some(tr) => quat_mul_norm(quat_conj(tr.joint_rotations_quat[b]), pose.rot[b]),
+                    None => pose.rot[b],
+                };
+            }
+            // IK slots are addressed by role (`AETHER_IK_HEAD = 0`, `LEFT_HAND = 1`, `RIGHT_HAND = 2`,
+            // `LEFT_FOOT = 3`, `RIGHT_FOOT = 4`, `HIPS = 5`), not by humanoid bone index.
+            for (slot, &bone) in IK_SLOT_BONES.iter().enumerate() {
+                let p = pose.pos[bone];
+                let finite = p.iter().all(|v| v.is_finite());
+                let moved = match track {
+                    Some(tr) => {
+                        let tp = tr.joint_positions_ws[bone];
+                        let d = [p[0] - tp[0], p[1] - tp[1], p[2] - tp[2]];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 1e-6
+                    }
+                    None => true,
+                };
+                let w = if finite && moved { p[3].clamp(0.0, 1.0) } else { 0.0 };
+                if w > 0.0 {
+                    outputs.ik_targets[slot] = [p[0], p[1], p[2], 0.0, 0.0, 0.0, 1.0, w];
+                }
             }
             pose.pos[0][3]
         }

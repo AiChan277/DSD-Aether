@@ -730,22 +730,35 @@ RoiRectNorm LandmarkPoseSolver::compute_next_face_roi(const float* m2_landmarks_
     RoiRectNorm cand{};
     cand.cx = std::clamp(prev_face_roi.cx + (lc_x * c - lc_y * s) * prev_face_roi.width, 0.08f, 0.92f);
     cand.cy = std::clamp(prev_face_roi.cy + (lc_x * s + lc_y * c) * prev_face_roi.height, 0.08f, 0.92f);
+    // MediaPipe FaceLandmarksToRoi convention: square crop of the landmark bbox scaled 1.5x, rotated so the
+    // eye line (33 -> 263) is horizontal. The face-mesh network was trained on exactly that framing; a tighter
+    // (1.32x) or un-rotated crop pushes its regression toward the mean face, so the dots stop following the
+    // user's real eyes / brows / lips and roll tracking degrades.
     const float span_x_px = ((max_x - min_x) / 256.0f) * prev_face_roi.width * static_cast<float>(std::max(cam_w, 1U));
     const float span_y_px = ((max_y - min_y) / 256.0f) * prev_face_roi.height * static_cast<float>(std::max(cam_h, 1U));
-    const float target_px = std::max(span_x_px, span_y_px) * 1.32f;
+    const float target_px = std::max(span_x_px, span_y_px) * 1.5f;
     cand.width = target_px / static_cast<float>(std::max(cam_w, 1U));
     cand.height = target_px / static_cast<float>(std::max(cam_h, 1U));
-    cand.rotation_rad = 0.0f;
+    const float eye_dx = m2_landmarks_478x3[263U * 3U + 0U] - m2_landmarks_478x3[33U * 3U + 0U];
+    const float eye_dy = m2_landmarks_478x3[263U * 3U + 1U] - m2_landmarks_478x3[33U * 3U + 1U];
+    float rot = prev_face_roi.rotation_rad;
+    if (eye_dx * eye_dx + eye_dy * eye_dy > 4.0f) {
+        rot += std::atan2(eye_dy, eye_dx); // crop is square in pixels, so in-crop angles compose additively
+    }
+    rot = std::remainder(rot, 2.0f * animation::kPi);
+    cand.rotation_rad = std::clamp(rot, -1.2f, 1.2f);
     cand.valid = true;
     cand = enforce_square_pixel_roi(cand, cam_w, cam_h, 0.16f, 0.56f);
 
-    // Critical anti-jitter hysteresis gate: freeze crop completely when movement < 2.5% of box width
+    // Critical anti-jitter hysteresis gate: freeze crop completely when movement < 2.5% of box width and the
+    // eye-line roll changed by < 2 degrees (a static crop gives the network a static input -> zero dot shimmer).
     const float dx_ratio = std::abs(cand.cx - prev_face_roi.cx) / std::max(prev_face_roi.width, 1e-4f);
     const float dy_ratio = std::abs(cand.cy - prev_face_roi.cy) / std::max(prev_face_roi.height, 1e-4f);
     const float dw_ratio = std::abs(cand.width - prev_face_roi.width) / std::max(prev_face_roi.width, 1e-4f);
     const float dh_ratio = std::abs(cand.height - prev_face_roi.height) / std::max(prev_face_roi.height, 1e-4f);
+    const float drot = std::abs(std::remainder(cand.rotation_rad - prev_face_roi.rotation_rad, 2.0f * animation::kPi));
     if (dx_ratio < 0.025f && dy_ratio < 0.025f && dw_ratio < 0.05f && dh_ratio < 0.05f &&
-        std::abs(prev_face_roi.rotation_rad) < 1e-4f) {
+        drot < 2.0f * animation::kDegToRad) {
         return prev_face_roi;
     }
     return cand;

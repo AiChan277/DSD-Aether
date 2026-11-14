@@ -388,3 +388,195 @@ TEST_CASE("60Hz critically-damped kinematic chain, zero jitter, C2 follow-throug
         CHECK(worst_spring_disp_late < 5e-4f);
     }
 }
+
+namespace {
+
+RestSkeletonMetrics make_vrm_like_rest_metrics() {
+    RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
+    // Non-identity VRM bind rotations so every check also proves rest-pose preservation
+    rm.rest_local_rotations[AETHER_BONE_SPINE] = from_euler_xyz(0.05f, -0.10f, 0.04f);
+    rm.rest_local_rotations[AETHER_BONE_CHEST] = from_euler_xyz(-0.04f, 0.12f, -0.03f);
+    rm.rest_local_rotations[AETHER_BONE_NECK] = from_euler_xyz(0.03f, 0.08f, -0.02f);
+    rm.rest_local_rotations[AETHER_BONE_HEAD] = from_euler_xyz(-0.02f, -0.10f, 0.05f);
+    rm.rest_world_rotations[AETHER_BONE_HIPS] = Quat::identity();
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        rm.rest_world_rotations[b] = normalize(rm.rest_world_rotations[pi] * rm.rest_local_rotations[b]);
+    }
+    return rm;
+}
+
+float rest_delta_deg(const SimEngine& e, const RestSkeletonMetrics& rm, uint32_t b) {
+    return angle_between(e.bone_rot_ws()[b], rm.rest_world_rotations[b]) * kRadToDeg;
+}
+
+float arm_drop_deg(const SimEngine& e, uint32_t upper, uint32_t lower) {
+    const Vec3 v = normalize_safe(e.bone_pos_ws()[lower] - e.bone_pos_ws()[upper]);
+    return std::asin(std::clamp(-v.y, -1.0f, 1.0f)) * kRadToDeg;
+}
+
+} // namespace
+
+TEST_CASE("Live default node graph + near-neutral tracking keeps avatar upright, A-posed and jitter-free",
+          "[animation][graph][apose][regression]") {
+    // Regression for the Studio bug where `LOCKED P+0.6 Y-0.8 R-0.4` still twisted head/neck/torso downward:
+    // the default NPU Pose -> Visibility-First IK -> Output Pose graph forwarded tracked Hips/Spine positions
+    // into the head/hand IK slots and the raw head rotation into bone offsets. This drives SimEngine through the
+    // REAL Rust graph host exactly like the T2 thread does.
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    AetherHostConfig hcfg{};
+    hcfg.struct_size = static_cast<uint32_t>(sizeof(hcfg));
+    hcfg.worker_threads = 2;
+    AetherHostHandle host = nullptr;
+    REQUIRE(aether_host_create(&hcfg, &host) == AETHER_OK);
+    REQUIRE(host != nullptr);
+
+    const RestSkeletonMetrics rm = make_vrm_like_rest_metrics();
+    SimEngine engine;
+    engine.reset(rm);
+    SimEngineConfig cfg{};
+    cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    SkinningFrame skin{};
+    const Vec3 rest_head_pos = engine.bone_pos_ws()[AETHER_BONE_HEAD];
+
+    std::mt19937 rng(4242U);
+    std::normal_distribution<float> deg_noise(0.0f, 0.025f * kDegToRad);
+    const Quat q_hud = from_euler_xyz(0.6f * kDegToRad, -0.8f * kDegToRad, -0.4f * kDegToRad);
+
+    float max_offset_deg = 0.0f;
+    float max_ik_weight = 0.0f;
+    float max_jitter_deg = 0.0f;
+    std::array<Quat, 6> prev_chain{};
+    for (int f = 0; f < 180; ++f) {
+        AetherTrackingFrame raw{};
+        raw.frame_sequence = static_cast<uint32_t>((f / 2) + 1); // 30 Hz camera -> 60 Hz sim
+        raw.capture_timestamp_us = static_cast<uint64_t>((f / 2) * 2 + 1) * 16667ULL;
+        raw.inference_complete_us = raw.capture_timestamp_us + 4000ULL;
+        raw.valid_flags = 0x01U | 0x08U;
+        raw.upper_body_confidence = 0.95f;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            raw.joint_rotations_quat[b][3] = 1.0f;
+        }
+        const Quat qn = normalize(q_hud * from_euler_xyz(deg_noise(rng), deg_noise(rng), deg_noise(rng)));
+        raw.joint_rotations_quat[AETHER_BONE_HEAD][0] = qn.x;
+        raw.joint_rotations_quat[AETHER_BONE_HEAD][1] = qn.y;
+        raw.joint_rotations_quat[AETHER_BONE_HEAD][2] = qn.z;
+        raw.joint_rotations_quat[AETHER_BONE_HEAD][3] = qn.w;
+        raw.joint_positions_ws[AETHER_BONE_HIPS][0] = 0.0f;
+        raw.joint_positions_ws[AETHER_BONE_HIPS][1] = 0.90f;
+        raw.joint_positions_ws[AETHER_BONE_HIPS][2] = 0.0f;
+        raw.joint_positions_ws[AETHER_BONE_HIPS][3] = 0.95f;
+        raw.joint_positions_ws[AETHER_BONE_SPINE][3] = 0.95f; // xyz intentionally unset (0,0,0) like the tracker
+        raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+        raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+        raw.joint_positions_ws[AETHER_BONE_NECK][3] = 0.98f;
+
+        const uint64_t tick_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+        AetherGraphInputs gin{};
+        gin.tracking = &raw;
+        gin.now_us = tick_us;
+        gin.dt_s = 1.0f / 60.0f;
+        gin.tick_index = static_cast<uint32_t>(f);
+        AetherGraphOutputs gout{};
+        aether_set_thread_role(AETHER_THREAD_ROLE_T2);
+        REQUIRE(aether_host_evaluate_active(host, &gin, &gout) == AETHER_OK);
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            const Quat g{gout.bone_rotation_offsets[b][0], gout.bone_rotation_offsets[b][1],
+                         gout.bone_rotation_offsets[b][2], gout.bone_rotation_offsets[b][3]};
+            max_offset_deg = std::max(max_offset_deg, angle_between(normalize(g), Quat::identity()) * kRadToDeg);
+        }
+        for (size_t s = 0; s < 6U; ++s) {
+            max_ik_weight = std::max(max_ik_weight, gout.ik_targets[s][7]);
+        }
+        engine.tick(raw, dsp, gout, tick_us, 0.0f, cfg, skin);
+
+        constexpr std::array<uint32_t, 6> kChain = {AETHER_BONE_HIPS, AETHER_BONE_SPINE, AETHER_BONE_CHEST,
+                                                    AETHER_BONE_UPPER_CHEST, AETHER_BONE_NECK, AETHER_BONE_HEAD};
+        for (size_t i = 0; i < kChain.size(); ++i) {
+            const Quat q = engine.bone_rot_ws()[kChain[i]];
+            if (f >= 120) {
+                max_jitter_deg = std::max(max_jitter_deg, angle_between(q, prev_chain[i]) * kRadToDeg);
+            }
+            prev_chain[i] = q;
+        }
+    }
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    aether_host_destroy(host);
+    aether_runtime_shutdown();
+
+    // Graph pass-through contributes nothing beyond what the C++ solver already filters.
+    CHECK(max_offset_deg < 0.01f);
+    CHECK(max_ik_weight < 1e-6f);
+
+    // Upright: torso bones stay at rest, head carries only the ~1.1 deg the user actually turned.
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_HIPS) < 0.5f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 1.0f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_CHEST) < 1.0f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_UPPER_CHEST) < 1.2f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_NECK) < 1.5f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_HEAD) < 1.8f);
+    const Vec3 head_pos = engine.bone_pos_ws()[AETHER_BONE_HEAD];
+    CHECK(std::abs(head_pos.x - rest_head_pos.x) < 0.02f);
+    CHECK(std::abs(head_pos.z - rest_head_pos.z) < 0.03f);
+    CHECK(head_pos.y > rest_head_pos.y - 0.02f); // not dragged down toward the hips
+
+    // Shoulders level, arms relaxed into the ~38 deg A-pose (not yanked to the floor / origin).
+    CHECK(std::abs(engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM].y -
+                   engine.bone_pos_ws()[AETHER_BONE_RIGHT_UPPER_ARM].y) < 0.01f);
+    const float l_drop = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
+    const float r_drop = arm_drop_deg(engine, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM);
+    CHECK(l_drop > 30.0f);
+    CHECK(l_drop < 46.0f);
+    CHECK(r_drop > 30.0f);
+    CHECK(r_drop < 46.0f);
+
+    // Rock-solid steady state for the whole Hips -> Head chain with 0.025 deg camera noise.
+    CHECK(max_jitter_deg < 0.001f);
+}
+
+TEST_CASE("Graph IK override is per-tick: a one-off head target never latches the FABRIK chain",
+          "[animation][graph][ik][regression]") {
+    const RestSkeletonMetrics rm = make_vrm_like_rest_metrics();
+    SimEngine engine;
+    engine.reset(rm);
+    SimEngineConfig cfg{};
+    cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    SkinningFrame skin{};
+
+    for (int f = 0; f < 120; ++f) {
+        AetherTrackingFrame raw{};
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            raw.joint_rotations_quat[b][3] = 1.0f;
+        }
+        AetherGraphOutputs gout{};
+        if (f == 10) {
+            // A graph pulls the head forward/down for exactly one tick...
+            gout.ik_targets[0][0] = 0.0f;
+            gout.ik_targets[0][1] = 1.05f;
+            gout.ik_targets[0][2] = 0.35f;
+            gout.ik_targets[0][6] = 1.0f;
+            gout.ik_targets[0][7] = 1.0f;
+        } else if (f == 20) {
+            // ...and an unset slot (origin) with full weight must be ignored entirely.
+            gout.ik_targets[0][6] = 1.0f;
+            gout.ik_targets[0][7] = 1.0f;
+            gout.ik_targets[1][7] = 1.0f;
+            gout.ik_targets[2][7] = 1.0f;
+        }
+        engine.tick(raw, dsp, gout, static_cast<uint64_t>(f + 1) * 16667ULL, 0.0f, cfg, skin);
+        if (f == 20) {
+            CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 0.5f);
+            CHECK(arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM) < 46.0f);
+        }
+    }
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 0.5f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_CHEST) < 0.5f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_NECK) < 0.5f);
+    CHECK(rest_delta_deg(engine, rm, AETHER_BONE_HEAD) < 0.5f);
+}

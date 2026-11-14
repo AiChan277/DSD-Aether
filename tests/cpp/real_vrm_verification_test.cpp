@@ -303,9 +303,19 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     aether::animation::SimEngineConfig sim_cfg{};
     sim_cfg.visibility.enable_idle_breathing = false;
     AetherDspSyncPacket dsp{};
-    AetherGraphOutputs graph_out{};
     aether::animation::SkinningFrame skin{};
     uint64_t sim_t_us = 1000000ULL;
+
+    // Drive the pose through the live default node graph (NPU Pose -> Visibility-First IK -> Output Pose), exactly
+    // like the Studio T2 thread, with the screenshot's near-neutral HUD reading `LOCKED P+0.6 Y-0.8 R-0.4`.
+    AetherHostConfig hcfg{};
+    hcfg.struct_size = static_cast<uint32_t>(sizeof(hcfg));
+    hcfg.worker_threads = 2;
+    AetherHostHandle graph_host = nullptr;
+    REQUIRE(aether_host_create(&hcfg, &graph_host) == AETHER_OK);
+    const aether::animation::Quat q_hud =
+        aether::animation::from_euler_xyz(0.6f * aether::animation::kDegToRad, -0.8f * aether::animation::kDegToRad,
+                                          -0.4f * aether::animation::kDegToRad);
     for (int f = 0; f < 60; ++f) {
         AetherTrackingFrame tf{};
         tf.frame_sequence = static_cast<uint32_t>(f + 1);
@@ -329,9 +339,23 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
         tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.48f;
         tf.joint_positions_ws[AETHER_BONE_HEAD][2] = 0.0f;
         tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][0] = q_hud.x;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = q_hud.y;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][2] = q_hud.z;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = q_hud.w;
+        AetherGraphInputs gin{};
+        gin.tracking = &tf;
+        gin.now_us = sim_t_us;
+        gin.dt_s = 1.0f / 60.0f;
+        gin.tick_index = static_cast<uint32_t>(f);
+        AetherGraphOutputs graph_out{};
+        aether_set_thread_role(AETHER_THREAD_ROLE_T2);
+        REQUIRE(aether_host_evaluate_active(graph_host, &gin, &graph_out) == AETHER_OK);
+        aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
         engine.tick(tf, dsp, graph_out, sim_t_us, 0.0f, sim_cfg, skin);
         sim_t_us += 16667ULL;
     }
+    aether_host_destroy(graph_host);
 
     const double head_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_HEAD]);
     const double neck_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_NECK]);
@@ -361,8 +385,9 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
         head_deg, neck_deg, chest_deg, spine_deg, static_cast<double>(std::abs(l_sh_ws.y - r_sh_ws.y)), l_drop_deg,
         r_drop_deg);
 
-    CHECK(head_deg < 1.0);
-    CHECK(neck_deg < 1.0);
+    // Head/neck carry only the ~1.1 deg the user turned (HUD P+0.6 Y-0.8 R-0.4); the torso stays at rest.
+    CHECK(head_deg < 1.8);
+    CHECK(neck_deg < 1.5);
     CHECK(chest_deg < 1.0);
     CHECK(spine_deg < 1.0);
     CHECK(std::abs(l_sh_ws.y - r_sh_ws.y) < 0.015f);

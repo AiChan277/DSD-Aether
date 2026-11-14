@@ -17,6 +17,10 @@ pub struct PoseData {
     pub pos: [[f32; 4]; 55],
     /// Local rotations `xyzw`.
     pub rot: [[f32; 4]; 55],
+    /// `true` when this pose originates from the live NPU tracking frame (`NpuPose`) rather than
+    /// an additive procedural source. `OutputPose` then emits only the graph's *changes* relative to
+    /// tracking, because the C++ Visibility-First solver already consumes (and filters) tracking itself.
+    pub from_tracking: bool,
 }
 
 impl Default for PoseData {
@@ -24,6 +28,7 @@ impl Default for PoseData {
         Self {
             pos: [[0.0; 4]; 55],
             rot: [[0.0, 0.0, 0.0, 1.0]; 55],
+            from_tracking: false,
         }
     }
 }

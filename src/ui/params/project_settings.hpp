@@ -140,6 +140,10 @@ struct AppSettings {
     std::string ws_auth_token{"aether-local-dev-token"};
     std::vector<std::string> recent_projects{};
     bool telemetry_show_substats{true};
+    /// Settings-file migration revision. Files written before revision 2 may carry a `tracking.ep_mode = CPU`
+    /// that an older hardware wizard auto-selected; those are migrated back to Auto (NPU -> GPU -> CPU) once.
+    uint32_t settings_revision{kCurrentRevision};
+    static constexpr uint32_t kCurrentRevision = 2;
 
     void record_recent_project(std::string_view path);
 };
