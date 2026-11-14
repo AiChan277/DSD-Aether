@@ -1,4 +1,5 @@
 #include "animation/visibility_first.hpp"
+#include "animation/motion_filters.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,33 +15,6 @@ namespace {
     v = v + a * dt_s;
     x = x + v * dt_s;
     return x;
-}
-
-[[nodiscard]] Vec3 step_analytical_critical_spring(Vec3 x, Vec3& v, Vec3 target, float wn, float dt_s) noexcept {
-    const float safe_wn = std::max(wn, 0.01f);
-    const float dt = std::clamp(dt_s, 1.0f / 480.0f, 0.05f);
-    const float exp_term = std::exp(-safe_wn * dt);
-    const Vec3 e = x - target;
-    Vec3 c1 = v + e * safe_wn;
-    // Prevent velocity excess overshoot if time-varying natural frequency wn(t) decreased mid-flight.
-    if (e.x * c1.x < 0.0f) {
-        c1.x = 0.0f;
-    }
-    if (e.y * c1.y < 0.0f) {
-        c1.y = 0.0f;
-    }
-    if (e.z * c1.z < 0.0f) {
-        c1.z = 0.0f;
-    }
-    const Vec3 offset = e + c1 * dt;
-    Vec3 next_x = target + offset * exp_term;
-    Vec3 next_v = (c1 - offset * safe_wn) * exp_term;
-    if (length_sq(next_x - target) < 1e-11f && length_sq(next_v) < 1e-9f) {
-        next_x = target;
-        next_v = {};
-    }
-    v = next_v;
-    return next_x;
 }
 
 [[nodiscard]] Quat quat_from_two_vectors(Vec3 from, Vec3 to) noexcept {
@@ -138,7 +112,8 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     const float breath_s = std::sin(phase);
     const float breath_01 = cfg.enable_idle_breathing ? (0.5f * (breath_s + 1.0f)) : 0.0f;
     const float breath_chest_rad = cfg.enable_idle_breathing ? (cfg.chest_pitch_rad * breath_01) : 0.0f;
-    const float breath_shoulder_rad = cfg.enable_idle_breathing ? (1.2f * kDegToRad * 0.5f * (breath_s + 1.0f)) : 0.0f;
+    const float breath_shoulder_rad =
+        cfg.enable_idle_breathing ? (cfg.shoulder_breath_rad * 0.5f * (breath_s + 1.0f)) : 0.0f;
 
     const float upper_conf =
         (tracked.valid_flags == 0U || (tracked.valid_flags & 0x08U) != 0U) ? tracked.upper_body_confidence : 0.0f;
@@ -152,69 +127,50 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
 
     const Quat tracked_head_q = normalize(tracked.joint_rotations[AETHER_BONE_HEAD]);
     const Vec3 raw_target_head_rv = quat_to_rotvec(tracked_head_q) * w_face;
-    if (!has_prev_target_head_) {
-        prev_target_head_rotvec_ = raw_target_head_rv;
-        head_vel_ema_rad_s_ = {};
-        has_prev_target_head_ = true;
-    } else {
-        const Vec3 inst_vel_rad_s = (raw_target_head_rv - prev_target_head_rotvec_) * (1.0f / safe_dt);
-        const float vel_alpha = 1.0f - std::exp(-safe_dt / 0.045f);
-        head_vel_ema_rad_s_ = head_vel_ema_rad_s_ + (inst_vel_rad_s - head_vel_ema_rad_s_) * vel_alpha;
-        prev_target_head_rotvec_ = raw_target_head_rv;
-    }
 
-    // Velocity-scaled adaptive natural frequency: 6.0 rad/s (< 1.2 deg/s) -> 22.0 rad/s (> 5.0 deg/s)
-    const Vec3 cur_total_rv =
-        spine_rot_spring_.pos + chest_rot_spring_.pos + neck_rot_spring_.pos + head_rot_spring_.pos;
-    const Vec3 cur_total_vel =
-        spine_rot_spring_.vel + chest_rot_spring_.vel + neck_rot_spring_.vel + head_rot_spring_.vel;
-    const float target_speed_deg_s = length(head_vel_ema_rad_s_) * kRadToDeg;
-    const float spring_speed_deg_s = length(cur_total_vel) * kRadToDeg;
-    const float err_deg = length(raw_target_head_rv - cur_total_rv) * kRadToDeg;
-    const float speed_deg_s =
-        std::max({target_speed_deg_s, spring_speed_deg_s, (err_deg > 0.35f) ? (err_deg * 8.0f) : 0.0f});
-    const float t_vel = std::clamp((speed_deg_s - 1.2f) / (5.0f - 1.2f), 0.0f, 1.0f);
-    const float s_vel = t_vel * t_vel * (3.0f - 2.0f * t_vel);
-    const float wn_head = (w_face < 0.05f) ? 20.0f : (6.0f + (22.0f - 6.0f) * s_vel);
-    const float wn_spine = (w_face < 0.05f) ? 14.0f : (9.0f * (0.65f + 0.35f * s_vel));
-    const float wn_chest = (w_face < 0.05f) ? 16.0f : (12.0f * (0.65f + 0.35f * s_vel));
-    const float wn_neck = (w_face < 0.05f) ? 18.0f : (16.0f * (0.65f + 0.35f * s_vel));
-
-    // Step layered rotation springs: Spine 15% + Chest/UpperChest 20% + Neck 30% + Head 35% = 100%
-    const Vec3 spine_rv = step_analytical_critical_spring(spine_rot_spring_.pos, spine_rot_spring_.vel,
-                                                          raw_target_head_rv * 0.15f, wn_spine, safe_dt);
+    // Warudo per-channel SmoothDamp (exact analytic critically-damped, dt-invariant) with staggered smooth times so
+    // the body follows the head organically: Spine 15% @ 185 ms, Chest/UpperChest 20% @ 145 ms, Neck 30% @ 105 ms,
+    // Head 35% @ 75 ms (= 100% of the tracked head angle). Stillness is handled upstream by the Trickster deadzone.
+    const SmoothTimes smooth{};
+    const Vec3 spine_rv = smooth_damp(spine_rot_spring_.pos, raw_target_head_rv * 0.15f, spine_rot_spring_.vel,
+                                      smooth.spine, safe_dt);
     spine_rot_spring_.pos = spine_rv;
-    const Vec3 chest_rv = step_analytical_critical_spring(chest_rot_spring_.pos, chest_rot_spring_.vel,
-                                                          raw_target_head_rv * 0.20f, wn_chest, safe_dt);
+    const Vec3 chest_rv = smooth_damp(chest_rot_spring_.pos, raw_target_head_rv * 0.20f, chest_rot_spring_.vel,
+                                      smooth.chest, safe_dt);
     chest_rot_spring_.pos = chest_rv;
-    const Vec3 neck_rv = step_analytical_critical_spring(neck_rot_spring_.pos, neck_rot_spring_.vel,
-                                                         raw_target_head_rv * 0.30f, wn_neck, safe_dt);
+    const Vec3 neck_rv =
+        smooth_damp(neck_rot_spring_.pos, raw_target_head_rv * 0.30f, neck_rot_spring_.vel, smooth.neck, safe_dt);
     neck_rot_spring_.pos = neck_rv;
-    const Vec3 head_rv = step_analytical_critical_spring(head_rot_spring_.pos, head_rot_spring_.vel,
-                                                         raw_target_head_rv * 0.35f, wn_head, safe_dt);
+    const Vec3 head_rv =
+        smooth_damp(head_rot_spring_.pos, raw_target_head_rv * 0.35f, head_rot_spring_.vel, smooth.head, safe_dt);
     head_rot_spring_.pos = head_rv;
 
-    // Step lateral/depth head lean springs: Spine (35% @ 9 rad/s) & Chest (40% @ 12 rad/s)
+    // Head translation (camera space, metres relative to the calibrated neutral) -> pendulum lean of the torso.
     const Vec3 head_ws_sample = tracked.joint_positions_ws[AETHER_BONE_HEAD];
     const float head_dy = (head_ws_sample.y > 0.5f) ? (head_ws_sample.y - 1.50f) : head_ws_sample.y;
     const Vec3 target_lean =
         Vec3{std::clamp(head_ws_sample.x, -0.18f, 0.18f), std::clamp(head_dy, -0.08f, 0.08f),
              std::clamp(head_ws_sample.z, -0.14f, 0.14f)} *
         w_face;
-    const Vec3 hips_lean = step_analytical_critical_spring(hips_lean_spring_.pos, hips_lean_spring_.vel,
-                                                           target_lean * 0.35f, wn_spine, safe_dt);
+    const Vec3 hips_lean = smooth_damp(hips_lean_spring_.pos, target_lean, hips_lean_spring_.vel, smooth.spine, safe_dt);
     hips_lean_spring_.pos = hips_lean;
-    const Vec3 chest_lean = step_analytical_critical_spring(chest_lean_spring_.pos, chest_lean_spring_.vel,
-                                                            target_lean * 0.40f, wn_chest, safe_dt);
+    const Vec3 chest_lean =
+        smooth_damp(chest_lean_spring_.pos, target_lean, chest_lean_spring_.vel, smooth.chest, safe_dt);
     chest_lean_spring_.pos = chest_lean;
+    // Normalised lateral offset `dx` (1.0 ~= one face width = 15 cm) drives the Warudo roll-lean cascade.
+    const float dx_spine = std::clamp(hips_lean.x / 0.15f, -1.5f, 1.5f);
+    const float dx_chest = std::clamp(chest_lean.x / 0.15f, -1.5f, 1.5f);
+    const float spine_roll_lean = -dx_spine * 12.0f * kDegToRad;
+    const float chest_roll_lean = -dx_chest * 15.0f * kDegToRad;
+    const float neck_roll_lean = -dx_chest * 8.0f * kDegToRad;
 
     const Vec3 tracked_hips = tracked.joint_positions_ws[AETHER_BONE_HIPS];
     Vec3 hips_pos = lerp(rest_hips_pos_, tracked_hips, w_upper);
     if (tracked.lower_body_confidence < 0.50f) {
         hips_pos.y = rest_hips_pos_.y;
     }
-    hips_pos.x += hips_lean.x;
-    hips_pos.z += hips_lean.z * 0.35f;
+    hips_pos.x += hips_lean.x * 0.35f;
+    hips_pos.z += hips_lean.z * 0.35f * 0.35f;
     out.hips_pos_ws = hips_pos;
     out.lower_body_track_weight = (tracked.lower_body_confidence >= 0.50f) ? tracked.lower_body_confidence : 0.0f;
 
@@ -324,20 +280,21 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
         out.joint_blend_weights[b] = prev_weights_[b];
     }
 
-    // Layered kinematic chain deltas in character world frame: Spine 15% + Chest/UpperChest 20% + Neck 30% + Head 35%
-    const Vec3 spine_lean_tilt{chest_lean.z * 0.15f, 0.0f, -hips_lean.x * 0.40f};
-    const Quat spine_delta = rotvec_to_quat(spine_rv + spine_lean_tilt);
+    // Layered kinematic chain deltas in character world frame (rest-relative via world_delta_to_local_pose):
+    // rotation share + Warudo roll lean (-dx * 12/15/8 deg) + forward lean from head depth + additive breathing.
+    const Quat spine_delta = rotvec_to_quat(spine_rv + Vec3{hips_lean.z * 0.06f, 0.0f, spine_roll_lean});
     out.local_rotations[AETHER_BONE_SPINE] = rest_metrics_.world_delta_to_local_pose(AETHER_BONE_SPINE, spine_delta);
 
-    const Vec3 chest_lean_tilt{chest_lean.z * 0.25f + breath_chest_rad * 0.60f, 0.0f, -chest_lean.x * 0.50f};
-    const Quat chest_delta = rotvec_to_quat(chest_rv * 0.50f + chest_lean_tilt);
+    const Quat chest_delta =
+        rotvec_to_quat(chest_rv * 0.50f + Vec3{chest_lean.z * 0.10f + breath_chest_rad * 0.60f, 0.0f, chest_roll_lean});
     const Quat upper_chest_delta = rotvec_to_quat(chest_rv * 0.50f + Vec3{breath_chest_rad * 0.40f, 0.0f, 0.0f});
     out.local_rotations[AETHER_BONE_CHEST] = rest_metrics_.world_delta_to_local_pose(AETHER_BONE_CHEST, chest_delta);
     out.local_rotations[AETHER_BONE_UPPER_CHEST] =
         rest_metrics_.world_delta_to_local_pose(AETHER_BONE_UPPER_CHEST, upper_chest_delta);
 
-    // Shoulder subtle counter-roll (-10%) + gentle breathing rise/fall
-    const float shoulder_counter_roll = -0.10f * (spine_rv.z + chest_rv.z);
+    // Shoulder subtle counter-roll (-12% of torso roll) + gentle breathing lift (0.8 deg at 0.22 Hz)
+    const float shoulder_counter_roll =
+        -0.12f * (spine_rv.z + chest_rv.z + spine_roll_lean + chest_roll_lean);
     const Quat l_shoulder_delta =
         from_euler_xyz(0.0f, 0.0f, l_clavicle_lag_ + breath_shoulder_rad + shoulder_counter_roll);
     const Quat r_shoulder_delta =
@@ -374,10 +331,12 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
 
     // Neck & Head follow critically-damped face Procrustes pose cleanly when face valid
     out.joint_blend_weights[AETHER_BONE_HEAD] = w_face;
-    out.local_rotations[AETHER_BONE_NECK] =
-        rest_metrics_.world_delta_to_local_pose(AETHER_BONE_NECK, rotvec_to_quat(neck_rv));
-    out.local_rotations[AETHER_BONE_HEAD] =
-        rest_metrics_.world_delta_to_local_pose(AETHER_BONE_HEAD, rotvec_to_quat(head_rv));
+    out.local_rotations[AETHER_BONE_NECK] = rest_metrics_.world_delta_to_local_pose(
+        AETHER_BONE_NECK, rotvec_to_quat(neck_rv + Vec3{0.0f, 0.0f, neck_roll_lean}));
+    // Head counter-stabilisation: cancel the torso/neck lean roll so the head keeps exactly the tracked orientation.
+    const float lean_roll_sum = spine_roll_lean + chest_roll_lean + neck_roll_lean;
+    out.local_rotations[AETHER_BONE_HEAD] = rest_metrics_.world_delta_to_local_pose(
+        AETHER_BONE_HEAD, rotvec_to_quat(head_rv + Vec3{0.0f, 0.0f, -lean_roll_sum}));
 
     // Eye saccade rotations relative to eye rest orientation
     const Quat l_eye_delta = slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_LEFT_EYE]), w_face);

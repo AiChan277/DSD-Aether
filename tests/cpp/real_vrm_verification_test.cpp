@@ -396,6 +396,34 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     CHECK(r_drop_deg >= 30.0);
     CHECK(r_drop_deg <= 46.0);
 
+    // Facing proof from actual skinned joint positions (not assumed axes): the avatar's left is +X for a +Z-facing
+    // VRM, so forward = cross(left, up). The front Studio camera sits on +Z looking down -Z.
+    {
+        using aether::animation::Vec3;
+        const auto skinned = [&](uint32_t b) { return transform_point_3x4(skin.bone_matrices[b], rest_ws[b]); };
+        const Vec3 world_up{0.0f, 1.0f, 0.0f};
+        const Vec3 cam_fwd{0.0f, 0.0f, -1.0f};
+        const float* hm = skin.bone_matrices[AETHER_BONE_HEAD];
+        const Vec3 head_up = aether::animation::normalize_safe(Vec3{hm[1], hm[5], hm[9]});
+        const Vec3 eye_left = aether::animation::normalize_safe(skinned(AETHER_BONE_LEFT_EYE) -
+                                                                skinned(AETHER_BONE_RIGHT_EYE));
+        const Vec3 head_fwd = aether::animation::normalize_safe(aether::animation::cross(eye_left, head_up));
+        const Vec3 chest_left = aether::animation::normalize_safe(skinned(AETHER_BONE_LEFT_UPPER_ARM) -
+                                                                  skinned(AETHER_BONE_RIGHT_UPPER_ARM));
+        const float* cm = skin.bone_matrices[AETHER_BONE_CHEST];
+        const Vec3 chest_up = aether::animation::normalize_safe(Vec3{cm[1], cm[5], cm[9]});
+        const Vec3 chest_fwd = aether::animation::normalize_safe(aether::animation::cross(chest_left, chest_up));
+        const float head_dot_cam = aether::animation::dot(head_fwd, cam_fwd);
+        const float chest_dot_cam = aether::animation::dot(chest_fwd, cam_fwd);
+        const float head_up_dot = aether::animation::dot(head_up, world_up);
+        std::printf("[FACING] dot(head_fwd,cam_fwd)=%.4f dot(chest_fwd,cam_fwd)=%.4f dot(head_up,world_up)=%.4f\n",
+                    static_cast<double>(head_dot_cam), static_cast<double>(chest_dot_cam),
+                    static_cast<double>(head_up_dot));
+        CHECK(head_dot_cam < -0.98f);
+        CHECK(chest_dot_cam < -0.98f);
+        CHECK(head_up_dot > 0.98f);
+    }
+
     avatar->update_pose(0, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
     avatar->update_pose(1, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
 
@@ -695,6 +723,120 @@ TEST_CASE("120-frame idle steady state on 8590256991748008892.vrm (330 Hz SimEng
     CHECK(max_sim_tip_vel < 1e-5);
     CHECK(max_333hz_tip_vel < 1e-5);
     CHECK(max_vrm_tip_vel < 1e-5);
+
+    avatar.reset();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("8590256991748008892.vrm: zero stationary jitter and smooth Spine->Chest->Neck->Head cascade",
+          "[vrm][motion][cascade]") {
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    REQUIRE(dev_res.has_value());
+    aether::rhi::RhiDevice* rhi = dev_res.value();
+    aether::renderer::AssetJob job;
+    aether::HighResTimer timer;
+    job.start_load(*rhi, vrm_path.string());
+    const uint64_t deadline_us = aether::now_us() + 30000000ULL;
+    while (job.state() == aether::renderer::AssetJobState::Loading && aether::now_us() < deadline_us) {
+        timer.sleep_us(500);
+    }
+    REQUIRE(job.state() == aether::renderer::AssetJobState::ReadyForGpu);
+    auto avatar_res = job.finalize_gpu_upload(*rhi);
+    REQUIRE(avatar_res.has_value());
+    auto avatar = std::move(avatar_res.value());
+    const aether::animation::RestSkeletonMetrics rm = build_vrm_rest_metrics(*avatar);
+
+    using namespace aether::animation;
+    SimEngine engine;
+    engine.reset(rm);
+    SimEngineConfig sim_cfg{};
+    sim_cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs graph_out{};
+    SkinningFrame skin{};
+
+    const auto make_frame = [&](int f, float yaw_rad) {
+        AetherTrackingFrame tf{};
+        tf.frame_sequence = static_cast<uint32_t>((f / 2) + 1); // 30 Hz camera -> 60 Hz sim
+        tf.capture_timestamp_us = static_cast<uint64_t>((f / 2) * 2 + 1) * 16667ULL;
+        tf.inference_complete_us = tf.capture_timestamp_us;
+        tf.valid_flags = 0x01U;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            tf.joint_rotations_quat[b][3] = 1.0f;
+        }
+        const Quat q = from_axis_angle({0.0f, 1.0f, 0.0f}, yaw_rad);
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = q.y;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = q.w;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+        return tf;
+    };
+
+    // 1. 120 stationary frames at neutral: the last 60 skinning matrices must be bit-identical (0.0000 jitter).
+    std::array<float, AETHER_HUMANOID_BONE_COUNT * 12U> ref{};
+    double max_jitter = 0.0;
+    for (int f = 0; f < 120; ++f) {
+        const AetherTrackingFrame tf = make_frame(f, 0.0f);
+        engine.tick(tf, dsp, graph_out, static_cast<uint64_t>(f + 1) * 16667ULL, 0.0f, sim_cfg, skin);
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            for (size_t k = 0; k < 12U; ++k) {
+                if (f > 60) {
+                    max_jitter = std::max(max_jitter, std::abs(static_cast<double>(skin.bone_matrices[b][k]) -
+                                                               static_cast<double>(ref[b * 12U + k])));
+                }
+                ref[b * 12U + k] = skin.bone_matrices[b][k];
+            }
+        }
+    }
+    std::printf("[CASCADE] stationary max bone-matrix delta over 60 frames = %.7f\n", max_jitter);
+    CHECK(max_jitter == 0.0);
+
+    // 2. Sine head turn (+-20 deg @ 0.5 Hz): world yaw must cascade Spine < Chest < Neck < Head with no spikes.
+    const auto world_yaw_deg = [&](uint32_t b) {
+        const Quat d = normalize(engine.bone_rot_ws()[b] * conjugate(rm.rest_world_rotations[b]));
+        const Vec3 fwd = rotate_vec(d, {0.0f, 0.0f, 1.0f});
+        return std::atan2(fwd.x, fwd.z) * kRadToDeg;
+    };
+    constexpr std::array<uint32_t, 4> kChain = {AETHER_BONE_SPINE, AETHER_BONE_CHEST, AETHER_BONE_NECK,
+                                                AETHER_BONE_HEAD};
+    std::array<float, 4> peak{};
+    std::array<float, 3> hist{};
+    float max_jerk = 0.0f;
+    for (int f = 0; f < 180; ++f) {
+        const float t = static_cast<float>(f) / 60.0f;
+        const AetherTrackingFrame tf = make_frame(120 + f, 20.0f * kDegToRad * std::sin(kTwoPi * 0.5f * t));
+        engine.tick(tf, dsp, graph_out, static_cast<uint64_t>(121 + f) * 16667ULL, 0.0f, sim_cfg, skin);
+        for (size_t i = 0; i < kChain.size(); ++i) {
+            peak[i] = std::max(peak[i], std::abs(world_yaw_deg(kChain[i])));
+        }
+        const float hy = world_yaw_deg(AETHER_BONE_HEAD);
+        if (f >= 2) {
+            max_jerk = std::max(max_jerk, std::abs(hy - 2.0f * hist[1] + hist[0]));
+        }
+        hist[0] = hist[1];
+        hist[1] = hy;
+    }
+    std::printf("[CASCADE] peak world yaw: spine=%.2f chest=%.2f neck=%.2f head=%.2f deg, max head 2nd-diff=%.3f deg\n",
+                static_cast<double>(peak[0]), static_cast<double>(peak[1]), static_cast<double>(peak[2]),
+                static_cast<double>(peak[3]), static_cast<double>(max_jerk));
+    CHECK(peak[0] > 1.0f);
+    CHECK(peak[1] > peak[0]);
+    CHECK(peak[2] > peak[1]);
+    CHECK(peak[3] > peak[2]);
+    CHECK(peak[3] > 15.0f);
+    CHECK(peak[3] < 20.5f);    // critically damped: no overshoot beyond the tracked 20 deg
+    CHECK(max_jerk < 0.35f);   // C2-smooth: no per-frame acceleration spikes from the 30 Hz camera steps
 
     avatar.reset();
     rhi->destroy();

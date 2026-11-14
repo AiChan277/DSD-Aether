@@ -66,6 +66,9 @@ add_test(NAME input_t0_t3_test COMMAND input_t0_t3_test)
 aether_add_cpp_test(animation_filters_ik_test cpp/animation_filters_ik_test.cpp)
 target_link_libraries(animation_filters_ik_test PRIVATE aether_animation)
 
+aether_add_cpp_test(vmc_protocol_test cpp/vmc_protocol_test.cpp)
+target_link_libraries(vmc_protocol_test PRIVATE aether_output aether_animation)
+
 aether_add_cpp_test(spring_bone_simd_test cpp/spring_bone_simd_test.cpp)
 target_link_libraries(spring_bone_simd_test PRIVATE aether_animation)
 

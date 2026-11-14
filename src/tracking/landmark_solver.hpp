@@ -52,6 +52,24 @@ struct TrackingOverlaySnapshot {
                                              uint32_t cam_w, uint32_t cam_h,
                                              const HeadPose6D* warm_start = nullptr) noexcept;
 
+/** 2D image point in camera pixels (`y` down). */
+struct FacePlanePoint2D {
+    float x{0.0f};
+    float y{0.0f};
+};
+
+/**
+ * Kalidokit `calcHead`-style facial-plane head angles (degrees, camera convention: +yaw = nose toward image right,
+ * +pitch = nose down, +roll = counter-clockwise in a y-up view) from five camera-pixel landmarks:
+ * eye outer corners (MediaPipe 33 = image-left, 263 = image-right), nose bridge (168), nose tip (4), chin (152).
+ * `neutral_pitch_ratio` is the calibrated `(nose_tip.y - eye_mid.y) / (chin.y - eye_mid.y)` at rest.
+ * Used as the fallback whenever the rigid solvePnP fit has no solution.
+ */
+[[nodiscard]] HeadEulerDeg kalido_calc_head_plane(FacePlanePoint2D eye_img_left, FacePlanePoint2D eye_img_right,
+                                                  FacePlanePoint2D nose_bridge, FacePlanePoint2D nose_tip,
+                                                  FacePlanePoint2D chin, float neutral_pitch_ratio,
+                                                  float& out_pitch_ratio) noexcept;
+
 /**
  * Decodes M0 BlazeFace SSD outputs (`regressors [896x16]`, `classificators [896x1]`) and returns
  * best normalized face ROI rectangle (`valid == false` if max confidence < `min_score`).
@@ -118,8 +136,7 @@ class LandmarkPoseSolver {
     float neutral_ear_r_{0.28f};
     float neutral_mar_open_{0.04f};
     float neutral_mouth_width_ratio_{0.52f};
-    bool blink_closed_l_{false};
-    bool blink_closed_r_{false};
+    float neutral_plane_pitch_ratio_{0.42f};
 
     HeadPose6D last_pnp_pose_{};
     float prev_raw_head_quat_[4]{0.0f, 0.0f, 0.0f, 1.0f};

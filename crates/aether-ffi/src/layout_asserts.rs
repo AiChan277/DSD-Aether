@@ -58,7 +58,8 @@ const _: () = assert!(offset_of!(AetherTrackingFrame, joint_positions_ws) == 244
 const _: () = assert!(offset_of!(AetherTrackingFrame, joint_rotations_quat) == 1124);
 const _: () = assert!(offset_of!(AetherTrackingFrame, frame_sequence) == 2004);
 const _: () = assert!(offset_of!(AetherTrackingFrame, valid_flags) == 2008);
-const _: () = assert!(offset_of!(AetherTrackingFrame, _reserved) == 2012);
+const _: () = assert!(offset_of!(AetherTrackingFrame, webcam_visemes) == 2012);
+const _: () = assert!(offset_of!(AetherTrackingFrame, _reserved) == 2032);
 
 const _: () = assert!(size_of::<AetherDspSyncPacket>() == 128);
 const _: () = assert!(align_of::<AetherDspSyncPacket>() == 64);

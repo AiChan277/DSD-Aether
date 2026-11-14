@@ -993,9 +993,13 @@ typedef struct AETHER_ALIGNED(64) AetherTrackingFrame {
      */
     uint32_t valid_flags;
     /*
+     Webcam mouth vowels `A, I, U, E, O` in `[0, 1]` from the landmark mouth-shape solver (blended with DSP visemes).
+     */
+    float webcam_visemes[5];
+    /*
      Explicit trailing reserved bytes to reach 2048 B.
      */
-    uint8_t _reserved[36];
+    uint8_t _reserved[16];
 } AetherTrackingFrame;
 
 /*

@@ -62,6 +62,7 @@ SimEngine::SimEngine() noexcept {
 }
 
 void SimEngine::reset(const RestSkeletonMetrics& rest) noexcept {
+    trickster_.reset();
     one_euro_.reset();
     kalman_.reset();
     ik_solver_.set_rest_metrics(rest);
@@ -151,7 +152,10 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
         (!has_tracking_frame_ || raw_tracking.frame_sequence != last_seen_frame_seq_)) {
         last_seen_frame_seq_ = raw_tracking.frame_sequence;
         has_tracking_frame_ = true;
-        one_euro_.update(raw_tracking, filtered_state_);
+        // Trickster stage A/B (3-frame median spike rejection + smooth centre deadzone) before 1-Euro/Kalman.
+        stabilized_frame_ = raw_tracking;
+        trickster_.apply(stabilized_frame_);
+        one_euro_.update(stabilized_frame_, filtered_state_);
         kalman_.correct(filtered_state_, cfg.kalman);
     } else if (has_tracking_frame_) {
         kalman_.tick_low_conf_damping(filtered_state_, cfg.kalman);
@@ -223,7 +227,7 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
 
     // 7. Blendshapes + 60 ms DSP mouth-ownership transition
     expr_mixer_.update(predicted_state_.blendshapes.data(), dsp, graph_out, dt_s, out_skinning.morph_weights,
-                       out_skinning.mouth_owner_blend);
+                       out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data());
 
     // 8. Fill head anchor vectors (render face shadow/SDF light basis) & DevShell HUD telemetry view
     const Vec3 head_fwd = rotate_vec(bone_rot_ws_[AETHER_BONE_HEAD], {0.0f, 0.0f, 1.0f});
@@ -266,6 +270,36 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
 
     out_skinning.stamps.frame_sequence = raw_tracking.frame_sequence;
     out_skinning.stamps.t1_capture_us = raw_tracking.capture_timestamp_us;
+}
+
+void SimEngine::export_vmc_pose(const SkinningFrame& skin, float time_s, VmcPoseFrame& out) const noexcept {
+    const auto& rm = ik_solver_.rest_metrics();
+    std::array<Quat, AETHER_HUMANOID_BONE_COUNT> delta{};
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const Quat rw = rm.rest_world_rotations[b];
+        const float rw2 = rw.w * rw.w + rw.x * rw.x + rw.y * rw.y + rw.z * rw.z;
+        const Quat rest_world = (rw2 > 1e-6f) ? normalize(rw) : Quat::identity();
+        delta[b] = normalize(bone_rot_ws_[b] * conjugate(rest_world));
+    }
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const bool has_parent = (b != AETHER_BONE_HIPS) && p >= 0 && p < static_cast<int32_t>(b);
+        Quat q = has_parent ? normalize(conjugate(delta[static_cast<size_t>(p)]) * delta[b]) : delta[b];
+        if (q.w < 0.0f) {
+            q = Quat{-q.x, -q.y, -q.z, -q.w};
+        }
+        const Vec3 lp = has_parent ? rm.rest_local_positions[b] : bone_pos_ws_[AETHER_BONE_HIPS];
+        // glTF right-handed -> Unity left-handed (mirror X): p = (-x, y, z), q = (x, -y, -z, w)
+        out.local_pos[b] = {-lp.x, lp.y, lp.z};
+        out.local_rot[b] = {q.x, -q.y, -q.z, q.w};
+    }
+    for (size_t v = 0; v < out.visemes.size(); ++v) {
+        out.visemes[v] = skin.morph_weights[kVisemeSlotOffset + v];
+    }
+    out.blink_l = skin.morph_weights[0];
+    out.blink_r = skin.morph_weights[7];
+    out.time_s = time_s;
+    out.valid = true;
 }
 
 void SimEngine::export_spring_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,

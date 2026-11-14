@@ -205,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             joint_rotations_quat,
             frame_sequence,
             valid_flags,
+            webcam_visemes,
             _reserved
         ]
     );

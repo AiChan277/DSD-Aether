@@ -123,6 +123,7 @@ bool PipelineSkeleton::start(const HardwareInventory& hw, const PipelineConfig& 
     t3_dsp_stale_count_ = 0;
     pending_output_slots_.store(0u, std::memory_order_release);
     (void)output_cfg_mailbox_.store(cfg_.output_cfg);
+    vmc_enabled_.store(cfg_.output_cfg.osc_enabled, std::memory_order_release);
     output_status_buffer_.publish(output::OutputRuntimeStatus{});
 
     TrackingHudSnapshot init_hud{};
@@ -224,6 +225,7 @@ void PipelineSkeleton::submit_output_slot(const aether::output::OutputRingSlot& 
 
 void PipelineSkeleton::update_output_config(const aether::output::OutputConfig& cfg) noexcept {
     (void)output_cfg_mailbox_.store(cfg);
+    vmc_enabled_.store(cfg.osc_enabled, std::memory_order_release);
 #if defined(_WIN32)
     if (output_ready_event_ != nullptr) {
         ::SetEvent(static_cast<HANDLE>(output_ready_event_));
@@ -584,8 +586,13 @@ void PipelineSkeleton::t2_entry() {
             }
 
             SkinningSnapshot& snap = skinning_buffer_.staging();
+            vmc_frame_.valid = false;
             if (sim_engine_) {
                 sim_engine_->tick(latest_pose, dsp_pkt, graph_out, t2_start, -1.0f, sim_cfg, snap.frame);
+                if ((sim_tick % 4U) == 0U && vmc_enabled_.load(std::memory_order_acquire)) {
+                    sim_engine_->export_vmc_pose(snap.frame, static_cast<float>(static_cast<double>(t2_start) * 1e-6),
+                                                 vmc_frame_);
+                }
                 sim_engine_->export_spring_overlay(
                     snap.spring_colliders.data(), static_cast<uint32_t>(snap.spring_colliders.size()),
                     snap.spring_collider_count, snap.spring_segments.data(),
@@ -610,7 +617,18 @@ void PipelineSkeleton::t2_entry() {
             skinning_buffer_.publish();
             t2_ticks_.store(++sim_tick, std::memory_order_release);
         }
+
+        // VMC send happens outside the hot-path scope (socket setup allocates; sendto is a syscall).
+        if (vmc_frame_.valid) {
+            if (!vmc_sender_.is_open() && !vmc_init_failed_) {
+                vmc_init_failed_ = !vmc_sender_.init(cfg_.output_cfg.osc_host, output::kVmcDefaultPort).has_value();
+            }
+            (void)vmc_sender_.send_frame(vmc_frame_);
+        } else if (!vmc_enabled_.load(std::memory_order_relaxed) && vmc_sender_.is_open()) {
+            vmc_sender_.shutdown();
+        }
     }
+    vmc_sender_.shutdown();
     aether_set_thread_role(AETHER_THREAD_ROLE_ANY);
 }
 

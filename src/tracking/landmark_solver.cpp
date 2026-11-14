@@ -1,5 +1,6 @@
 #include "tracking/landmark_solver.hpp"
 #include "animation/math_quat.hpp"
+#include "animation/motion_filters.hpp"
 #include "tracking/canonical_face_model.hpp"
 
 #include <algorithm>
@@ -376,6 +377,47 @@ void map_m2_crop_to_cam_px(float u_m2, float v_m2, const RoiRectNorm& face_roi, 
 
 } // namespace
 
+HeadEulerDeg kalido_calc_head_plane(FacePlanePoint2D eye_img_left, FacePlanePoint2D eye_img_right,
+                                    FacePlanePoint2D nose_bridge, FacePlanePoint2D nose_tip, FacePlanePoint2D chin,
+                                    float neutral_pitch_ratio, float& out_pitch_ratio) noexcept {
+    HeadEulerDeg out{};
+    const float ex = eye_img_right.x - eye_img_left.x;
+    const float ey = eye_img_right.y - eye_img_left.y;
+    const float span = std::sqrt(ex * ex + ey * ey);
+    out_pitch_ratio = neutral_pitch_ratio;
+    if (!std::isfinite(span) || span < 2.0f) {
+        return out;
+    }
+    // Roll: image-plane angle of the eye line (image y points down, so negate for the y-up camera convention).
+    out.roll = -std::atan2(ey, ex);
+
+    // Work in the eye-aligned frame so roll does not leak into yaw/pitch: u along the eye line, n = image "down".
+    const float ux = ex / span;
+    const float uy = ey / span;
+    const float nx = -uy;
+    const float ny = ux;
+    const float mid_x = 0.5f * (eye_img_left.x + eye_img_right.x);
+    const float mid_y = 0.5f * (eye_img_left.y + eye_img_right.y);
+
+    // Yaw: nose-tip asymmetry about the eye midpoint (nose protrudes ~1.1 half-spans -> ratio ~= 1.1 sin(yaw)).
+    const float nose_u = ((nose_tip.x - mid_x) * ux + (nose_tip.y - mid_y) * uy) / (0.5f * span);
+    out.yaw = std::clamp(std::asin(std::clamp(nose_u / 1.1f, -1.0f, 1.0f)), -45.0f * animation::kDegToRad,
+                         45.0f * animation::kDegToRad);
+
+    // Pitch: nose-tip drop between bridge and chin, relative to the calibrated neutral ratio.
+    const float tip_n = (nose_tip.x - nose_bridge.x) * nx + (nose_tip.y - nose_bridge.y) * ny;
+    const float chin_n = (chin.x - nose_bridge.x) * nx + (chin.y - nose_bridge.y) * ny;
+    if (chin_n > 1.0f) {
+        out_pitch_ratio = tip_n / chin_n;
+        out.pitch = std::clamp((out_pitch_ratio - neutral_pitch_ratio) / 0.25f, -1.0f, 1.0f) * 35.0f *
+                    animation::kDegToRad;
+    }
+    out.pitch *= animation::kRadToDeg;
+    out.yaw *= animation::kRadToDeg;
+    out.roll *= animation::kRadToDeg;
+    return out;
+}
+
 HeadPose6D solve_pnp_head_pose(const float* landmarks_478x3, const RoiRectNorm& face_roi, uint32_t cam_w,
                                uint32_t cam_h, const HeadPose6D* warm_start) noexcept {
     HeadPose6D out{};
@@ -689,8 +731,7 @@ void LandmarkPoseSolver::reset() noexcept {
     neutral_ear_r_ = 0.28f;
     neutral_mar_open_ = 0.04f;
     neutral_mouth_width_ratio_ = 0.52f;
-    blink_closed_l_ = false;
-    blink_closed_r_ = false;
+    neutral_plane_pitch_ratio_ = 0.42f;
     last_pnp_pose_ = HeadPose6D{};
     prev_raw_head_quat_[0] = 0.0f;
     prev_raw_head_quat_[1] = 0.0f;
@@ -844,10 +885,30 @@ void LandmarkPoseSolver::populate_tracking_frame(
 
         HeadPose6D hp =
             solve_pnp_head_pose(m2_landmarks_478x3, face_roi, cam_w, cam_h, last_pnp_pose_.valid ? &last_pnp_pose_ : nullptr);
+        // Kalidokit facial-plane solve (always computed: provides the calibrated pitch ratio and the fallback).
+        const auto cam_pt = [&](uint32_t idx) noexcept -> FacePlanePoint2D {
+            FacePlanePoint2D p{};
+            map_m2_crop_to_cam_px(m2_landmarks_478x3[idx * 3U + 0U], m2_landmarks_478x3[idx * 3U + 1U], face_roi,
+                                  cam_w, cam_h, p.x, p.y);
+            return p;
+        };
+        float plane_pitch_ratio = neutral_plane_pitch_ratio_;
+        const HeadEulerDeg plane = kalido_calc_head_plane(cam_pt(33U), cam_pt(263U), cam_pt(168U), cam_pt(4U),
+                                                          cam_pt(152U), neutral_plane_pitch_ratio_, plane_pitch_ratio);
         if (hp.valid) {
             last_pnp_pose_ = hp;
         } else if (last_pnp_pose_.valid) {
             hp = last_pnp_pose_;
+        } else {
+            // No rigid fit yet: drive the head from the 2D facial plane so tracking never freezes at identity.
+            const Quat qp = euler_yxz_to_quat(plane.pitch * animation::kDegToRad, plane.yaw * animation::kDegToRad,
+                                              plane.roll * animation::kDegToRad);
+            hp.rotation_xyzw[0] = qp.x;
+            hp.rotation_xyzw[1] = qp.y;
+            hp.rotation_xyzw[2] = qp.z;
+            hp.rotation_xyzw[3] = qp.w;
+            hp.position_m[2] = -0.55f;
+            hp.valid = true;
         }
 
         const Quat q_raw = hp.valid
@@ -902,6 +963,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
             neutral_ear_r_ = std::clamp(ear_r, 0.18f, 0.42f);
             neutral_mar_open_ = std::clamp(mar_open, 0.0f, 0.18f);
             neutral_mouth_width_ratio_ = std::clamp(mouth_width_ratio, 0.35f, 0.72f);
+            neutral_plane_pitch_ratio_ = std::clamp(plane_pitch_ratio, 0.15f, 0.75f);
             neutral_calibrated_ = true;
             calibrate_next_ = false;
             last_emitted_head_quat_[0] = 0.0f;
@@ -978,8 +1040,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
             const float pitch = std::clamp((m2_landmarks_478x3[iris * 3 + 1] - cy) / eh, -0.5f, 0.5f) * 0.35f;
             return animation::from_euler_xyz(pitch, yaw, 0.0f);
         };
-        const Quat ql_eye = compute_eye_quat(468, 33, 133, 159, 145);
-        const Quat qr_eye = compute_eye_quat(473, 263, 362, 386, 374);
+        // MediaPipe 33/133/468 = subject's RIGHT eye (image-left), 263/362/473 = subject's LEFT eye (image-right).
+        // Head yaw/roll reproduce the raw camera view, so each subject eye drives the same-named avatar eye.
+        const Quat qr_eye = compute_eye_quat(468, 33, 133, 159, 145);
+        const Quat ql_eye = compute_eye_quat(473, 263, 362, 386, 374);
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][0] = ql_eye.x;
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][1] = ql_eye.y;
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][2] = ql_eye.z;
@@ -1010,8 +1074,9 @@ void LandmarkPoseSolver::populate_tracking_frame(
             const float gy = std::clamp((m2_landmarks_478x3[iris * 3 + 1] - cy) / (0.28f * eh), -1.0f, 1.0f);
             const float g_down = std::max(0.0f, gy);
             const float g_up = std::max(0.0f, -gy);
-            const float g_in = is_left_screen ? std::max(0.0f, -gx) : std::max(0.0f, gx);
-            const float g_out = is_left_screen ? std::max(0.0f, gx) : std::max(0.0f, -gx);
+            // "In" = toward the nose: +x (image right) for the image-left eye, -x for the image-right eye.
+            const float g_in = is_left_screen ? std::max(0.0f, gx) : std::max(0.0f, -gx);
+            const float g_out = is_left_screen ? std::max(0.0f, -gx) : std::max(0.0f, gx);
             out_frame.arkit_blendshapes[bs_base + 0] =
                 std::clamp(0.70f * g_down + 0.30f * out_frame.arkit_blendshapes[bs_base + 0], 0.0f, 1.0f);
             out_frame.arkit_blendshapes[bs_base + 1] =
@@ -1021,33 +1086,30 @@ void LandmarkPoseSolver::populate_tracking_frame(
             out_frame.arkit_blendshapes[bs_base + 3] =
                 std::clamp(0.70f * g_up + 0.30f * out_frame.arkit_blendshapes[bs_base + 3], 0.0f, 1.0f);
         };
-        blend_eye_gaze_bs(468, 33, 133, 159, 145, 1U, true);
-        blend_eye_gaze_bs(473, 263, 362, 386, 374, 8U, false);
+        // Appendix B: 1..4 = eyeLook{Down,In,Out,Up}Left (subject's left eye), 8..11 = ...Right.
+        blend_eye_gaze_bs(468, 33, 133, 159, 145, 8U, true);   // subject's right eye (image-left)
+        blend_eye_gaze_bs(473, 263, 362, 386, 374, 1U, false); // subject's left eye (image-right)
 
-        // Hysteresis EAR blink & Live2D MAR overrides (prevents eyelid flicker & rest mouth drift)
-        auto eval_hyst_blink = [](float ear, float neutral_ear, bool& closed_state) noexcept -> float {
-            const float close_t = neutral_ear * 0.65f;
-            const float open_t = neutral_ear * 0.78f;
-            if (closed_state) {
-                if (ear >= open_t) {
-                    closed_state = false;
-                }
-            } else {
-                if (ear <= close_t) {
-                    closed_state = true;
-                }
-            }
-            const float raw_blink =
-                std::clamp((neutral_ear * 0.88f - ear) / std::max(neutral_ear * 0.30f, 0.04f), 0.0f, 1.0f);
-            if (closed_state) {
-                return std::max(raw_blink, 0.94f);
-            }
-            return (raw_blink < 0.08f) ? 0.0f : (raw_blink * 0.80f);
-        };
-        const float blink_l = eval_hyst_blink(ear_l, neutral_ear_l_, blink_closed_l_);
-        const float blink_r = eval_hyst_blink(ear_r, neutral_ear_r_, blink_closed_r_);
-        out_frame.arkit_blendshapes[0] = std::clamp(blink_l * 0.80f + out_frame.arkit_blendshapes[0] * 0.20f, 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[7] = std::clamp(blink_r * 0.80f + out_frame.arkit_blendshapes[7] * 0.20f, 0.0f, 1.0f);
+        // Kalidokit calcEyes + stabilizeBlink. `ear_l` is measured on landmarks 33/133 (subject's RIGHT eye) and
+        // `ear_r` on 263/362 (subject's LEFT eye); ARKit slot 0 = eyeBlinkLeft (subject's left), 7 = eyeBlinkRight.
+        float blink_subj_left = 1.0f - animation::kalido_eye_openness(ear_r, neutral_ear_r_);
+        float blink_subj_right = 1.0f - animation::kalido_eye_openness(ear_l, neutral_ear_l_);
+        // With the nose turned toward image-right (+yaw) the image-left eye (subject's right) faces the camera.
+        animation::kalido_stabilize_blink(blink_subj_left, blink_subj_right, yaw_r, yaw_r > 0.0f);
+        out_frame.arkit_blendshapes[0] =
+            std::clamp(blink_subj_left * 0.80f + out_frame.arkit_blendshapes[0] * 0.20f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[7] =
+            std::clamp(blink_subj_right * 0.80f + out_frame.arkit_blendshapes[7] * 0.20f, 0.0f, 1.0f);
+
+        // Kalidokit calcMouth A/I/U/E/O from inner-lip height and lip-corner width normalised by inter-ocular distance.
+        const float mouth_y = dist2d_px(m2_landmarks_478x3, 13, 14) / iod;
+        const animation::MouthVowels vow =
+            animation::kalido_calc_mouth(mouth_y, mouth_width_ratio, neutral_mouth_width_ratio_);
+        out_frame.webcam_visemes[0] = vow.a;
+        out_frame.webcam_visemes[1] = vow.i;
+        out_frame.webcam_visemes[2] = vow.u;
+        out_frame.webcam_visemes[3] = vow.e;
+        out_frame.webcam_visemes[4] = vow.o;
 
         const float mar_delta = std::max(0.0f, mar_open - neutral_mar_open_ - 0.025f);
         const float jaw_open_geom = std::clamp(mar_delta / 0.38f, 0.0f, 1.0f);
@@ -1136,8 +1198,6 @@ void LandmarkPoseSolver::populate_tracking_frame(
     } else {
         stable_lock_frames_ = 0U;
         has_prev_raw_quat_ = false;
-        blink_closed_l_ = false;
-        blink_closed_r_ = false;
     }
 
     // 2. Upper-Body Pose (strictly gate arms on in-frame elbow+wrist visibility; never overwrite CHEST/HIPS from out-of-frame M1 hips)

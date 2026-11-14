@@ -339,6 +339,11 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
     solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
                                    nullptr, nullptr, 600000ULL, 602000ULL, EpTier::NpuOpenVino, 17U, false, tf,
                                    kCamW, kCamH);
-    CHECK(tf.arkit_blendshapes[0] > 0.65f);  // eyeBlinkLeft
+    // Landmarks 160/144/158/153 belong to MediaPipe's 33/133 eye = the subject's RIGHT eye -> ARKit eyeBlinkRight (7).
+    // The other eye stays open: a decisive one-eye close survives Kalidokit stabilizeBlink as a wink.
+    CHECK(tf.arkit_blendshapes[7] > 0.65f);  // eyeBlinkRight
+    CHECK(tf.arkit_blendshapes[0] < 0.20f);  // eyeBlinkLeft stays open
     CHECK(tf.arkit_blendshapes[17] > 0.40f); // jawOpen
+    CHECK(tf.webcam_visemes[0] > 0.50f);     // Kalidokit calcMouth "A" from the opened inner lips
+    CHECK(tf.webcam_visemes[0] > tf.webcam_visemes[1]);
 }

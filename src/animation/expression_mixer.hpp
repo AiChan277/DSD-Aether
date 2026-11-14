@@ -26,7 +26,8 @@ class ExpressionMixer {
      * Writes the 52 ARKit slots + 5 visemes + any override slots into `out_morphs[kMaxMorphs]`.
      */
     void update(const float arkit_cam[52], const AetherDspSyncPacket& dsp, const AetherGraphOutputs& graph_out,
-                float dt_s, float out_morphs[kMaxMorphs], float& out_mouth_owner_blend) noexcept;
+                float dt_s, float out_morphs[kMaxMorphs], float& out_mouth_owner_blend,
+                const float* webcam_visemes_5 = nullptr) noexcept;
 
     [[nodiscard]] float current_mouth_owner_blend() const noexcept { return mouth_owner_blend_; }
     [[nodiscard]] static bool is_mouth_arkit_slot(size_t slot) noexcept;
@@ -34,6 +35,12 @@ class ExpressionMixer {
   private:
     float mouth_owner_blend_{0.0f}; // 0.0 = camera owns mouth, 1.0 = DSP owns mouth
     std::array<float, kMaxExpressionSlots> smoothed_overrides_{};
+    // Warudo SmoothDamp state for camera-driven channels (blink 28 ms, mouth / vowels 38 ms)
+    std::array<float, 52> cam_val_{};
+    std::array<float, 52> cam_vel_{};
+    std::array<float, 5> vowel_val_{};
+    std::array<float, 5> vowel_vel_{};
+    bool primed_{false};
 };
 
 } // namespace aether::animation

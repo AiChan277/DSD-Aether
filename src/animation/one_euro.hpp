@@ -58,6 +58,7 @@ struct FilteredTrackingState {
     float lower_body_confidence{0.0f};
     float dt_capture_s{1.0f / 60.0f};
     std::array<float, 52> blendshapes{};
+    std::array<float, 5> webcam_visemes{}; // Kalidokit A, I, U, E, O (smoothed downstream by ExpressionMixer)
     std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> joint_positions_ws{};
     std::array<float, AETHER_HUMANOID_BONE_COUNT> joint_confidence{};
     std::array<Quat, AETHER_HUMANOID_BONE_COUNT> joint_rotations{};

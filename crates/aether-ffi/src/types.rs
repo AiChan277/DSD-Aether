@@ -219,8 +219,10 @@ pub struct AetherTrackingFrame {
     pub frame_sequence: u32,
     /// Validity flags (`b0` face, `b1` `l_hand`, `b2` `r_hand`, `b3` body, `b4` `roi_reset`).
     pub valid_flags: u32,
+    /// Webcam mouth vowels `A, I, U, E, O` in `[0, 1]` from the landmark mouth-shape solver (blended with DSP visemes).
+    pub webcam_visemes: [f32; 5],
     /// Explicit trailing reserved bytes to reach 2048 B.
-    pub _reserved: [u8; 36],
+    pub _reserved: [u8; 16],
 }
 
 /// Inputs passed into `aether_graph_evaluate` on T2 (§5.2).

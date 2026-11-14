@@ -612,7 +612,8 @@ fn cpp_default_6_node_graph_json_parses_and_compiles_cleanly()
         joint_rotations_quat: [[0.0, 0.0, 0.0, 1.0]; 55],
         frame_sequence: 7,
         valid_flags: 0x01 | 0x08,
-        _reserved: [0; 36],
+        webcam_visemes: [0.0; 5],
+        _reserved: [0; 16],
     };
     tf.joint_rotations_quat[5] = [0.17, -0.12, 0.05, 0.977];
     tf.joint_positions_ws[0] = [0.02, 0.91, -0.03, 0.95];

@@ -18,6 +18,7 @@ struct VisibilityFirstConfig {
     float slew_per_s{4.0f};    // Appendix C: 4.0 /s (>= 250 ms full transition)
     float breathing_hz{0.22f}; // Ultra-smooth 0.22 Hz optional breathing cycle
     float chest_pitch_rad{1.2f * kDegToRad};
+    float shoulder_breath_rad{0.8f * kDegToRad};
     float shoulder_lift_m{0.004f};
     float attractor_lift_m{0.006f};
     float proc_spring_wn{kTwoPi * 1.5f}; // 2*pi*1.5 Hz
@@ -29,7 +30,7 @@ struct VisibilityFirstConfig {
     float foot_step_apex_m{0.04f};       // Appendix C: 4 cm
     IdleAttractorMode left_arm_idle{IdleAttractorMode::Desk};
     IdleAttractorMode right_arm_idle{IdleAttractorMode::Desk};
-    bool enable_idle_breathing{false};   // Calm settled idle by default (Warudo-grade steady state)
+    bool enable_idle_breathing{true};    // Warudo additive idle breathing (0.22 Hz, 1.2 deg chest, 0.8 deg shoulders)
 };
 
 struct FootPlantState {

@@ -166,6 +166,9 @@ void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingSta
     out.right_hand_confidence = rhand_tracked ? raw.right_hand_confidence : 0.0f;
     out.lower_body_confidence = (body_tracked && raw.lower_body_confidence >= 0.30f) ? raw.lower_body_confidence : 0.0f;
     out.dt_capture_s = dt_s;
+    for (size_t v = 0; v < out.webcam_visemes.size(); ++v) {
+        out.webcam_visemes[v] = face_tracked ? std::clamp(raw.webcam_visemes[v], 0.0f, 1.0f) : 0.0f;
+    }
 
     if (roi_reset) {
         for (size_t i = 0; i < 52U; ++i) {

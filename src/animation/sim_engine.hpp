@@ -4,10 +4,12 @@
 #include "animation/expression_mixer.hpp"
 #include "animation/ik_solvers.hpp"
 #include "animation/kalman.hpp"
+#include "animation/motion_filters.hpp"
 #include "animation/one_euro.hpp"
 #include "animation/skinning_frame.hpp"
 #include "animation/spring_bone.hpp"
 #include "animation/visibility_first.hpp"
+#include "animation/vmc_pose.hpp"
 
 #include <cstdint>
 
@@ -54,7 +56,15 @@ class alignas(64) SimEngine {
                                SpringSegmentOverlay* out_segs, uint32_t max_segs,
                                uint32_t& out_seg_count) const noexcept;
 
+    /**
+     * Exports the current pose as VMC Protocol normalized humanoid bones (Unity left-handed): for each bone the
+     * character-frame delta `D = R_world * inverse(R_world_rest)` is made parent-relative, so a T-pose rest exports
+     * identity rotations regardless of the VRM's raw bind axes. Expression values come from `skin`.
+     */
+    void export_vmc_pose(const SkinningFrame& skin, float time_s, VmcPoseFrame& out) const noexcept;
+
   private:
+    TricksterFrameStabilizer trickster_{};
     OneEuroPoseBank one_euro_{};
     KalmanPosePredictor kalman_{};
     VisibilityFirstSolver vis_solver_{};
@@ -62,6 +72,7 @@ class alignas(64) SimEngine {
     SpringBoneSimulator spring_{};
     ExpressionMixer expr_mixer_{};
 
+    AetherTrackingFrame stabilized_frame_{};
     FilteredTrackingState filtered_state_{};
     FilteredTrackingState predicted_state_{};
     SolvedBodyPose solved_body_{};

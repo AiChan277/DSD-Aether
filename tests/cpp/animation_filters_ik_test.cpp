@@ -1,6 +1,7 @@
 #include "animation/expression_mixer.hpp"
 #include "animation/ik_solvers.hpp"
 #include "animation/kalman.hpp"
+#include "animation/motion_filters.hpp"
 #include "animation/one_euro.hpp"
 #include "animation/sim_engine.hpp"
 #include "animation/visibility_first.hpp"
@@ -579,4 +580,165 @@ TEST_CASE("Graph IK override is per-tick: a one-off head target never latches th
     CHECK(rest_delta_deg(engine, rm, AETHER_BONE_CHEST) < 0.5f);
     CHECK(rest_delta_deg(engine, rm, AETHER_BONE_NECK) < 0.5f);
     CHECK(rest_delta_deg(engine, rm, AETHER_BONE_HEAD) < 0.5f);
+}
+
+TEST_CASE("Warudo SmoothDamp is critically damped, overshoot-free and dt-invariant", "[animation][smoothdamp]") {
+    // 1 x 1/60 s equals 4 x 1/240 s for a constant target (exact analytic solution).
+    float a = 0.0f, va = 0.0f, b = 0.0f, vb = 0.0f;
+    for (int f = 0; f < 30; ++f) {
+        a = smooth_damp(a, 10.0f, va, 0.075f, 1.0f / 60.0f);
+        for (int s = 0; s < 4; ++s) {
+            b = smooth_damp(b, 10.0f, vb, 0.075f, 1.0f / 240.0f);
+        }
+        CHECK(std::abs(a - b) < 1e-3f);
+        CHECK(a <= 10.0f); // never overshoots
+    }
+    CHECK(std::abs(a - 10.0f) < 0.01f); // 0.5 s >> 75 ms smooth time
+    // Longer smooth time lags more: spine (185 ms) trails head (75 ms) after 100 ms.
+    float h = 0.0f, vh = 0.0f, sp = 0.0f, vs = 0.0f;
+    const SmoothTimes st{};
+    for (int f = 0; f < 6; ++f) {
+        h = smooth_damp(h, 1.0f, vh, st.head, 1.0f / 60.0f);
+        sp = smooth_damp(sp, 1.0f, vs, st.spine, 1.0f / 60.0f);
+    }
+    CHECK(h > sp + 0.2f);
+}
+
+TEST_CASE("Trickster median-3 rejects 1-frame spikes and centre deadzone holds still", "[animation][trickster]") {
+    CHECK(median3(1.0f, 9.0f, 2.0f) == 2.0f);
+    CHECK(median3(5.0f, 1.0f, 3.0f) == 3.0f);
+
+    TricksterChannel ch;
+    ch.reset(0.0f);
+    float out = 0.0f;
+    for (float v : {0.0f, 0.0f, 25.0f, 0.0f, 0.0f}) { // single-frame 25 deg spike
+        out = ch.push(v, 0.18f);
+        CHECK(std::abs(out) < 1e-6f);
+    }
+    // Sub-deadzone sensor noise is attenuated by smoothstep(0, dz, |step|): +-0.03 deg -> < 0.003 deg/step (>10x).
+    float prev = ch.value();
+    for (int i = 0; i < 60; ++i) {
+        out = ch.push((i % 2 == 0) ? 0.03f : -0.03f, 0.18f);
+        CHECK(std::abs(out - prev) < 0.003f);
+        prev = out;
+    }
+    // A real 10 deg move passes through untouched (after the 1-frame median delay).
+    ch.reset(0.0f);
+    (void)ch.push(10.0f, 0.18f);
+    CHECK(std::abs(ch.push(10.0f, 0.18f) - 10.0f) < 1e-5f);
+}
+
+TEST_CASE("Kalidokit calcEyes / stabilizeBlink / calcMouth", "[animation][kalidokit]") {
+    // Openness remap [0.14, 0.28] -> [0, 1], normalised to the calibrated open ratio.
+    CHECK(kalido_eye_openness(0.28f, 0.28f) == 1.0f);
+    CHECK(kalido_eye_openness(0.14f, 0.28f) == 0.0f);
+    CHECK(std::abs(kalido_eye_openness(0.21f, 0.28f) - 0.5f) < 1e-4f);
+    CHECK(kalido_eye_openness(0.32f, 0.32f) == 1.0f); // larger eyes still read fully open
+
+    // Facing camera + small asymmetry -> locked to the average (no one-eye twitch).
+    float l = 0.10f, r = 0.30f;
+    kalido_stabilize_blink(l, r, 0.0f, false);
+    CHECK(l == r);
+    CHECK(std::abs(l - 0.20f) < 1e-6f);
+    // Decisive wink stays independent.
+    l = 0.95f;
+    r = 0.05f;
+    kalido_stabilize_blink(l, r, 0.0f, false);
+    CHECK(l == 0.95f);
+    CHECK(r == 0.05f);
+    // Head turned 25 deg: the camera-facing eye drives both.
+    l = 0.40f;
+    r = 0.15f;
+    kalido_stabilize_blink(l, r, 25.0f * kDegToRad, true);
+    CHECK(l == 0.15f);
+    CHECK(r == 0.15f);
+
+    const float x0 = 0.55f;
+    const MouthVowels closed = kalido_calc_mouth(0.01f, x0, x0);
+    CHECK(closed.a + closed.i + closed.u + closed.e + closed.o < 1e-6f);
+    const MouthVowels open_a = kalido_calc_mouth(0.33f, x0, x0);
+    CHECK(open_a.a > 0.9f);
+    CHECK(open_a.a > open_a.o);
+    const MouthVowels wide_i = kalido_calc_mouth(0.03f, x0 * 1.30f, x0);
+    CHECK(wide_i.i > 0.9f);
+    const MouthVowels pucker_u = kalido_calc_mouth(0.06f, x0 * 0.72f, x0);
+    CHECK(pucker_u.u > 0.2f);
+    CHECK(pucker_u.u > pucker_u.a);
+    const MouthVowels round_o = kalido_calc_mouth(0.40f, x0 * 0.72f, x0);
+    CHECK(round_o.o > 0.8f);
+    CHECK(round_o.o > round_o.a); // narrowing the open mouth turns "A" into "O"
+    const MouthVowels mid_e = kalido_calc_mouth(0.20f, x0 * 1.25f, x0);
+    CHECK(mid_e.e > 0.25f);
+}
+
+TEST_CASE("ExpressionMixer drives VRM vowel slots from the webcam and takes max with DSP", "[animation][expression]") {
+    ExpressionMixer mixer;
+    mixer.reset();
+    std::array<float, 52> cam{};
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    std::array<float, kMaxMorphs> out{};
+    float blend = 0.0f;
+    const float vowels_open_a[5] = {0.8f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (int f = 0; f < 20; ++f) { // mic silent: webcam alone opens the VRM "A"
+        mixer.update(cam.data(), dsp, gout, 1.0f / 60.0f, out.data(), blend, vowels_open_a);
+    }
+    CHECK(std::abs(out[kVisemeSlotOffset + 0] - 0.8f) < 0.01f);
+
+    dsp.dsp_flags = 0x05U;
+    dsp.dsp_viseme_weights[3] = 0.9f; // DSP "E"
+    for (int f = 0; f < 20; ++f) {
+        mixer.update(cam.data(), dsp, gout, 1.0f / 60.0f, out.data(), blend, vowels_open_a);
+    }
+    CHECK(std::abs(out[kVisemeSlotOffset + 0] - 0.8f) < 0.01f); // max(webcam A, DSP A = 0)
+    CHECK(std::abs(out[kVisemeSlotOffset + 3] - 0.9f) < 0.01f); // max(webcam E = 0, DSP E)
+
+    // Blink smoothing is snappy (28 ms): a full blink reaches > 0.9 within 100 ms.
+    ExpressionMixer m2;
+    m2.reset();
+    std::array<float, 52> eyes{};
+    m2.update(eyes.data(), AetherDspSyncPacket{}, gout, 1.0f / 60.0f, out.data(), blend);
+    eyes[0] = 1.0f;
+    for (int f = 0; f < 6; ++f) {
+        m2.update(eyes.data(), AetherDspSyncPacket{}, gout, 1.0f / 60.0f, out.data(), blend);
+    }
+    CHECK(out[0] > 0.9f);
+}
+
+TEST_CASE("Warudo pendulum lean: torso rolls with lateral head offset, head stays tracked-level",
+          "[animation][lean]") {
+    const RestSkeletonMetrics rm = make_vrm_like_rest_metrics();
+    SimEngine engine;
+    engine.reset(rm);
+    SimEngineConfig cfg{};
+    cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+    for (int f = 0; f < 180; ++f) {
+        AetherTrackingFrame raw{};
+        raw.frame_sequence = static_cast<uint32_t>((f / 2) + 1);
+        raw.capture_timestamp_us = static_cast<uint64_t>((f / 2) * 2 + 1) * 16667ULL;
+        raw.inference_complete_us = raw.capture_timestamp_us;
+        raw.valid_flags = 0x01U;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            raw.joint_rotations_quat[b][3] = 1.0f;
+        }
+        raw.joint_positions_ws[AETHER_BONE_HEAD][0] = 0.075f; // lean half a face width toward +X
+        raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+        raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+        engine.tick(raw, dsp, gout, static_cast<uint64_t>(f + 1) * 16667ULL, 0.0f, cfg, skin);
+    }
+    const auto world_delta = [&](uint32_t b) {
+        return normalize(engine.bone_rot_ws()[b] * conjugate(rm.rest_world_rotations[b]));
+    };
+    // Spine rolls -dx*12 deg = -6 deg about +Z (top of the torso moves toward +X), chest adds -7.5 deg.
+    const Vec3 spine_up = rotate_vec(world_delta(AETHER_BONE_SPINE), {0.0f, 1.0f, 0.0f});
+    const Vec3 chest_up = rotate_vec(world_delta(AETHER_BONE_CHEST), {0.0f, 1.0f, 0.0f});
+    CHECK(spine_up.x > 0.08f);
+    CHECK(chest_up.x > spine_up.x + 0.08f);
+    // Counter-stabilised head keeps the (zero) tracked roll.
+    const Vec3 head_up = rotate_vec(world_delta(AETHER_BONE_HEAD), {0.0f, 1.0f, 0.0f});
+    CHECK(std::abs(head_up.x) < 0.02f);
+    CHECK(engine.bone_pos_ws()[AETHER_BONE_HEAD].x > engine.bone_pos_ws()[AETHER_BONE_HIPS].x);
 }

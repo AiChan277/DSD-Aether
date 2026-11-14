@@ -37,6 +37,9 @@ class OscSender {
     [[nodiscard]] static size_t encode_osc_int(const char* address, int32_t value, uint8_t* out_buf,
                                                size_t cap) noexcept;
 
+    /** Sends a pre-encoded OSC packet/bundle as one UDP datagram (non-blocking, zero-alloc). */
+    bool send_packet(const uint8_t* data, size_t bytes) noexcept { return send_raw(data, bytes); }
+
     [[nodiscard]] bool is_open() const noexcept { return socket_handle_ != UINT64_MAX; }
     [[nodiscard]] uint64_t packets_sent() const noexcept { return packets_sent_; }
 

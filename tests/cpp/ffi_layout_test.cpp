@@ -32,6 +32,7 @@ static_assert(offsetof(AetherTrackingFrame, joint_positions_ws) == 244);
 static_assert(offsetof(AetherTrackingFrame, joint_rotations_quat) == 1124);
 static_assert(offsetof(AetherTrackingFrame, frame_sequence) == 2004);
 static_assert(offsetof(AetherTrackingFrame, valid_flags) == 2008);
+static_assert(offsetof(AetherTrackingFrame, webcam_visemes) == 2012);
 
 static_assert(sizeof(AetherDspSyncPacket) == 128);
 static_assert(alignof(AetherDspSyncPacket) == 64);
@@ -166,6 +167,7 @@ TEST_CASE("FFI layout table JSON matches C++ sizeof, alignof, and offsetof", "[f
         {"joint_rotations_quat", offsetof(AetherTrackingFrame, joint_rotations_quat)},
         {"frame_sequence", offsetof(AetherTrackingFrame, frame_sequence)},
         {"valid_flags", offsetof(AetherTrackingFrame, valid_flags)},
+        {"webcam_visemes", offsetof(AetherTrackingFrame, webcam_visemes)},
     };
     verify_struct_in_json(map, "AetherTrackingFrame", sizeof(AetherTrackingFrame), alignof(AetherTrackingFrame),
                           tf_fields);

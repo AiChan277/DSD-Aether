@@ -11,6 +11,7 @@
 #include "output/output_config.hpp"
 #include "output/output_coordinator.hpp"
 #include "output/output_ring.hpp"
+#include "output/vmc_sender.hpp"
 #include "rhi/rhi_device.hpp"
 #include "tracking/tracking_engine.hpp"
 
@@ -207,6 +208,12 @@ class PipelineSkeleton {
     CpuTopology topology_{};
     PipelineConfig cfg_{};
     std::unique_ptr<aether::animation::SimEngine> sim_engine_;
+
+    // VMC Protocol performer output (T2, 60 Hz) mirroring the Studio OSC toggle.
+    std::atomic<bool> vmc_enabled_{false};
+    aether::output::VmcSender vmc_sender_{};
+    aether::animation::VmcPoseFrame vmc_frame_{};
+    bool vmc_init_failed_{false};
 };
 
 } // namespace aether::app

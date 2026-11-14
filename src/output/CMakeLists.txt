@@ -13,6 +13,8 @@ add_library(aether_output STATIC
     spout_output.hpp
     vcam_transport.cpp
     vcam_transport.hpp
+    vmc_sender.cpp
+    vmc_sender.hpp
 )
 
 aether_apply_cxx_flags(aether_output)
