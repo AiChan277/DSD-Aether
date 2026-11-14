@@ -1,4 +1,5 @@
 #include "animation/one_euro.hpp"
+#include "animation/motion_filters.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -45,6 +46,10 @@ float OneEuroScalar::filter(float x, float dt_s, const OneEuroParams& params) no
 
 void OneEuroQuat::reset(Quat initial) noexcept {
     q_hat_ = normalize(initial);
+    q_anchor_ = q_hat_;
+    q_vel_ref_ = q_hat_;
+    edx_ = Vec3{};
+    vel_ema_ = 0.0f;
     for (auto& f : tangent_filters_) {
         f.reset(0.0f);
         f.rebase_tangent_zero();
@@ -54,8 +59,12 @@ void OneEuroQuat::reset(Quat initial) noexcept {
 
 Quat OneEuroQuat::filter(Quat q, float dt_s, const OneEuroParams& params) noexcept {
     Quat q_norm = normalize(q);
-    if (!initialized_) {
+    if (!initialized_ || !(dt_s > 0.0f) || !std::isfinite(dt_s)) {
         q_hat_ = q_norm;
+        q_anchor_ = q_norm;
+        q_vel_ref_ = q_norm;
+        edx_ = Vec3{};
+        vel_ema_ = 0.0f;
         for (auto& f : tangent_filters_) {
             f.reset(0.0f);
             f.rebase_tangent_zero();
@@ -64,9 +73,65 @@ Quat OneEuroQuat::filter(Quat q, float dt_s, const OneEuroParams& params) noexce
         return q_hat_;
     }
 
-    // Hemisphere guard (`§9.2`): q . q_prev >= 0
+    // Hemisphere guard (`§9.2`): align raw, anchor, and velocity reference to q_hat_.
     if (dot(q_norm, q_hat_) < 0.0f) {
         q_norm = {-q_norm.x, -q_norm.y, -q_norm.z, -q_norm.w};
+    }
+    if (dot(q_anchor_, q_hat_) < 0.0f) {
+        q_anchor_ = {-q_anchor_.x, -q_anchor_.y, -q_anchor_.z, -q_anchor_.w};
+    }
+    if (dot(q_vel_ref_, q_hat_) < 0.0f) {
+        q_vel_ref_ = {-q_vel_ref_.x, -q_vel_ref_.y, -q_vel_ref_.z, -q_vel_ref_.w};
+    }
+
+    // Task 5: Warudo Asymmetric Velocity-Adaptive 1-Euro + Stationary-Anchor Soft Cubic Deadzone
+    if (params.vel_threshold_rad_s > 0.0f) {
+        const auto lp_alpha = [&](float cutoff_hz) noexcept {
+            const float tau = 1.0f / (kTwoPi * std::max(cutoff_hz, 1e-4f));
+            return dt_s / (tau + dt_s);
+        };
+
+        // 1. Pre-smooth reference (6 Hz) + vector derivative filter so zero-mean Gaussian noise cancels
+        // while real head turns wake up cleanly on Frame 1.
+        const float alpha_ref = lp_alpha(6.0f);
+        const Vec3 r_vel_step = quat_to_rotvec(normalize(conjugate(q_vel_ref_) * q_norm));
+        q_vel_ref_ = normalize(q_vel_ref_ * rotvec_to_quat(r_vel_step * alpha_ref));
+        const Vec3 v_inst = r_vel_step * (alpha_ref / dt_s);
+        const float alpha_d = lp_alpha(params.dcutoff);
+        edx_ = edx_ + (v_inst - edx_) * alpha_d;
+
+        // 2. Asymmetric attack/release speed envelope (10 ms fast onset, 75 ms silky settle).
+        const float speed_inst = length(edx_);
+        const float alpha_v = (speed_inst > vel_ema_) ? (dt_s / (0.010f + dt_s)) : (dt_s / (0.075f + dt_s));
+        vel_ema_ += alpha_v * (speed_inst - vel_ema_);
+
+        // 3. Stationary anchor update + soft cubic deadzone around anchor (< 1.5 deg/s).
+        const Vec3 r_anchor = quat_to_rotvec(normalize(conjugate(q_anchor_) * q_norm));
+        const float d_anchor = length(r_anchor);
+        if (vel_ema_ >= params.vel_threshold_rad_s) {
+            const float anchor_alpha = std::clamp(dt_s / (0.030f + dt_s), 0.0f, 1.0f);
+            q_anchor_ = slerp(q_anchor_, q_hat_, anchor_alpha);
+        } else if (d_anchor > params.deadband) {
+            const float creep_alpha = std::clamp(dt_s / (0.20f + dt_s), 0.0f, 1.0f);
+            q_anchor_ = slerp(q_anchor_, q_hat_, creep_alpha);
+        }
+
+        const float dz_fade =
+            1.0f - smoothstep01(params.vel_threshold_rad_s, 2.5f * params.vel_threshold_rad_s, vel_ema_);
+        const float dz_eff = params.deadband * dz_fade;
+        Quat q_target = q_norm;
+        if (dz_eff > 1e-6f && d_anchor > 1e-7f && d_anchor < dz_eff) {
+            const float u = d_anchor / dz_eff;
+            const float d_mapped = dz_eff * (u * u * u);
+            q_target = normalize(q_anchor_ * rotvec_to_quat(r_anchor * (d_mapped / d_anchor)));
+        }
+
+        // 4. Velocity-adaptive cutoff: pinned to fc_min below threshold, smoothly ramped above.
+        const float v_excess = std::max(0.0f, vel_ema_ - params.vel_threshold_rad_s);
+        const float beta_ramp = smoothstep01(0.0f, 3.0f * params.vel_threshold_rad_s, v_excess);
+        const float fc = params.fc_min + params.beta * v_excess * beta_ramp;
+        q_hat_ = slerp(q_hat_, q_target, lp_alpha(fc));
+        return q_hat_;
     }
 
     // Map r = log(q_hat_prev^-1 * q) into SO(3) tangent space, smooth, then exp back (`§9.2`).
@@ -75,14 +140,11 @@ Quat OneEuroQuat::filter(Quat q, float dt_s, const OneEuroParams& params) noexce
     const float ang = length(r_delta);
     OneEuroParams tangent_params = params;
     tangent_params.deadband = 0.0f;
-    if (params.deadband > 0.0f && ang <= params.deadband) {
-        for (size_t k = 0; k < 3U; ++k) {
-            (void)tangent_filters_[k].filter(0.0f, dt_s, tangent_params);
-            tangent_filters_[k].rebase_tangent_zero();
-        }
-        return q_hat_;
+    float scale = 1.0f;
+    if (params.deadband > 0.0f && ang < params.deadband) {
+        const float u = ang / params.deadband;
+        scale = u * u; // d * u^2 = dz * u^3 soft cubic response
     }
-    const float scale = (params.deadband > 0.0f && ang > 1e-6f) ? ((ang - params.deadband) / ang) : 1.0f;
     const Vec3 r_eff = r_delta * scale;
     const Vec3 r_filt{
         tangent_filters_[0].filter(r_eff.x, dt_s, tangent_params),
@@ -129,17 +191,17 @@ OneEuroParams OneEuroPoseBank::params_for_blendshape(size_t slot) noexcept {
 
 OneEuroParams OneEuroPoseBank::params_for_bone(size_t bone_idx) noexcept {
     if (bone_idx == AETHER_BONE_HEAD || bone_idx == AETHER_BONE_NECK) {
-        return {0.25f, 6.5f, 0.65f, 0.15f * kDegToRad};
+        return {0.45f, 16.0f, 0.85f, 0.30f * kDegToRad, 1.5f * kDegToRad};
     }
     if (bone_idx == AETHER_BONE_LEFT_EYE || bone_idx == AETHER_BONE_RIGHT_EYE) {
-        return {3.0f, 1.00f, 1.0f, 0.0035f};
+        return {3.0f, 1.00f, 1.0f, 0.0035f, 0.0f};
     }
     // Finger bones: 25..54
     if (bone_idx >= AETHER_BONE_LEFT_THUMB_PROXIMAL) {
-        return {1.0f, 1.2f, 0.8f, 0.0040f};
+        return {1.0f, 1.2f, 0.8f, 0.0040f, 0.0f};
     }
     // Body / arms / shoulders / hips
-    return {0.4f, 6.0f, 0.7f, 0.0022f};
+    return {0.4f, 6.0f, 0.7f, 0.0022f, 0.0f};
 }
 
 void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingState& out) noexcept {
@@ -203,6 +265,9 @@ void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingSta
         return;
     }
 
+    auto is_pre_stabilized_eye_slot = [](size_t s) noexcept -> bool {
+        return s == 0U || s == 7U || (s >= 1U && s <= 4U) || (s >= 8U && s <= 11U);
+    };
     for (size_t i = 0; i < 52U; ++i) {
         OneEuroParams p = params_for_blendshape(i);
         float bs_target = raw.arkit_blendshapes[i];
@@ -210,6 +275,10 @@ void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingSta
             bs_target = 0.0f;
             p.deadband = 0.0f;
             p.fc_min = std::max(p.fc_min, 2.5f);
+        } else if (is_pre_stabilized_eye_slot(i)) {
+            bs_filters_[i].reset(bs_target);
+            out.blendshapes[i] = std::clamp(bs_target, 0.0f, 1.0f);
+            continue;
         }
         out.blendshapes[i] = std::clamp(bs_filters_[i].filter(bs_target, dt_s, p), 0.0f, 1.0f);
     }
@@ -241,14 +310,19 @@ void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingSta
         };
 
         if (bone_tracked) {
-            OneEuroParams pos_params = base_params;
-            pos_params.deadband = 0.0006f;
+            const OneEuroParams pos_params{0.24f, 7.5f, 0.65f, 0.0006f, 0.0f};
             out.joint_positions_ws[b] = {
                 pos_filters_[b][0].filter(p_raw.x, dt_s, pos_params),
                 pos_filters_[b][1].filter(p_raw.y, dt_s, pos_params),
                 pos_filters_[b][2].filter(p_raw.z, dt_s, pos_params),
             };
-            out.joint_rotations[b] = rot_filters_[b].filter(q_raw, dt_s, base_params);
+            if (b == AETHER_BONE_LEFT_EYE || b == AETHER_BONE_RIGHT_EYE) {
+                const Quat q_eye = normalize(q_raw);
+                rot_filters_[b].reset(q_eye);
+                out.joint_rotations[b] = q_eye;
+            } else {
+                out.joint_rotations[b] = rot_filters_[b].filter(q_raw, dt_s, base_params);
+            }
             out.joint_confidence[b] = raw.joint_positions_ws[b][3];
         } else {
             // Critically damp untracked joints back to calm neutral rest pose with zero deadband stickiness

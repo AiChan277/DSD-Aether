@@ -220,8 +220,17 @@ struct Quat {
 }
 
 [[nodiscard]] inline float angle_between(Quat a, Quat b) noexcept {
-    const float d = std::clamp(std::abs(dot(normalize(a), normalize(b))), 0.0f, 1.0f);
-    return 2.0f * std::acos(d);
+    Quat qa = normalize(a);
+    Quat qb = normalize(b);
+    if (dot(qa, qb) < 0.0f) {
+        qb = {-qb.x, -qb.y, -qb.z, -qb.w};
+    }
+    const float dx = qa.x - qb.x;
+    const float dy = qa.y - qb.y;
+    const float dz = qa.z - qb.z;
+    const float dw = qa.w - qb.w;
+    const float half_chord = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz + dw * dw);
+    return 4.0f * std::asin(std::clamp(half_chord, 0.0f, 1.0f));
 }
 
 /** Row-major 3x4 affine transform matching `SkinningFrame::bone_matrices[i]` (`§9.8`). */

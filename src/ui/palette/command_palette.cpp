@@ -607,6 +607,12 @@ void PreferencesModal::draw(bool on_air, ParamStore& params, UndoStack& undo, Ke
                     draw_property_row(ParamId::TrackingExposureLock, params, undo, fonts, row_actions);
                 out_settings_dirty |=
                     draw_property_row(ParamId::TrackingSyntheticCamera, params, undo, fonts, row_actions);
+                out_settings_dirty |=
+                    draw_property_row(ParamId::TrackingAudioAssist, params, undo, fonts, row_actions);
+                out_settings_dirty |=
+                    draw_property_row(ParamId::TrackingMicGain, params, undo, fonts, row_actions);
+                out_settings_dirty |=
+                    draw_property_row(ParamId::TrackingMicNoiseGate, params, undo, fonts, row_actions);
                 ImGui::Separator();
                 if (draw_property_row(ParamId::RenderDenoiser, params, undo, fonts, row_actions, false, on_air)) {
                     actions.viewport.denoiser_kind = static_cast<uint8_t>(params.get_int(ParamId::RenderDenoiser));

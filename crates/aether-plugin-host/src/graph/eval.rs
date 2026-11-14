@@ -322,9 +322,9 @@ fn eval_op(
                     *slot = w.clamp(0.0, 1.0);
                 }
             }
-            expr.weights[24] = (vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65).clamp(0.0, 1.0);
+            expr.weights[17] = (vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65).clamp(0.0, 1.0);
             arena.expr_sets[dst] = expr;
-            expr.weights[24]
+            expr.weights[17]
         }
         Op::CopyColor { src, dst } => {
             arena.colors[dst] = arena.colors[src];
@@ -376,8 +376,14 @@ fn eval_op(
                     };
                 }
                 arena.expr_sets[out_expr] = expr;
-                arena.floats[out_face_conf] = if (tr.valid_flags & 1) != 0 {
+                let head_conf = tr.joint_positions_ws[5][3];
+                let face_conf = if head_conf.is_finite() && head_conf > 0.0 {
+                    head_conf.clamp(0.0, 1.0)
+                } else {
                     tr.upper_body_confidence.clamp(0.0, 1.0)
+                };
+                arena.floats[out_face_conf] = if (tr.valid_flags & 1) != 0 {
+                    face_conf
                 } else {
                     0.0
                 };
@@ -703,8 +709,15 @@ fn eval_op(
                 0.0
             };
             let mut expr = ExprSetData::default();
-            expr.weights[8] = blink; // eyeBlinkLeft
-            expr.weights[9] = blink; // eyeBlinkRight
+            // Appendix B slots: 0 = eyeBlinkLeft, 7 = eyeBlinkRight.
+            // Assert override_mask only when face tracking is absent (`conf < 0.25`)
+            // so idle auto-blink never collides with live ballistic eye tracking.
+            expr.weights[0] = blink;
+            expr.weights[7] = blink;
+            if conf < 0.25 {
+                expr.override_mask[0] = 1.0;
+                expr.override_mask[7] = 1.0;
+            }
             arena.expr_sets[out_expr] = expr;
             arena.floats[out_blink] = blink;
             blink
@@ -1198,7 +1211,7 @@ fn summarize_slot(arena: &ValuesArena, slot: Option<crate::graph::compiler::Slot
             }
             (
                 aether_ffi::AETHER_PIN_VALUE_EXPR,
-                [max_w, active as f32, expr.weights[24], expr.weights[8]],
+                [max_w, active as f32, expr.weights[17], expr.weights[0]],
             )
         }
         SlotRef::VisemeSet(i) => {

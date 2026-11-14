@@ -7,7 +7,11 @@
 #include "renderer/npr_renderer.hpp"
 #include "rhi/rhi_device.hpp"
 #include "test_png_io.hpp"
+#include "tracking/blink_gaze_filter.hpp"
 #include "tracking/camera_source.hpp"
+#include "tracking/canonical_face_model.hpp"
+#include "tracking/landmark_solver.hpp"
+#include "tracking/wasapi_audio_lipsync.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -17,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -96,119 +101,19 @@ ImageLumaStats analyze_rgba8(const std::vector<uint8_t>& rgba, uint32_t w, uint3
 }
 
 aether::animation::RestSkeletonMetrics build_vrm_rest_metrics(const aether::renderer::GpuAvatar& avatar) {
-    namespace anim = aether::animation;
-    anim::RestSkeletonMetrics rm = anim::build_default_humanoid_rest_metrics();
-
-    std::vector<anim::Quat> joint_world_rot(avatar.joints.size(), anim::Quat::identity());
-    std::vector<uint8_t> rot_resolved(avatar.joints.size(), 0U);
-    auto resolve_joint_world_rot = [&](auto& self, size_t idx, int depth) -> anim::Quat {
-        if (idx >= avatar.joints.size() || depth > 128) {
-            return anim::Quat::identity();
-        }
-        if (rot_resolved[idx] != 0U) {
-            return joint_world_rot[idx];
-        }
-        const auto& j = avatar.joints[idx];
-        const float* br = j.bind_rotation_quat;
-        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
-        const anim::Quat q_local =
-            (q2 > 1e-6f) ? anim::normalize(anim::Quat{br[0], br[1], br[2], br[3]}) : anim::Quat::identity();
-        anim::Quat q_parent = anim::Quat::identity();
-        if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar.joints.size()) {
-            q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
-        }
-        joint_world_rot[idx] = anim::normalize(q_parent * q_local);
-        rot_resolved[idx] = 1U;
-        return joint_world_rot[idx];
-    };
-    for (size_t i = 0; i < avatar.joints.size(); ++i) {
-        (void)resolve_joint_world_rot(resolve_joint_world_rot, i, 0);
-    }
-
-    std::array<anim::Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
-    const uint16_t hips_j = avatar.desc.humanoid_to_joint[AETHER_BONE_HIPS];
-    if (hips_j < avatar.joint_rest_world_pos.size()) {
-        const auto& hp = avatar.joint_rest_world_pos[hips_j];
-        world[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
-        rm.rest_world_rotations[AETHER_BONE_HIPS] =
-            (hips_j < joint_world_rot.size()) ? joint_world_rot[hips_j] : anim::Quat::identity();
-    } else {
-        world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
-        rm.rest_world_rotations[AETHER_BONE_HIPS] = anim::Quat::identity();
-    }
-    rm.rest_local_rotations[AETHER_BONE_HIPS] = rm.rest_world_rotations[AETHER_BONE_HIPS];
-
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        const uint16_t j = avatar.desc.humanoid_to_joint[b];
-        if (j < avatar.joint_rest_world_pos.size()) {
-            const auto& jp = avatar.joint_rest_world_pos[j];
-            world[b] = {jp[0], jp[1], jp[2]};
-            rm.rest_world_rotations[b] =
-                (j < joint_world_rot.size()) ? joint_world_rot[j] : rm.rest_world_rotations[pi];
-        } else {
-            world[b] = world[pi] + rm.rest_local_positions[b];
-            rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
-        }
-        rm.rest_local_rotations[b] =
-            anim::normalize(anim::conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
-    }
-
-    rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        rm.rest_local_positions[b] = world[b] - world[pi];
-        rm.bone_lengths[b] = std::max(anim::length(rm.rest_local_positions[b]), 0.02f);
-    }
-
-    uint32_t custom_cnt = 0;
-    for (const auto& col : avatar.colliders) {
-        if (custom_cnt >= rm.custom_colliders.size()) {
-            break;
-        }
-        uint16_t hb = AETHER_BONE_HIPS;
-        std::array<float, 3> jr{0.0f, 0.0f, 0.0f};
-        anim::Quat col_j_rot = anim::Quat::identity();
-        if (col.joint_index < avatar.joints.size()) {
-            jr = avatar.joint_rest_world_pos[col.joint_index];
-            col_j_rot = joint_world_rot[col.joint_index];
-            uint32_t j = col.joint_index;
-            for (size_t steps = 0; steps < avatar.joints.size() && j < avatar.joints.size(); ++steps) {
-                const uint16_t candidate = avatar.joints[j].humanoid_bone;
-                if (candidate < AETHER_HUMANOID_BONE_COUNT) {
-                    hb = candidate;
-                    break;
-                }
-                const int32_t p_idx = avatar.joints[j].parent_index;
-                if (p_idx < 0 || static_cast<size_t>(p_idx) >= avatar.joints.size()) {
-                    break;
-                }
-                j = static_cast<uint32_t>(p_idx);
-            }
-        }
-        auto& dst = rm.custom_colliders[custom_cnt++];
-        dst.attached_bone = static_cast<int32_t>(hb);
-        dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
-        dst.radius = std::clamp(col.radius, 0.01f, 0.50f);
-        const anim::Vec3 j_pos{jr[0], jr[1], jr[2]};
-        const anim::Vec3 a_ws = j_pos + anim::rotate_vec(col_j_rot, {col.offset[0], col.offset[1], col.offset[2]});
-        const anim::Vec3 b_ws = j_pos + anim::rotate_vec(col_j_rot, {col.tail[0], col.tail[1], col.tail[2]});
-        const anim::Quat inv_hb_rot = anim::conjugate(rm.rest_world_rotations[hb]);
-        dst.local_a = anim::rotate_vec(inv_hb_rot, a_ws - world[hb]);
-        dst.local_b = anim::rotate_vec(inv_hb_rot, b_ws - world[hb]);
-    }
-    rm.custom_collider_count = custom_cnt;
-    rm.has_split_brow_morphs = avatar.has_split_brow_morphs;
-    rm.valid = true;
-    return rm;
+    return aether::animation::build_rest_metrics_from_avatar_streams(
+        avatar.desc, avatar.joints.data(), avatar.joints.size(), avatar.joint_rest_world_pos.data(),
+        avatar.joint_rest_world_pos.size(), avatar.colliders.data(), avatar.colliders.size(), avatar.springs.data(),
+        avatar.springs.size(), avatar.has_split_brow_morphs);
 }
 
 double mat3x4_delta_angle_deg(const float m[12]) noexcept {
-    const double trace = static_cast<double>(m[0]) + static_cast<double>(m[5]) + static_cast<double>(m[10]);
-    const double cos_theta = std::clamp(0.5 * (trace - 1.0), -1.0, 1.0);
-    return std::acos(cos_theta) * static_cast<double>(aether::animation::kRadToDeg);
+    const double sx = static_cast<double>(m[9]) - static_cast<double>(m[6]);
+    const double sy = static_cast<double>(m[2]) - static_cast<double>(m[8]);
+    const double sz = static_cast<double>(m[4]) - static_cast<double>(m[1]);
+    const double sin_theta = 0.5 * std::sqrt(sx * sx + sy * sy + sz * sz);
+    const double cos_theta = 0.5 * ((static_cast<double>(m[0]) + static_cast<double>(m[5]) + static_cast<double>(m[10])) - 1.0);
+    return std::atan2(sin_theta, cos_theta) * static_cast<double>(aether::animation::kRadToDeg);
 }
 
 aether::animation::Vec3 transform_point_3x4(const float m[12], const aether::animation::Vec3& p) noexcept {
@@ -1010,4 +915,906 @@ TEST_CASE("Task 4: 8590256991748008892.vrm binds Live2D brow/vowel parameters an
     avatar.reset();
     rhi->destroy();
     aether_runtime_shutdown();
+}
+
+TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, SpringBone collider penetrations, 30->240Hz pacing, and Rust graph",
+          "[forensic][vrm]") {
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    REQUIRE(dev_res.has_value());
+    aether::rhi::RhiDevice* rhi = dev_res.value();
+
+    aether::renderer::AssetJob job;
+    aether::HighResTimer timer;
+    job.start_load(*rhi, vrm_path.string());
+    const uint64_t deadline_us = aether::now_us() + 30000000ULL;
+    while (job.state() == aether::renderer::AssetJobState::Loading && aether::now_us() < deadline_us) {
+        timer.sleep_us(500);
+    }
+    REQUIRE(job.state() == aether::renderer::AssetJobState::ReadyForGpu);
+    auto avatar_res = job.finalize_gpu_upload(*rhi);
+    REQUIRE(avatar_res.has_value());
+    auto avatar = std::move(avatar_res.value());
+
+    auto str_slice = [&](uint32_t off, uint32_t len) -> std::string {
+        if (off >= avatar->strings.size()) {
+            return {};
+        }
+        const size_t n = std::min<size_t>(len, avatar->strings.size() - off);
+        return avatar->strings.substr(off, n);
+    };
+
+    std::printf("\n=== [FORENSIC] MODEL INVENTORY (%s) ===\n", vrm_path.string().c_str());
+    std::printf("source_format=%u verts=%zu tris=%zu joints=%zu springs=%zu colliders=%zu morphs=%zu expr_bindings=%zu split_brow=%d brow_bones=%zu\n",
+                avatar->desc.source_format, avatar->rest_vertices.size(), avatar->rest_indices.size() / 3,
+                avatar->joints.size(), avatar->springs.size(), avatar->colliders.size(),
+                avatar->morph_ranges.size(), avatar->expressions.size(),
+                avatar->has_split_brow_morphs ? 1 : 0, avatar->brow_bones.size());
+
+    // Resolve joint world rotations for collider transforms
+    std::vector<aether::animation::Quat> j_world_rot(avatar->joints.size(), aether::animation::Quat::identity());
+    std::vector<uint8_t> j_done(avatar->joints.size(), 0U);
+    auto resolve_jrot = [&](auto& self, size_t idx, int depth) -> aether::animation::Quat {
+        if (idx >= avatar->joints.size() || depth > 128) return aether::animation::Quat::identity();
+        if (j_done[idx] != 0U) return j_world_rot[idx];
+        const auto& j = avatar->joints[idx];
+        const float* br = j.bind_rotation_quat;
+        const float q2 = br[0]*br[0] + br[1]*br[1] + br[2]*br[2] + br[3]*br[3];
+        const aether::animation::Quat ql = (q2 > 1e-6f) ? aether::animation::normalize({br[0], br[1], br[2], br[3]}) : aether::animation::Quat::identity();
+        const aether::animation::Quat qp = (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar->joints.size())
+                                               ? self(self, static_cast<size_t>(j.parent_index), depth + 1)
+                                               : aether::animation::Quat::identity();
+        j_world_rot[idx] = aether::animation::normalize(qp * ql);
+        j_done[idx] = 1U;
+        return j_world_rot[idx];
+    };
+    for (size_t i = 0; i < avatar->joints.size(); ++i) (void)resolve_jrot(resolve_jrot, i, 0);
+
+    // 1. Expression Bindings & Morph Vertex Overlap Audit
+    std::printf("\n=== [FORENSIC] EXPRESSION BINDINGS & MORPH OVERLAPS ===\n");
+    auto collect_slot_verts = [&](uint32_t slot) -> std::vector<uint32_t> {
+        std::vector<uint32_t> verts;
+        for (const auto& eb : avatar->expressions) {
+            if (eb.input_slot != slot || eb.morph_index >= avatar->morph_ranges.size()) continue;
+            const auto& mr = avatar->morph_ranges[eb.morph_index];
+            const size_t start = mr.delta_offset;
+            const size_t end = std::min(start + mr.delta_count, avatar->morph_deltas.size());
+            for (size_t di = start; di < end; ++di) {
+                const auto& d = avatar->morph_deltas[di];
+                const float mag2 = d.d_position[0]*d.d_position[0] + d.d_position[1]*d.d_position[1] + d.d_position[2]*d.d_position[2];
+                if (mag2 > 1e-10f) verts.push_back(d.vertex_index);
+            }
+        }
+        std::sort(verts.begin(), verts.end());
+        verts.erase(std::unique(verts.begin(), verts.end()), verts.end());
+        return verts;
+    };
+
+    for (size_t ei = 0; ei < avatar->expressions.size(); ++ei) {
+        const auto& eb = avatar->expressions[ei];
+        const std::string p_name = str_slice(eb.name_offset, eb.name_len);
+        std::string m_name = "<oob>";
+        uint32_t d_cnt = 0;
+        float max_disp = 0.0f;
+        uint32_t is_face = 0;
+        if (eb.morph_index < avatar->morph_ranges.size()) {
+            const auto& mr = avatar->morph_ranges[eb.morph_index];
+            m_name = str_slice(mr.name_offset, mr.name_len);
+            d_cnt = mr.delta_count;
+            is_face = mr.is_face_morph;
+            const size_t end = std::min<size_t>(mr.delta_offset + mr.delta_count, avatar->morph_deltas.size());
+            for (size_t di = mr.delta_offset; di < end; ++di) {
+                const auto& d = avatar->morph_deltas[di];
+                max_disp = std::max(max_disp, std::sqrt(d.d_position[0]*d.d_position[0] + d.d_position[1]*d.d_position[1] + d.d_position[2]*d.d_position[2]));
+            }
+        }
+        std::printf("  expr[%2zu]: slot=%2u preset='%s' morph[%u]='%s' weight=%.3f deltas=%u max_disp=%.4fm is_face=%u\n",
+                    ei, eb.input_slot, p_name.c_str(), eb.morph_index, m_name.c_str(), eb.weight, d_cnt, max_disp, is_face);
+    }
+
+    struct SlotTag { uint32_t slot; const char* name; };
+    const SlotTag check_slots[] = {
+        {0, "Blink_L(0)"}, {7, "Blink_R(7)"},
+        {17, "jawOpen(17)"}, {23, "SmileL(23)"}, {24, "SmileR(24)"},
+        {41, "BrowDnL(41)"}, {42, "BrowDnR(42)"}, {43, "BrowInUp(43)"}, {44, "BrowOutUpL(44)"}, {45, "BrowOutUpR(45)"},
+        {52, "Vis_A(52)"}, {53, "Vis_I(53)"}, {54, "Vis_U(54)"}, {55, "Vis_E(55)"}, {56, "Vis_O(56)"},
+        {57, "Joy(57)"}, {58, "Angry(58)"}, {59, "Sorrow(59)"}, {60, "Surprised(60)"}, {61, "Blush(61)"}, {62, "Sparkle(62)"}, {63, "Custom(63)"},
+    };
+    const auto v_blink_l = collect_slot_verts(0);
+    const auto v_blink_r = collect_slot_verts(7);
+    for (const auto& st : check_slots) {
+        const auto sv = collect_slot_verts(st.slot);
+        if (sv.empty()) continue;
+        std::vector<uint32_t> inter_l, inter_r;
+        std::set_intersection(sv.begin(), sv.end(), v_blink_l.begin(), v_blink_l.end(), std::back_inserter(inter_l));
+        std::set_intersection(sv.begin(), sv.end(), v_blink_r.begin(), v_blink_r.end(), std::back_inserter(inter_r));
+        std::printf("  slot_verts %-16s: non_zero_verts=%zu overlap_BlinkL=%zu overlap_BlinkR=%zu\n",
+                    st.name, sv.size(), inter_l.size(), inter_r.size());
+    }
+
+    // 2. VRMC_springBone / Colliders Rest-Pose Penetration Audit
+    std::printf("\n=== [FORENSIC] VRM COLLIDERS (%zu) & SPRING CHAINS (%zu) ===\n",
+                avatar->colliders.size(), avatar->springs.size());
+    for (size_t ci = 0; ci < avatar->colliders.size(); ++ci) {
+        const auto& c = avatar->colliders[ci];
+        std::string jname = "<root>";
+        aether::animation::Vec3 jpos{0, 0, 0};
+        aether::animation::Quat jrot = aether::animation::Quat::identity();
+        if (c.joint_index < avatar->joints.size()) {
+            const auto& j = avatar->joints[c.joint_index];
+            jname = str_slice(j.name_offset, j.name_len);
+            jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1], avatar->joint_rest_world_pos[c.joint_index][2]};
+            jrot = j_world_rot[c.joint_index];
+        }
+        const auto wa = jpos + aether::animation::rotate_vec(jrot, {c.offset[0], c.offset[1], c.offset[2]});
+        const auto wb = jpos + aether::animation::rotate_vec(jrot, {c.tail[0], c.tail[1], c.tail[2]});
+        std::printf("  col[%2zu]: group=%2u shape=%s j=%u('%s') r=%.4fm a=(%.3f,%.3f,%.3f) b=(%.3f,%.3f,%.3f)\n",
+                    ci, c.group_bit, (c.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE ? "CAPS" : "SPH "),
+                    c.joint_index, jname.c_str(), c.radius, wa.x, wa.y, wa.z, wb.x, wb.y, wb.z);
+    }
+
+    auto closest_pt_seg = [](aether::animation::Vec3 a, aether::animation::Vec3 b, aether::animation::Vec3 p) {
+        const auto ab = b - a;
+        const float len2 = aether::animation::dot(ab, ab);
+        if (len2 < 1e-12f) return a;
+        const float t = std::clamp(aether::animation::dot(p - a, ab) / len2, 0.0f, 1.0f);
+        return a + ab * t;
+    };
+
+    uint32_t penetrating_pairs = 0;
+    uint32_t near_touch_pairs = 0;
+    for (size_t si = 0; si < avatar->springs.size(); ++si) {
+        const auto& sp = avatar->springs[si];
+        std::string jname = "<oob>";
+        aether::animation::Vec3 jp{0, 0, 0};
+        if (sp.joint_index < avatar->joints.size()) {
+            const auto& j = avatar->joints[sp.joint_index];
+            jname = str_slice(j.name_offset, j.name_len);
+            jp = {avatar->joint_rest_world_pos[sp.joint_index][0], avatar->joint_rest_world_pos[sp.joint_index][1], avatar->joint_rest_world_pos[sp.joint_index][2]};
+        }
+        float min_clear = 999.0f;
+        int min_ci = -1;
+        for (size_t ci = 0; ci < avatar->colliders.size(); ++ci) {
+            const auto& c = avatar->colliders[ci];
+            const uint64_t bit = (c.group_bit < 64U) ? (1ULL << c.group_bit) : 0ULL;
+            if ((sp.collider_group_mask & bit) == 0ULL) continue;
+            aether::animation::Vec3 jpos{0, 0, 0};
+            aether::animation::Quat jrot = aether::animation::Quat::identity();
+            if (c.joint_index < avatar->joints.size()) {
+                jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1], avatar->joint_rest_world_pos[c.joint_index][2]};
+                jrot = j_world_rot[c.joint_index];
+            }
+            const auto wa = jpos + aether::animation::rotate_vec(jrot, {c.offset[0], c.offset[1], c.offset[2]});
+            const auto wb = (c.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE)
+                                ? (jpos + aether::animation::rotate_vec(jrot, {c.tail[0], c.tail[1], c.tail[2]}))
+                                : wa;
+            const auto cp = (c.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? closest_pt_seg(wa, wb, jp) : wa;
+            const float dist = aether::animation::length(jp - cp);
+            const float clearance = dist - (sp.hit_radius + c.radius);
+            if (clearance < 0.002f) {
+                if (clearance < 0.0f) ++penetrating_pairs;
+                else ++near_touch_pairs;
+                std::printf("  [COLLISION-REST] spring[%3zu] chain=%2u depth=%u j=%u('%s') vs col[%2zu] (grp=%u): dist=%.4fm sum_r=%.4fm CLEARANCE=%.4fm\n",
+                            si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(), ci, c.group_bit, dist, sp.hit_radius + c.radius, clearance);
+            }
+            if (clearance < min_clear) { min_clear = clearance; min_ci = static_cast<int>(ci); }
+        }
+        if (sp.depth_level <= 1U) {
+            std::printf("  spring[%3zu] chain=%2u d=%u j=%3u('%s') hitR=%.3f stiff=%.2f drag=%.2f grav=%.2f mask=0x%llx min_clear=%.4fm(c=%d)\n",
+                        si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(),
+                        sp.hit_radius, sp.stiffness, sp.drag_force, sp.gravity_power,
+                        static_cast<unsigned long long>(sp.collider_group_mask), min_clear, min_ci);
+        }
+    }
+    std::printf("  Summary: penetrating_pairs=%u near_touch(<2mm)_pairs=%u\n", penetrating_pairs, near_touch_pairs);
+    std::printf("  All avatar joints matching 'J_Sec_' or non-humanoid secondary:\n");
+    for (size_t ji = 0; ji < avatar->joints.size(); ++ji) {
+        const auto& j = avatar->joints[ji];
+        const std::string jn = str_slice(j.name_offset, j.name_len);
+        if (jn.find("J_Sec") != std::string::npos || j.humanoid_bone >= AETHER_HUMANOID_BONE_COUNT) {
+            std::printf("    joint[%2zu] parent=%2d hum=%3u pos=(%.3f,%.3f,%.3f) tail=%.3f name='%s'\n",
+                        ji, j.parent_index, j.humanoid_bone,
+                        avatar->joint_rest_world_pos[ji][0], avatar->joint_rest_world_pos[ji][1], avatar->joint_rest_world_pos[ji][2],
+                        j.tail_length, jn.c_str());
+        }
+    }
+
+    // 3. Check Rust Plugin Host default graph dual-writer & 30->240->60 Hz pacing
+    std::printf("\n=== [FORENSIC] RUST GRAPH DUAL-WRITER & 30->240->60 HZ PACING ===\n");
+    AetherHostConfig hcfg{};
+    hcfg.struct_size = static_cast<uint32_t>(sizeof(hcfg));
+    hcfg.worker_threads = 1;
+    AetherHostHandle host = nullptr;
+    REQUIRE(aether_host_create(&hcfg, &host) == AETHER_OK);
+    REQUIRE(host != nullptr);
+
+    AetherTrackingFrame tf_test{};
+    tf_test.frame_sequence = 1;
+    tf_test.valid_flags = 0x09U;
+    tf_test.upper_body_confidence = 0.0f; // intentionally 0 while face valid!
+    tf_test.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+    tf_test.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) tf_test.joint_rotations_quat[b][3] = 1.0f;
+    const auto qyaw = aether::animation::from_euler_xyz(0.0f, 15.0f * aether::animation::kDegToRad, 0.0f);
+    tf_test.joint_rotations_quat[AETHER_BONE_HEAD][0] = qyaw.x;
+    tf_test.joint_rotations_quat[AETHER_BONE_HEAD][1] = qyaw.y;
+    tf_test.joint_rotations_quat[AETHER_BONE_HEAD][2] = qyaw.z;
+    tf_test.joint_rotations_quat[AETHER_BONE_HEAD][3] = qyaw.w;
+    tf_test.arkit_blendshapes[0] = 0.75f; // eyeBlinkLeft
+
+    AetherGraphInputs gin{};
+    gin.tracking = &tf_test;
+    gin.now_us = 1000000ULL;
+    gin.dt_s = 1.0f / 240.0f;
+    gin.tick_index = 1;
+    gin.dsp_visemes[0] = 0.80f;
+    gin.dsp_rms_db = -18.0f;
+    AetherGraphOutputs gout{};
+    aether_set_thread_role(AETHER_THREAD_ROLE_T2);
+    int32_t eval_rc = AETHER_E_INTERNAL;
+    for (int wait_i = 0; wait_i < 200; ++wait_i) {
+        eval_rc = aether_host_evaluate_active(host, &gin, &gout);
+        if (eval_rc == AETHER_OK) break;
+        timer.sleep_us(2000);
+    }
+    REQUIRE(eval_rc == AETHER_OK);
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    std::printf("  Rust default graph output: bone_rot_off[HEAD]=(%.4f,%.4f,%.4f,%.4f) ik[HEAD].w=%.3f expr[0]=%.3f expr[24]=%.3f expr[52]=%.3f override[0]=%.3f override[24]=%.3f\n",
+                gout.bone_rotation_offsets[AETHER_BONE_HEAD][0], gout.bone_rotation_offsets[AETHER_BONE_HEAD][1],
+                gout.bone_rotation_offsets[AETHER_BONE_HEAD][2], gout.bone_rotation_offsets[AETHER_BONE_HEAD][3],
+                gout.ik_targets[0][7], gout.expression_weights[0], gout.expression_weights[24], gout.expression_weights[52],
+                gout.expression_override[0], gout.expression_override[24]);
+    aether_host_destroy(host);
+
+    // 4. Current SimEngine 30 Hz camera -> 240 Hz sim -> 60 Hz sample logging
+    const auto rm = build_vrm_rest_metrics(*avatar);
+    aether::animation::SimEngine sim;
+    sim.reset(rm);
+    aether::animation::SimEngineConfig scfg{};
+    scfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout_zero{};
+    aether::animation::SkinningFrame skin{};
+
+    std::printf("  SimEngine 30Hz cam -> 240Hz tick -> 60Hz render sample (constant 20 deg/s yaw ramp with 0.08 deg cam jitter):\n");
+    for (int t2 = 0; t2 < 48; ++t2) { // 12 camera intervals * 4 ticks? At 240Hz, 30Hz = every 8 ticks; 48 ticks = 0.2s (12 render frames)
+        const uint32_t cam_seq = static_cast<uint32_t>(t2 / 8 + 1);
+        const double cam_t_s = static_cast<double>(cam_seq - 1U) * (1.0 / 30.0);
+        const double yaw_deg = 20.0 * cam_t_s + ((cam_seq & 1U) ? 0.08 : -0.08);
+        const auto q = aether::animation::from_euler_xyz(0.0f, static_cast<float>(yaw_deg * aether::animation::kDegToRad), 0.0f);
+        AetherTrackingFrame tf{};
+        tf.frame_sequence = cam_seq;
+        tf.capture_timestamp_us = static_cast<uint64_t>(t2 + 1) * 4167ULL;
+        tf.inference_complete_us = tf.capture_timestamp_us;
+        tf.valid_flags = 0x01U;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) tf.joint_rotations_quat[b][3] = 1.0f;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][0] = q.x;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = q.y;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][2] = q.z;
+        tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = q.w;
+        sim.tick(tf, dsp, gout_zero, tf.capture_timestamp_us, 0.0f, scfg, skin);
+        if ((t2 % 4) == 3) {
+            const double h_ang = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_HEAD]);
+            std::printf("    rFrame=%2d t2=%2d cam_seq=%u cam_yaw=%.3f deg -> rendered_head_angle=%.4f deg spring_ms=%.4f\n",
+                        t2 / 4, t2, cam_seq, yaw_deg, h_ang, skin.spring_sim_ms);
+        }
+    }
+
+    avatar.reset();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+namespace {
+
+struct LoadedVrmFixture {
+    aether::rhi::RhiDevice* rhi{nullptr};
+    std::unique_ptr<aether::renderer::GpuAvatar> avatar;
+    aether::animation::RestSkeletonMetrics rm{};
+    bool ok{false};
+
+    ~LoadedVrmFixture() {
+        avatar.reset();
+        if (rhi != nullptr) {
+            rhi->destroy();
+            rhi = nullptr;
+        }
+        aether_runtime_shutdown();
+    }
+};
+
+bool load_real_vrm_fixture(LoadedVrmFixture& fx) {
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        return false;
+    }
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    if (aether_runtime_init(&rt) != AETHER_OK) {
+        return false;
+    }
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    if (!dev_res.has_value()) {
+        return false;
+    }
+    fx.rhi = dev_res.value();
+    aether::renderer::AssetJob job;
+    aether::HighResTimer timer;
+    job.start_load(*fx.rhi, vrm_path.string());
+    const uint64_t deadline_us = aether::now_us() + 30000000ULL;
+    while (job.state() == aether::renderer::AssetJobState::Loading && aether::now_us() < deadline_us) {
+        timer.sleep_us(500);
+    }
+    if (job.state() != aether::renderer::AssetJobState::ReadyForGpu) {
+        return false;
+    }
+    auto avatar_res = job.finalize_gpu_upload(*fx.rhi);
+    if (!avatar_res.has_value()) {
+        return false;
+    }
+    fx.avatar = std::move(avatar_res.value());
+    fx.rm = build_vrm_rest_metrics(*fx.avatar);
+    fx.ok = true;
+    return true;
+}
+
+void rotate_point_euler(float yaw, float pitch, float roll, const float p[3], float out[3]) {
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cr = std::cos(roll), sr = std::sin(roll);
+    const float x1 = p[0] * cr - p[1] * sr;
+    const float y1 = p[0] * sr + p[1] * cr;
+    const float z1 = p[2];
+
+    const float x2 = x1;
+    const float y2 = y1 * cp - z1 * sp;
+    const float z2 = y1 * sp + z1 * cp;
+
+    out[0] = x2 * cy + z2 * sy;
+    out[1] = y2;
+    out[2] = -x2 * sy + z2 * cy;
+}
+
+std::array<float, 478 * 3> project_synthetic_face_landmarks(
+    float yaw_rad, float pitch_rad, float roll_rad, float ear_scale_l, float ear_scale_r,
+    float mouth_open_m, float mouth_corner_dx_m, const aether::tracking::RoiRectNorm& roi, uint32_t cam_w,
+    uint32_t cam_h, std::mt19937* opt_rng = nullptr, float gaussian_px_std = 0.0f) {
+    using namespace aether::tracking;
+    constexpr float kFocalPx = 900.0f;
+    std::array<float, 478 * 3> lm{};
+    std::normal_distribution<float> px_noise(0.0f, std::max(gaussian_px_std, 1e-6f));
+    const float cy_l = 0.5f * (kCanonicalFaceVerticesM[159][1] + kCanonicalFaceVerticesM[145][1]);
+    const float cy_r = 0.5f * (kCanonicalFaceVerticesM[386][1] + kCanonicalFaceVerticesM[374][1]);
+
+    for (uint32_t i = 0; i < 478U; ++i) {
+        const float* base =
+            (i < kCanonicalFaceVertexCount)
+                ? kCanonicalFaceVerticesM[i]
+                : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
+        float p3[3]{base[0], base[1], base[2]};
+        if (i == 159U || i == 145U || i == 160U || i == 144U || i == 158U || i == 153U) {
+            p3[1] = cy_l + (p3[1] - cy_l) * ear_scale_l;
+        } else if (i == 386U || i == 374U || i == 387U || i == 373U || i == 385U || i == 380U) {
+            p3[1] = cy_r + (p3[1] - cy_r) * ear_scale_r;
+        } else if (i == 13U || i == 312U || i == 82U) {
+            p3[1] += mouth_open_m * 0.45f;
+        } else if (i == 14U || i == 317U || i == 87U) {
+            p3[1] -= mouth_open_m * 0.55f;
+        } else if (i == 61U || i == 78U) {
+            p3[0] -= mouth_corner_dx_m;
+        } else if (i == 291U || i == 308U) {
+            p3[0] += mouth_corner_dx_m;
+        }
+        float rot[3]{};
+        rotate_point_euler(yaw_rad, pitch_rad, roll_rad, p3, rot);
+        const float z = -0.55f + rot[2];
+        float u_px = (0.5f + (rot[0] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_w))) *
+                     static_cast<float>(cam_w);
+        float v_px = (0.5f - (rot[1] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_h))) *
+                     static_cast<float>(cam_h);
+        if (opt_rng != nullptr && gaussian_px_std > 0.0f) {
+            u_px += px_noise(*opt_rng);
+            v_px += px_noise(*opt_rng);
+        }
+        const float u_cam = u_px / static_cast<float>(cam_w);
+        const float v_cam = v_px / static_cast<float>(cam_h);
+        lm[i * 3 + 0] = ((u_cam - roi.cx) / roi.width + 0.5f) * 256.0f;
+        lm[i * 3 + 1] = ((v_cam - roi.cy) / roi.height + 0.5f) * 256.0f;
+        lm[i * 3 + 2] = -rot[2] * 100.0f;
+    }
+    return lm;
+}
+
+} // namespace
+
+TEST_CASE("Task 6.1: 8590256991748008892.vrm idle stability under +-1.5 px Gaussian landmark noise",
+          "[vrm][task6][idle]") {
+    LoadedVrmFixture fx;
+    if (!load_real_vrm_fixture(fx)) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    constexpr uint32_t kCamW = 1280U;
+    constexpr uint32_t kCamH = 720U;
+    const aether::tracking::RoiRectNorm roi{0.50f, 0.50f, 0.45f, 0.45f, 0.0f, true};
+
+    aether::tracking::LandmarkPoseSolver solver;
+    solver.reset();
+    AetherTrackingFrame tf{};
+    for (int f = 0; f < 25; ++f) {
+        const auto lm = project_synthetic_face_landmarks(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, roi, kCamW, kCamH);
+        const uint64_t ts = static_cast<uint64_t>(f + 1) * 33333ULL;
+        solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, ts, ts + 2000ULL, aether::tracking::EpTier::Cpu,
+                                       static_cast<uint32_t>(f + 1), false, tf, kCamW, kCamH);
+    }
+    REQUIRE(solver.neutral_calibrated());
+
+    using namespace aether::animation;
+    SimEngine engine;
+    engine.reset(fx.rm);
+    SimEngineConfig scfg{};
+    scfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+
+    AudioLipSyncFrame silent_audio{};
+    silent_audio.device_available = true;
+    silent_audio.assist_active = true;
+    silent_audio.vad = 0.0f;
+    silent_audio.audio_open_y = 0.0f;
+
+    std::mt19937 rng(20261115U);
+    float max_head_jitter_deg = 0.0f;
+    float max_head_pos_vel = 0.0f;
+    float max_blink = 0.0f;
+    float max_vowel = 0.0f;
+    float max_spring_tip_vel = 0.0f;
+    float max_spring_sim_vel = 0.0f;
+    float max_spring_local_vel = 0.0f;
+    Quat prev_head_rot = engine.bone_rot_ws()[AETHER_BONE_HEAD];
+    Vec3 prev_head_pos = engine.bone_pos_ws()[AETHER_BONE_HEAD];
+    std::array<Vec3, aether::animation::kMaxSpringJoints> prev_spring_pos{};
+    std::array<Quat, aether::animation::kMaxSpringJoints> prev_spring_local_rot{};
+    const uint32_t spring_joints = engine.spring_simulator().joint_count();
+    REQUIRE(spring_joints >= 34U);
+
+    // 180 simulation frames @ 60 Hz with 30 Hz noisy webcam packets (+-1.5 px 3-sigma -> std 0.50 px)
+    for (int f = 0; f < 180; ++f) {
+        if ((f % 2) == 0) {
+            const auto lm_noisy = project_synthetic_face_landmarks(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, roi,
+                                                                   kCamW, kCamH, &rng, 0.50f);
+            const uint32_t seq = static_cast<uint32_t>(26 + f / 2);
+            const uint64_t ts = static_cast<uint64_t>(26 + f) * 16667ULL;
+            solver.populate_tracking_frame(roi, lm_noisy.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
+                                           nullptr, nullptr, nullptr, ts, ts + 2000ULL, aether::tracking::EpTier::Cpu,
+                                           seq, false, tf, kCamW, kCamH);
+        }
+        const uint64_t tick_us = static_cast<uint64_t>(26 + f) * 16667ULL + 4000ULL;
+        engine.tick(tf, dsp, gout, tick_us, -1.0f, scfg, skin, &silent_audio, 0.65f);
+
+        const Quat hrot = engine.bone_rot_ws()[AETHER_BONE_HEAD];
+        const Vec3 hpos = engine.bone_pos_ws()[AETHER_BONE_HEAD];
+        if (f >= 60) {
+            max_head_jitter_deg = std::max(max_head_jitter_deg, angle_between(hrot, prev_head_rot) * kRadToDeg);
+            max_head_pos_vel = std::max(max_head_pos_vel, length(hpos - prev_head_pos) * 60.0f);
+            max_blink = std::max({max_blink, skin.morph_weights[0], skin.morph_weights[7]});
+            for (size_t v = 52U; v <= 56U; ++v) {
+                max_vowel = std::max(max_vowel, skin.morph_weights[v]);
+            }
+            for (uint32_t j = 0; j < spring_joints; ++j) {
+                const uint32_t b = 64U + j;
+                const float vel = length(engine.bone_pos_ws()[b] - prev_spring_pos[j]) * 60.0f;
+                max_spring_tip_vel = std::max(max_spring_tip_vel, vel);
+                max_spring_sim_vel = std::max(max_spring_sim_vel, engine.spring_simulator().joint_velocity_mps(j));
+                const uint32_t hb = (j < fx.rm.custom_spring_count)
+                                        ? static_cast<uint32_t>(fx.rm.custom_springs[j].skin_base_humanoid)
+                                        : AETHER_BONE_HEAD;
+                const Quat p_rot =
+                    (hb < AETHER_HUMANOID_BONE_COUNT) ? engine.bone_rot_ws()[hb] : Quat::identity();
+                const Quat rel_rot = normalize(conjugate(p_rot) * engine.bone_rot_ws()[b]);
+                const float d_rad = angle_between(rel_rot, prev_spring_local_rot[j]);
+                const float blen =
+                    (j < fx.rm.custom_spring_count) ? fx.rm.custom_springs[j].bone_length : 0.10f;
+                max_spring_local_vel = std::max(max_spring_local_vel, d_rad * blen * 60.0f);
+            }
+        }
+        prev_head_rot = hrot;
+        prev_head_pos = hpos;
+        for (uint32_t j = 0; j < spring_joints; ++j) {
+            const uint32_t b = 64U + j;
+            prev_spring_pos[j] = engine.bone_pos_ws()[b];
+            const uint32_t hb = (j < fx.rm.custom_spring_count)
+                                    ? static_cast<uint32_t>(fx.rm.custom_springs[j].skin_base_humanoid)
+                                    : AETHER_BONE_HEAD;
+            const Quat p_rot = (hb < AETHER_HUMANOID_BONE_COUNT) ? engine.bone_rot_ws()[hb] : Quat::identity();
+            prev_spring_local_rot[j] = normalize(conjugate(p_rot) * engine.bone_rot_ws()[b]);
+        }
+    }
+
+    std::printf(
+        "[TASK6-IDLE] max_head_jitter=%.6f deg head_pos_vel=%.2e m/s max_blink=%.5f max_vowel=%.5f "
+        "bone_pos_vel=%.2e sim_vel=%.2e local_swing_vel=%.2e m/s\n",
+        max_head_jitter_deg, max_head_pos_vel, max_blink, max_vowel, max_spring_tip_vel, max_spring_sim_vel,
+        max_spring_local_vel);
+    CHECK(max_head_jitter_deg <= 0.002f);
+    CHECK(max_blink == 0.0f);
+    CHECK(max_vowel == 0.0f);
+    CHECK(max_spring_sim_vel < 1e-5f);
+    CHECK(max_spring_local_vel < 1e-4f);
+}
+
+TEST_CASE("Task 6.2: Warudo Ballistic Blink State Machine, Blink Link, Pitch Comp, and Saccadic Gaze",
+          "[vrm][task6][blink]") {
+    using namespace aether::tracking;
+    BlinkGazeStabilizer bg;
+    bg.reset();
+
+    // 1. Calibrate open baseline over 30 frames (EAR = 0.28, slight normal variance)
+    BlinkGazeInput in{};
+    in.dt_s = 1.0f / 30.0f;
+    in.neutral_ear_left_hint = 0.28f;
+    in.neutral_ear_right_hint = 0.28f;
+    for (int i = 0; i < 30; ++i) {
+        in.ear_left = 0.28f + ((i % 2 == 0) ? 0.004f : -0.004f);
+        in.ear_right = 0.28f + ((i % 2 == 0) ? -0.004f : 0.004f);
+        in.gaze_gx_left = in.gaze_gx_right = 0.01f;
+        in.gaze_gy_left = in.gaze_gy_right = -0.01f;
+        const auto out = bg.update(in);
+        CHECK(out.blink_left == 0.0f);
+        CHECK(out.blink_right == 0.0f);
+        CHECK(out.gaze_gx == 0.0f); // within 0.035 saccadic deadband
+        CHECK(out.gaze_gy == 0.0f);
+    }
+
+    // 2. Fast 3-camera-frame blink @ 30 Hz (100 ms closed) stepped in 15 ms resolution via dt_s or 30 Hz:
+    // verify full 1.0 closure (never hovers halfway) and clean return to 0.0, plus gaze recentering during blink.
+    bg.reset();
+    in.dt_s = 0.015f;
+    for (int i = 0; i < 20; ++i) {
+        in.ear_left = in.ear_right = 0.28f;
+        in.gaze_gx_left = in.gaze_gx_right = 0.50f;
+        in.gaze_gy_left = in.gaze_gy_right = 0.0f;
+        (void)bg.update(in);
+    }
+    const float gaze_before_blink = bg.update(in).gaze_gx;
+    CHECK(gaze_before_blink > 0.30f);
+
+    float peak_blink = 0.0f;
+    float mid_gaze_during_blink = gaze_before_blink;
+    for (int i = 0; i < 6; ++i) { // 90 ms eye closure
+        in.ear_left = in.ear_right = 0.09f;
+        const auto out = bg.update(in);
+        peak_blink = std::max(peak_blink, out.blink_left);
+        mid_gaze_during_blink = std::min(mid_gaze_during_blink, std::abs(out.gaze_gx));
+        CHECK(out.blink_left == out.blink_right); // synchronized by Blink Link
+    }
+    CHECK(peak_blink >= 0.999f);
+    CHECK(mid_gaze_during_blink < gaze_before_blink * 0.7f);
+
+    float end_blink = 1.0f;
+    for (int i = 0; i < 12; ++i) { // reopen
+        in.ear_left = in.ear_right = 0.28f;
+        end_blink = bg.update(in).blink_left;
+    }
+    CHECK(end_blink == 0.0f);
+
+    // 3. Single-frame asymmetry (1-frame right-eye drop noise) stays linked without one-eye flutter
+    in.dt_s = 1.0f / 30.0f;
+    in.ear_left = 0.28f;
+    in.ear_right = 0.09f;
+    const auto noise_sync = bg.update(in);
+    CHECK(std::abs(noise_sync.blink_left - noise_sync.blink_right) < 1e-5f);
+    CHECK_FALSE(noise_sync.wink_active);
+
+    // Clear noise & verify +25 deg downward pitch compensation prevents false half-blinks
+    in.ear_left = in.ear_right = 0.28f;
+    for (int i = 0; i < 8; ++i) {
+        (void)bg.update(in);
+    }
+    in.pitch_down_rad = 25.0f * aether::animation::kDegToRad;
+    in.ear_left = in.ear_right = 0.225f; // geometrically narrowed by looking down at keyboard
+    for (int i = 0; i < 5; ++i) {
+        const auto pitched = bg.update(in);
+        CHECK(pitched.blink_left == 0.0f);
+        CHECK(pitched.blink_right == 0.0f);
+    }
+
+    // 4. Deliberate sustained one-eye wink (> 120 ms with abs(Yaw) < 15 deg) separates L/R
+    in.pitch_down_rad = 0.0f;
+    in.head_yaw_rad = 0.0f;
+    in.ear_left = in.ear_right = 0.28f;
+    for (int i = 0; i < 6; ++i) {
+        (void)bg.update(in);
+    }
+    BlinkGazeOutput wink_out{};
+    for (int i = 0; i < 7; ++i) { // 7 * 33.3 ms = 233 ms > 120 ms
+        in.ear_left = 0.08f;
+        in.ear_right = 0.28f;
+        wink_out = bg.update(in);
+    }
+    CHECK(wink_out.wink_active);
+    CHECK(wink_out.blink_left >= 0.99f);
+    CHECK(wink_out.blink_right == 0.0f);
+}
+
+TEST_CASE("Task 6.3: Hybrid WASAPI Audio-Visual Lip-Sync Formants, Silence Lock, and Smile/Yawn Exceptions",
+          "[vrm][task6][audio]") {
+    using namespace aether::animation;
+    using namespace aether::tracking;
+
+    auto gen_tone = [](float freq_hz, float amp, size_t n, uint32_t sr) {
+        std::vector<float> buf(n, 0.0f);
+        for (size_t i = 0; i < n; ++i) {
+            buf[i] = amp * std::sin(kTwoPi * freq_hz * static_cast<float>(i) / static_cast<float>(sr));
+        }
+        return buf;
+    };
+
+    AudioLipSyncProcessor dsp_proc;
+    dsp_proc.reset();
+    constexpr uint32_t kSr = 48000U;
+    constexpr size_t kBlock = 1024U;
+
+    const auto run_tone = [&](float freq_hz) {
+        dsp_proc.reset();
+        const auto pcm = gen_tone(freq_hz, 0.35f, kBlock, kSr);
+        AudioLipSyncFrame f{};
+        for (int b = 0; b < 8; ++b) {
+            f = dsp_proc.process_pcm_block(pcm.data(), kBlock, kSr, 1.0f, -52.0f, static_cast<uint64_t>(b + 1) * 21333ULL);
+        }
+        return f;
+    };
+
+    const AudioLipSyncFrame low_u = run_tone(350.0f);  // B1 250-650 Hz (F1 / U,O)
+    const AudioLipSyncFrame mid_a = run_tone(950.0f);  // B2 700-1600 Hz (A)
+    const AudioLipSyncFrame hi_i = run_tone(2400.0f);  // B3 1700-3200 Hz (F2 / I,E)
+
+    CHECK(low_u.vad > 0.70f);
+    CHECK(low_u.audio_open_y > 0.25f);
+    CHECK((low_u.vowel_probs[2] + low_u.vowel_probs[4]) > (low_u.vowel_probs[1] + low_u.vowel_probs[3]));
+    CHECK(mid_a.vad > 0.70f);
+    CHECK(mid_a.vowel_probs[0] > mid_a.vowel_probs[1]);
+    CHECK(hi_i.vad > 0.70f);
+    CHECK((hi_i.vowel_probs[1] + hi_i.vowel_probs[3]) > (hi_i.vowel_probs[2] + hi_i.vowel_probs[4]));
+    const float sum_hi = hi_i.vowel_probs[0] + hi_i.vowel_probs[1] + hi_i.vowel_probs[2] + hi_i.vowel_probs[3] +
+                         hi_i.vowel_probs[4];
+    CHECK(sum_hi <= 1.001f);
+
+    // Hybrid ExpressionMixer fusion checks:
+    ExpressionMixer mixer;
+    mixer.reset();
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    std::array<float, kMaxMorphs> out{};
+    float owner_blend = 0.0f;
+
+    // 1. Silence Lock: audio VAD=0 + webcam mouth tremor 0.15 (< 0.22) must crush to 0.0
+    AudioLipSyncFrame silence{};
+    silence.device_available = true;
+    silence.assist_active = true;
+    silence.vad = 0.0f;
+    std::array<float, 52> cam_tremor{};
+    cam_tremor[17] = 0.15f; // jawOpen tremor
+    const float cam_v_tremor[5] = {0.15f, 0.0f, 0.0f, 0.0f, 0.0f};
+    Live2DParameters l2d_tremor{};
+    l2d_tremor.param_mouth_open_y = 0.15f;
+    for (int f = 0; f < 30; ++f) {
+        mixer.update(cam_tremor.data(), dsp, gout, 1.0f / 60.0f, out.data(), owner_blend, cam_v_tremor, true,
+                     &l2d_tremor, nullptr, &silence, 0.65f);
+    }
+    CHECK(out[17] < 1e-4f);
+    CHECK(out[52] < 1e-4f);
+
+    // 2. Silent Wide Open Mouth (>= 0.25) opens despite VAD=0
+    mixer.reset();
+    std::array<float, 52> cam_yawn{};
+    cam_yawn[17] = 0.65f;
+    const float cam_v_yawn[5] = {0.65f, 0.0f, 0.0f, 0.0f, 0.0f};
+    Live2DParameters l2d_yawn{};
+    l2d_yawn.param_mouth_open_y = 0.65f;
+    for (int f = 0; f < 20; ++f) {
+        mixer.update(cam_yawn.data(), dsp, gout, 1.0f / 60.0f, out.data(), owner_blend, cam_v_yawn, true, &l2d_yawn,
+                     nullptr, &silence, 0.65f);
+    }
+    CHECK(out[17] > 0.35f);
+    CHECK(out[52] > 0.30f);
+
+    // 3. Silent Closed-Lip Smile (MouthForm > +0.20) preserves smile while keeping vowels 0
+    mixer.reset();
+    std::array<float, 52> cam_smile{};
+    cam_smile[23] = 0.80f;
+    cam_smile[24] = 0.80f;
+    Live2DParameters l2d_smile{};
+    l2d_smile.param_mouth_open_y = 0.05f;
+    l2d_smile.param_mouth_form = 0.80f;
+    for (int f = 0; f < 20; ++f) {
+        mixer.update(cam_smile.data(), dsp, gout, 1.0f / 60.0f, out.data(), owner_blend, nullptr, true, &l2d_smile,
+                     nullptr, &silence, 0.65f);
+    }
+    CHECK(out[52] + out[53] + out[54] + out[55] + out[56] == 0.0f);
+    CHECK(out[23] > 0.30f);
+    CHECK(out[24] > 0.30f);
+}
+
+TEST_CASE("Task 6.4: 8590256991748008892.vrm morph mutual exclusivity & per-region influence clamping",
+          "[vrm][task6][morphs]") {
+    LoadedVrmFixture fx;
+    if (!load_real_vrm_fixture(fx)) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    using namespace aether::animation;
+    SimEngine engine;
+    engine.reset(fx.rm);
+    SimEngineConfig scfg{};
+    scfg.visibility.enable_idle_breathing = false;
+    AetherTrackingFrame tf{};
+    tf.frame_sequence = 1U;
+    tf.valid_flags = 0x01U;
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        tf.joint_rotations_quat[b][3] = 1.0f;
+    }
+    tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+    tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+    engine.tick(tf, dsp, gout, 16667ULL, 0.0f, scfg, skin);
+
+    std::array<float, AETHER_EXPRESSION_SLOT_COUNT> expr{};
+    // Full blink + max Joy + Surprised + Brows + stacked vowels to stress region caps and eyelid guard
+    expr[0] = 1.0f;  // Blink_L
+    expr[7] = 1.0f;  // Blink_R
+    expr[41] = 0.8f; // BrowDownL
+    expr[43] = 0.8f; // BrowInnerUp
+    expr[44] = 0.8f; // BrowOuterUpL
+    expr[52] = 0.7f; // A
+    expr[53] = 0.7f; // I
+    expr[54] = 0.7f; // U
+    expr[55] = 0.7f; // E
+    expr[56] = 0.7f; // O
+    expr[57] = 1.0f; // Joy
+    expr[60] = 1.0f; // Surprised
+    fx.avatar->update_pose(0U, 1U, skin.bone_matrices, skin.bone_count, expr.data(),
+                           static_cast<uint32_t>(expr.size()), true);
+
+    using Region = aether::renderer::GpuAvatar::MorphRegion;
+    double sum_eyel = 0.0;
+    double sum_eyer = 0.0;
+    double sum_brow = 0.0;
+    double sum_mouth = 0.0;
+    float max_eyelid_affecting_emotion = 0.0f;
+    for (size_t mi = 0; mi < fx.avatar->morph_weights_scratch.size(); ++mi) {
+        const float w = fx.avatar->morph_weights_scratch[mi];
+        const auto& meta = fx.avatar->morph_meta[mi];
+        if (meta.affects_eyelids && !meta.is_blink) {
+            max_eyelid_affecting_emotion = std::max(max_eyelid_affecting_emotion, w);
+        }
+        switch (meta.region) {
+        case Region::EyeL: sum_eyel += w; break;
+        case Region::EyeR: sum_eyer += w; break;
+        case Region::Brow: sum_brow += w; break;
+        case Region::Mouth: sum_mouth += w; break;
+        default: break;
+        }
+    }
+    CHECK(max_eyelid_affecting_emotion == 0.0f);
+    CHECK(sum_eyel <= 1.001);
+    CHECK(sum_eyer <= 1.001);
+    CHECK(sum_brow <= 0.751);
+    CHECK(sum_mouth <= 1.001);
+
+    // Partial blink (0.5) attenuates overlapping emotion morphs proportionally (<= 0.5)
+    expr[0] = 0.5f;
+    expr[7] = 0.5f;
+    fx.avatar->update_pose(1U, 2U, skin.bone_matrices, skin.bone_count, expr.data(),
+                           static_cast<uint32_t>(expr.size()), true);
+    float partial_eyelid_emotion = 0.0f;
+    for (size_t mi = 0; mi < fx.avatar->morph_weights_scratch.size(); ++mi) {
+        const auto& meta = fx.avatar->morph_meta[mi];
+        if (meta.affects_eyelids && !meta.is_blink) {
+            partial_eyelid_emotion = std::max(partial_eyelid_emotion, fx.avatar->morph_weights_scratch[mi]);
+        }
+    }
+    CHECK(partial_eyelid_emotion <= 0.501f);
+}
+
+TEST_CASE("Task 6.5: Realistic 30 Hz camera -> 240 Hz tick -> 60 Hz pacing has zero 14 ms freeze stalls",
+          "[vrm][task6][pacing]") {
+    LoadedVrmFixture fx;
+    if (!load_real_vrm_fixture(fx)) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    using namespace aether::animation;
+    SimEngine engine;
+    engine.reset(fx.rm);
+    SimEngineConfig scfg{};
+    scfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+
+    std::vector<double> t2_head_deg;
+    std::vector<double> render_head_deg;
+    t2_head_deg.reserve(144);
+    render_head_deg.reserve(36);
+
+    // 0.6 s continuous 30 deg/s yaw turn driven by 30 Hz camera packets (new packet every 8 T2 ticks)
+    // with inference_complete_us fixed per camera packet so intermediate 240 Hz ticks exceed 14 ms.
+    AetherTrackingFrame tf{};
+    uint64_t packet_ts_us = 0ULL;
+    for (int t2 = 0; t2 < 144; ++t2) {
+        const uint64_t now_us = static_cast<uint64_t>(t2 + 1) * 4167ULL;
+        if ((t2 % 8) == 0) {
+            const uint32_t seq = static_cast<uint32_t>(t2 / 8 + 1);
+            packet_ts_us = now_us;
+            const float yaw_rad = 30.0f * (static_cast<float>(seq - 1U) / 30.0f) * kDegToRad;
+            const Quat q = from_euler_xyz(0.0f, yaw_rad, 0.0f);
+            tf = {};
+            tf.frame_sequence = seq;
+            tf.capture_timestamp_us = packet_ts_us;
+            tf.inference_complete_us = packet_ts_us;
+            tf.valid_flags = 0x01U;
+            for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+                tf.joint_rotations_quat[b][3] = 1.0f;
+            }
+            tf.joint_rotations_quat[AETHER_BONE_HEAD][0] = q.x;
+            tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = q.y;
+            tf.joint_rotations_quat[AETHER_BONE_HEAD][2] = q.z;
+            tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = q.w;
+            tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+            tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+        }
+        engine.tick(tf, dsp, gout, now_us, -1.0f, scfg, skin);
+        const double ang = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_HEAD]);
+        t2_head_deg.push_back(ang);
+        if ((t2 % 4) == 3) {
+            render_head_deg.push_back(ang);
+        }
+    }
+
+    // After visibility settle (t2 >= 48 = 0.2 s), every 240 Hz tick must advance monotonically with zero stalls
+    double min_step_t2 = 1e9;
+    double max_accel_r = 0.0;
+    for (size_t i = 48; i < t2_head_deg.size(); ++i) {
+        const double step = t2_head_deg[i] - t2_head_deg[i - 1];
+        min_step_t2 = std::min(min_step_t2, step);
+        CHECK(step > 0.001); // never stalls on > 14 ms tail between 30 Hz camera packets
+    }
+    for (size_t i = 10; i < render_head_deg.size(); ++i) {
+        const double d1 = render_head_deg[i] - render_head_deg[i - 1];
+        const double d0 = render_head_deg[i - 1] - render_head_deg[i - 2];
+        max_accel_r = std::max(max_accel_r, std::abs(d1 - d0));
+        CHECK(d1 > 0.0);
+    }
+    std::printf(
+        "[TASK6-PACING] min_240hz_step=%.5f deg max_60hz_2nd_diff=%.5f deg final_head=%.3f deg "
+        "(neck=%.3f spine=%.3f chest=%.3f tf_last=%.3f)\n",
+        min_step_t2, max_accel_r, t2_head_deg.back(), mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_NECK]),
+        mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_SPINE]),
+        mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_CHEST]),
+        angle_between(Quat{tf.joint_rotations_quat[AETHER_BONE_HEAD][0], tf.joint_rotations_quat[AETHER_BONE_HEAD][1],
+                           tf.joint_rotations_quat[AETHER_BONE_HEAD][2], tf.joint_rotations_quat[AETHER_BONE_HEAD][3]},
+                      Quat::identity()) *
+            kRadToDeg);
+    CHECK(max_accel_r < 0.08);
+    CHECK(t2_head_deg.back() > 12.5);
 }

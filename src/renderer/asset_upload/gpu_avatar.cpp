@@ -234,6 +234,152 @@ void build_joint_humanoid_sources(const std::vector<AetherJointDesc>& joints, co
     }
 }
 
+void build_joint_spring_sources(const std::vector<AetherJointDesc>& joints,
+                                const std::vector<AetherSpringJointDesc>& springs,
+                                std::vector<int32_t>& out_sources) {
+    out_sources.assign(joints.size(), -1);
+    constexpr uint32_t kCustomSpringBoneOffset = 64U;
+    constexpr uint32_t kMaxCustomSprings = 160U;
+    uint32_t dst_idx = 0U;
+    for (const AetherSpringJointDesc& sp : springs) {
+        if (dst_idx >= kMaxCustomSprings) {
+            break;
+        }
+        if (sp.joint_index < joints.size()) {
+            // Only tag the first spring descriptor referencing a given joint (matches SimEngine slot order)
+            if (out_sources[sp.joint_index] < 0) {
+                out_sources[sp.joint_index] = static_cast<int32_t>(kCustomSpringBoneOffset + dst_idx);
+            }
+            ++dst_idx;
+        }
+    }
+    // Propagate spring parent ownership down to unsimulated terminal/accessory leaf joints
+    for (size_t i = 0; i < joints.size(); ++i) {
+        if (out_sources[i] >= 0 || joints[i].humanoid_bone < AETHER_HUMANOID_BONE_COUNT) {
+            continue;
+        }
+        size_t cur = i;
+        for (size_t hops = 0; hops < joints.size(); ++hops) {
+            const int32_t p = joints[cur].parent_index;
+            if (p < 0 || static_cast<size_t>(p) >= joints.size() || static_cast<size_t>(p) == cur) {
+                break;
+            }
+            cur = static_cast<size_t>(p);
+            if (joints[cur].humanoid_bone < AETHER_HUMANOID_BONE_COUNT) {
+                break;
+            }
+            if (out_sources[cur] >= 0) {
+                out_sources[i] = out_sources[cur];
+                break;
+            }
+        }
+    }
+}
+
+void build_deduped_expressions_and_morph_meta(const std::vector<AetherExpressionBindingDesc>& expressions,
+                                              const std::vector<AetherMorphRangeDesc>& morph_ranges,
+                                              const std::vector<AetherMorphDelta>& morph_deltas, size_t vertex_count,
+                                              std::vector<AetherExpressionBindingDesc>& out_deduped,
+                                              std::vector<GpuAvatar::MorphMeta>& out_meta) {
+    out_deduped.clear();
+    out_meta.assign(morph_ranges.size(), GpuAvatar::MorphMeta{});
+    if (expressions.empty()) {
+        return;
+    }
+
+    // Keep only the canonical (lowest preset_index) preset per emotion slot (>= 57) so Joy/Fun never stack.
+    std::array<uint32_t, 64> min_preset_for_slot{};
+    min_preset_for_slot.fill(UINT32_MAX);
+    for (const AetherExpressionBindingDesc& b : expressions) {
+        if (b.input_slot >= 57U && b.input_slot < min_preset_for_slot.size()) {
+            min_preset_for_slot[b.input_slot] = std::min(min_preset_for_slot[b.input_slot], b.preset_index);
+        }
+    }
+
+    out_deduped.reserve(expressions.size());
+    for (const AetherExpressionBindingDesc& b : expressions) {
+        if (b.input_slot >= 57U && b.input_slot < min_preset_for_slot.size() &&
+            b.preset_index != min_preset_for_slot[b.input_slot]) {
+            continue;
+        }
+        bool dup = false;
+        for (const AetherExpressionBindingDesc& prev : out_deduped) {
+            if (prev.input_slot == b.input_slot && prev.morph_index == b.morph_index) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            out_deduped.push_back(b);
+        }
+    }
+
+    std::vector<uint8_t> blink_verts(vertex_count, 0U);
+    auto classify_slot = [](uint32_t slot) noexcept -> GpuAvatar::MorphRegion {
+        if (slot <= 6U) {
+            return GpuAvatar::MorphRegion::EyeL;
+        }
+        if (slot >= 7U && slot <= 13U) {
+            return GpuAvatar::MorphRegion::EyeR;
+        }
+        if (slot >= 41U && slot <= 45U) {
+            return GpuAvatar::MorphRegion::Brow;
+        }
+        if ((slot >= 14U && slot <= 37U) || (slot >= 52U && slot <= 56U)) {
+            return GpuAvatar::MorphRegion::Mouth;
+        }
+        if (slot >= 57U) {
+            return GpuAvatar::MorphRegion::Emotion;
+        }
+        return GpuAvatar::MorphRegion::Other;
+    };
+
+    for (const AetherExpressionBindingDesc& b : out_deduped) {
+        if (b.morph_index >= out_meta.size()) {
+            continue;
+        }
+        GpuAvatar::MorphMeta& mm = out_meta[b.morph_index];
+        const GpuAvatar::MorphRegion reg = classify_slot(b.input_slot);
+        if (b.input_slot == 0U || b.input_slot == 7U) {
+            mm.is_blink = true;
+            mm.region = reg;
+            if (b.morph_index < morph_ranges.size() && vertex_count > 0U) {
+                const AetherMorphRangeDesc& mr = morph_ranges[b.morph_index];
+                const size_t start = mr.delta_offset;
+                const size_t end = std::min(start + mr.delta_count, morph_deltas.size());
+                for (size_t di = start; di < end; ++di) {
+                    const AetherMorphDelta& d = morph_deltas[di];
+                    const float d2 = d.d_position[0] * d.d_position[0] + d.d_position[1] * d.d_position[1] +
+                                     d.d_position[2] * d.d_position[2];
+                    if (d.vertex_index < vertex_count && d2 > 1e-6f) {
+                        blink_verts[d.vertex_index] = 1U;
+                    }
+                }
+            }
+        } else if (mm.region == GpuAvatar::MorphRegion::Other ||
+                   (mm.region == GpuAvatar::MorphRegion::Emotion && reg != GpuAvatar::MorphRegion::Other)) {
+            mm.region = reg;
+        }
+    }
+
+    if (vertex_count > 0U) {
+        for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
+            const AetherMorphRangeDesc& mr = morph_ranges[mi];
+            const size_t start = mr.delta_offset;
+            const size_t end = std::min(start + mr.delta_count, morph_deltas.size());
+            for (size_t di = start; di < end; ++di) {
+                const AetherMorphDelta& d = morph_deltas[di];
+                const float d2 = d.d_position[0] * d.d_position[0] + d.d_position[1] * d.d_position[1] +
+                                 d.d_position[2] * d.d_position[2];
+                if (d.vertex_index < vertex_count && d2 > 1e-6f && blink_verts[d.vertex_index] != 0U) {
+                    out_meta[mi].affects_eyelids = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 inline void transform_point_3x4(const std::array<float, 12>& m, const float in_p[3], float out_p[3]) noexcept {
     const float x = in_p[0];
     const float y = in_p[1];
@@ -335,9 +481,11 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
     // 1. Resolve per-joint skinning matrices and animated skeleton overlay (0 alloc)
     const size_t j_count = joints.size();
     for (size_t j = 0; j < j_count; ++j) {
+        const int32_t spr = (j < joint_spring_source.size()) ? joint_spring_source[j] : -1;
         const int32_t hum = (j < joint_humanoid_source.size()) ? joint_humanoid_source[j] : -1;
-        if (hum >= 0 && static_cast<uint32_t>(hum) < bone_count) {
-            std::memcpy(joint_skin_matrices[j].data(), bone_matrices[hum], sizeof(float) * 12U);
+        const int32_t src = (spr >= 0 && static_cast<uint32_t>(spr) < bone_count) ? spr : hum;
+        if (src >= 0 && static_cast<uint32_t>(src) < bone_count) {
+            std::memcpy(joint_skin_matrices[j].data(), bone_matrices[src], sizeof(float) * 12U);
         } else {
             joint_skin_matrices[j] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         }
@@ -404,9 +552,108 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
 
         if (!morph_deltas.empty() && !morph_weights_scratch.empty() && expr_weights != nullptr && expr_count > 0U) {
             std::fill(morph_weights_scratch.begin(), morph_weights_scratch.end(), 0.0f);
-            for (const AetherExpressionBindingDesc& b : expressions) {
+            const auto& active_exprs = deduped_expressions.empty() ? expressions : deduped_expressions;
+            for (const AetherExpressionBindingDesc& b : active_exprs) {
                 if (b.input_slot < expr_count && b.morph_index < morph_weights_scratch.size()) {
                     morph_weights_scratch[b.morph_index] += expr_weights[b.input_slot] * b.weight;
+                }
+            }
+            for (float& mw : morph_weights_scratch) {
+                mw = std::clamp(mw, 0.0f, 1.0f);
+            }
+            if (morph_meta.size() == morph_ranges.size()) {
+                const float blink_l = std::clamp(expr_weights[0], 0.0f, 1.0f);
+                const float blink_r = (expr_count > 7U) ? std::clamp(expr_weights[7], 0.0f, 1.0f) : blink_l;
+                const float eyelid_guard = 1.0f - std::max(blink_l, blink_r);
+                float eye_l_non_blink = 0.0f;
+                float eye_r_non_blink = 0.0f;
+                float eye_l_blink = 0.0f;
+                float eye_r_blink = 0.0f;
+                float brow_sum = 0.0f;
+                float mouth_sum = 0.0f;
+
+                for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
+                    float& w = morph_weights_scratch[mi];
+                    const MorphMeta& mm = morph_meta[mi];
+                    const bool is_eye_brow_emotion =
+                        !mm.is_blink && mm.affects_eyelids && mm.region != MorphRegion::Mouth &&
+                        mm.region != MorphRegion::Other;
+                    if (is_eye_brow_emotion) {
+                        w *= eyelid_guard;
+                    }
+                    switch (mm.region) {
+                    case MorphRegion::EyeL:
+                        if (mm.is_blink) {
+                            eye_l_blink += w;
+                        } else {
+                            eye_l_non_blink += w;
+                        }
+                        break;
+                    case MorphRegion::EyeR:
+                        if (mm.is_blink) {
+                            eye_r_blink += w;
+                        } else {
+                            eye_r_non_blink += w;
+                        }
+                        break;
+                    case MorphRegion::Brow:
+                        brow_sum += w;
+                        break;
+                    case MorphRegion::Mouth:
+                        mouth_sum += w;
+                        break;
+                    case MorphRegion::Emotion:
+                    case MorphRegion::Other:
+                        break;
+                    }
+                }
+
+                const float eye_l_budget = std::max(0.0f, 1.0f - std::min(eye_l_blink, 1.0f));
+                const float eye_r_budget = std::max(0.0f, 1.0f - std::min(eye_r_blink, 1.0f));
+                const float eye_l_scale =
+                    (eye_l_non_blink > eye_l_budget && eye_l_non_blink > 1e-5f) ? (eye_l_budget / eye_l_non_blink) : 1.0f;
+                const float eye_r_scale =
+                    (eye_r_non_blink > eye_r_budget && eye_r_non_blink > 1e-5f) ? (eye_r_budget / eye_r_non_blink) : 1.0f;
+                const float blink_l_scale = (eye_l_blink > 1.0f) ? (1.0f / eye_l_blink) : 1.0f;
+                const float blink_r_scale = (eye_r_blink > 1.0f) ? (1.0f / eye_r_blink) : 1.0f;
+                const float brow_scale = (brow_sum > 0.75f) ? (0.75f / brow_sum) : 1.0f;
+                const float mouth_scale = (mouth_sum > 1.0f) ? (1.0f / mouth_sum) : 1.0f;
+
+                float non_blink_eyelid_sum = 0.0f;
+                for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
+                    float& w = morph_weights_scratch[mi];
+                    const MorphMeta& mm = morph_meta[mi];
+                    switch (mm.region) {
+                    case MorphRegion::EyeL:
+                        w *= mm.is_blink ? blink_l_scale : eye_l_scale;
+                        break;
+                    case MorphRegion::EyeR:
+                        w *= mm.is_blink ? blink_r_scale : eye_r_scale;
+                        break;
+                    case MorphRegion::Brow:
+                        w *= brow_scale;
+                        break;
+                    case MorphRegion::Mouth:
+                        w *= mouth_scale;
+                        break;
+                    case MorphRegion::Emotion:
+                    case MorphRegion::Other:
+                        break;
+                    }
+                    if (!mm.is_blink && mm.affects_eyelids && mm.region != MorphRegion::Mouth &&
+                        mm.region != MorphRegion::Other) {
+                        non_blink_eyelid_sum += w;
+                    }
+                }
+                if (non_blink_eyelid_sum > eyelid_guard && non_blink_eyelid_sum > 1e-5f) {
+                    const float extra = eyelid_guard / non_blink_eyelid_sum;
+                    for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
+                        const MorphMeta& mm = morph_meta[mi];
+                        if (!mm.is_blink && mm.affects_eyelids && mm.region != MorphRegion::Mouth &&
+                            mm.region != MorphRegion::Other) {
+                            morph_weights_scratch[mi] *= extra;
+                        }
+                    }
                 }
             }
             const size_t v_count = skinned_vertices_scratch.size();
@@ -669,10 +916,14 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     compute_rest_joint_world_positions(avatar->joints, avatar->joint_rest_world_pos);
     avatar->joint_anim_world_pos = avatar->joint_rest_world_pos;
     build_joint_humanoid_sources(avatar->joints, avatar->desc, avatar->joint_humanoid_source);
+    build_joint_spring_sources(avatar->joints, avatar->springs, avatar->joint_spring_source);
+    build_deduped_expressions_and_morph_meta(avatar->expressions, avatar->morph_ranges, avatar->morph_deltas,
+                                             avatar->rest_vertices.size(), avatar->deduped_expressions,
+                                             avatar->morph_meta);
     detect_brow_bone_bindings(avatar->joints, avatar->strings, avatar->joint_humanoid_source,
                               avatar->joint_rest_world_pos, avatar->brow_bones);
     avatar->has_split_brow_morphs = false;
-    for (const AetherExpressionBindingDesc& eb : avatar->expressions) {
+    for (const AetherExpressionBindingDesc& eb : avatar->deduped_expressions) {
         if (eb.input_slot >= 41U && eb.input_slot <= 45U) {
             avatar->has_split_brow_morphs = true;
             break;

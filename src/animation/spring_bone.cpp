@@ -74,21 +74,36 @@ namespace {
     return head_ws - c_pos;
 }
 
-inline bool collider_matches_joint(uint32_t c, uint32_t col_mask, uint8_t filter_by_mask,
+inline bool collider_matches_joint(uint32_t c, uint64_t col_mask, uint8_t filter_by_mask,
                                    const SpringColliderSoA& colliders) noexcept {
     if (filter_by_mask == 0U) {
         return true;
     }
-    if (col_mask == 0U) {
+    if (col_mask == 0ULL) {
         return false;
     }
     const uint32_t g = colliders.group_bit[c];
-    return g < 32U && ((col_mask & (1U << g)) != 0U);
+    return g < 64U && ((col_mask & (1ULL << g)) != 0ULL);
 }
 
-inline bool push_out_single_collider(uint32_t c, Vec3 head, Vec3 world_rest_dir, float len, float hr,
+[[nodiscard]] inline uint16_t encode_shrink_mm5(float shrink_m) noexcept {
+    const float scaled = std::clamp(shrink_m, 0.0f, 0.65f) * 100000.0f;
+    return static_cast<uint16_t>(std::min(scaled + 0.5f, 65535.0f));
+}
+
+[[nodiscard]] inline float effective_collider_sum_r(
+    uint32_t j, uint32_t c, float hr, float col_radius,
+    const std::array<uint16_t, kMaxSpringJoints * kMaxSpringColliders>& pair_shrink) noexcept {
+    const float shrink_m =
+        static_cast<float>(pair_shrink[static_cast<size_t>(j) * kMaxSpringColliders + c]) * 1e-5f;
+    return std::max(hr + col_radius - shrink_m, 0.0f);
+}
+
+inline bool push_out_single_collider(uint32_t c, Vec3 head, Vec3 world_rest_dir, float len, float sum_r,
                                      const SpringColliderSoA& colliders, Vec3& io_pos) noexcept {
-    const float sum_r = hr + colliders.radius[c];
+    if (sum_r <= 0.0f) {
+        return false;
+    }
     const Vec3 ca{colliders.center_ax[c], colliders.center_ay[c], colliders.center_az[c]};
     Vec3 closest = ca;
     if (colliders.shape[c] == static_cast<uint8_t>(ColliderShape::Capsule)) {
@@ -131,27 +146,58 @@ inline Vec3 integrate_verlet_constrained_next(Vec3 head, Vec3 cur, Vec3 prv, Vec
     return head + normalize_safe(next - head, world_rest_dir) * len;
 }
 
-inline void finalize_joint_verlet_step(uint32_t j, Vec3 cur, Vec3 prv, Vec3 /*pre_col_next*/, bool had_contact,
-                                       Vec3& io_next, float bone_len, float dt_s, float* prev_x, float* prev_y,
-                                       float* prev_z, float* curr_x, float* curr_y, float* curr_z) noexcept {
+inline void prepare_sleep_carried_state(bool sleep_gate, Vec3 head, Vec3 old_head, Vec3 world_rest_dir,
+                                      float bone_len, Vec3& io_cur, Vec3& io_prv, Vec3& out_anchor_shift) noexcept {
+    if (!sleep_gate) {
+        out_anchor_shift = {};
+        return;
+    }
+    out_anchor_shift = head - old_head;
+    // If settled (`cur == prv`), translate the rest vector rigidly with small anchor shifts to prevent phantom tilt.
+    if (length_sq(io_cur - io_prv) <= 1e-12f && length_sq(out_anchor_shift) > 0.0f) {
+        io_cur = head + normalize_safe(io_cur - old_head, world_rest_dir) * bone_len;
+        io_prv = io_cur;
+    }
+}
+
+inline void finalize_joint_verlet_step(uint32_t j, Vec3 cur, Vec3 prv, Vec3 /*pre_col_next*/, Vec3 anchor_shift,
+                                       bool had_contact, bool sleep_gate, Vec3& io_next, float bone_len, float dt_s,
+                                       float* prev_x, float* prev_y, float* prev_z, float* curr_x, float* curr_y,
+                                       float* curr_z) noexcept {
     // Sleep clamp eliminates residual float jitter so hair/cloth settle to < 1e-5 velocity at rest.
     // On collider contact, damp ONLY actual post-constraint displacement (inelastic friction) so static
     // stiffness/gravity impulses cannot inject phantom tangential momentum into stationary joints.
+    const Vec3 rel_disp = (io_next - cur) - anchor_shift;
     Vec3 next_prev = cur;
-    if (had_contact) {
+    if (had_contact && sleep_gate) {
+        next_prev = io_next - rel_disp * (0.45f * 0.80f);
+    } else if (had_contact) {
         const Vec3 actual_disp = io_next - cur;
         next_prev = io_next - actual_disp * 0.45f;
+    } else if (sleep_gate) {
+        // Exponential velocity damping (* 0.80 per tick) on relative pendulum motion when head ang vel < 0.5 deg/s.
+        next_prev = io_next - rel_disp * 0.80f;
     }
 
     const float step_disp_sq = length_sq(io_next - cur);
+    const float rel_disp_sq = length_sq(rel_disp);
     const float prev_disp_sq = length_sq(cur - prv);
-    const float free_sleep = std::max(1.2e-3f * dt_s, 1.5e-5f * std::max(bone_len, 0.05f));
+    const float free_sleep =
+        sleep_gate ? (1.0e-4f * dt_s) : std::max(1.2e-3f * dt_s, 1.5e-5f * std::max(bone_len, 0.05f));
     const float sleep_step = had_contact ? std::max(5.0e-3f * dt_s, free_sleep) : free_sleep;
     const float sleep_step_sq = sleep_step * sleep_step;
     constexpr float kStaticFloorSq = 1.5e-6f * 1.5e-6f;
     const bool decelerated_to_sleep = (prev_disp_sq > 0.0f && prev_disp_sq <= sleep_step_sq);
     const bool sub_micron_static = (step_disp_sq <= kStaticFloorSq);
-    if (step_disp_sq <= sleep_step_sq && (decelerated_to_sleep || sub_micron_static || had_contact)) {
+    const bool below_sleep_gate_floor = (sleep_gate && rel_disp_sq <= (1.0e-4f * dt_s) * (1.0e-4f * dt_s));
+    if (below_sleep_gate_floor) {
+        if (length_sq(anchor_shift) > 0.0f) {
+            io_next = had_contact ? io_next : cur;
+        } else {
+            io_next = cur;
+        }
+        next_prev = io_next;
+    } else if (step_disp_sq <= sleep_step_sq && (decelerated_to_sleep || sub_micron_static || had_contact)) {
         io_next = cur;
         next_prev = cur;
     }
@@ -171,10 +217,15 @@ void SpringBoneSimulator::clear() noexcept {
     count_ = 0;
     colliders_.count = 0;
     state_initialized_ = false;
+    auto_calibrate_clearance_ = false;
+    has_motion_ref_ = false;
     teleport_resets_ = 0;
     last_center_pos_ = {};
+    prev_head_pos_ = {};
+    prev_head_rot_ = Quat::identity();
     active_contact_.fill(0);
     joint_contact_.fill(0);
+    pair_shrink_1e5m_.fill(0);
 }
 
 bool SpringBoneSimulator::add_joint(const SpringJointDesc& desc) noexcept {
@@ -268,13 +319,14 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
         return (q2 > 1e-6f) ? normalize(q) : Quat::identity();
     };
     if (rest.custom_collider_count > 0U) {
-        const uint32_t col_n = std::min<uint32_t>(rest.custom_collider_count, static_cast<uint32_t>(rest.custom_colliders.size()));
+        const uint32_t col_n =
+            std::min<uint32_t>(rest.custom_collider_count, static_cast<uint32_t>(rest.custom_colliders.size()));
         for (uint32_t i = 0; i < col_n; ++i) {
             const auto& cd = rest.custom_colliders[i];
             if (cd.shape == static_cast<uint8_t>(ColliderShape::Capsule)) {
-                (void)add_capsule_collider(cd.attached_bone, cd.local_a, cd.local_b, cd.radius);
+                (void)add_capsule_collider(cd.attached_bone, cd.local_a, cd.local_b, cd.radius, cd.group_bit);
             } else {
-                (void)add_sphere_collider(cd.attached_bone, cd.local_a, cd.radius);
+                (void)add_sphere_collider(cd.attached_bone, cd.local_a, cd.radius, cd.group_bit);
             }
         }
     } else {
@@ -283,8 +335,10 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
         const Quat inv_chest = conjugate(unit_rest_rot(AETHER_BONE_CHEST));
         const Quat inv_lsh = conjugate(unit_rest_rot(AETHER_BONE_LEFT_SHOULDER));
         const Quat inv_rsh = conjugate(unit_rest_rot(AETHER_BONE_RIGHT_SHOULDER));
-        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD), rotate_vec(inv_head, {0.0f, 0.08f, 0.01f}), 0.11f);
-        (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST), rotate_vec(inv_chest, {0.0f, -0.05f, 0.0f}),
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD),
+                                  rotate_vec(inv_head, {0.0f, 0.08f, 0.01f}), 0.11f);
+        (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST),
+                                   rotate_vec(inv_chest, {0.0f, -0.05f, 0.0f}),
                                    rotate_vec(inv_chest, {0.0f, 0.14f, 0.0f}), 0.12f);
         (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_LEFT_SHOULDER),
                                   rotate_vec(inv_lsh, {0.06f, 0.0f, 0.0f}), 0.07f);
@@ -292,32 +346,128 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
                                   rotate_vec(inv_rsh, {-0.06f, 0.0f, 0.0f}), 0.07f);
     }
 
-    const Quat inv_head = conjugate(unit_rest_rot(AETHER_BONE_HEAD));
-    // 8 hair strands x 4 joints (indices 64..95) so secondary motion populates virtual hair bones when avatar loads
-    for (int strand = 0; strand < 8; ++strand) {
-        const float angle = static_cast<float>(strand) * (kTwoPi / 8.0f);
-        const Vec3 dir_out{std::cos(angle) * 0.25f, -0.95f, std::sin(angle) * 0.25f};
-        const Vec3 dir_unit = normalize_safe(dir_out);
-        for (int link = 0; link < 4; ++link) {
-            const uint32_t j = static_cast<uint32_t>(strand * 4 + link);
+    if (rest.custom_spring_count > 0U) {
+        const uint32_t sp_n =
+            std::min<uint32_t>(rest.custom_spring_count, std::min<uint32_t>(kMaxRestSprings, kMaxSpringJoints));
+        for (uint32_t i = 0; i < sp_n; ++i) {
+            const auto& sp = rest.custom_springs[i];
             SpringJointDesc d{};
-            d.bone_index = static_cast<int32_t>(64U + j);
-            d.parent_joint_index = (link == 0) ? -1 : static_cast<int32_t>(j - 1U);
-            d.parent_bone_index =
-                (link == 0) ? static_cast<int32_t>(AETHER_BONE_HEAD) : static_cast<int32_t>(64U + j - 1U);
-            d.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
-            d.local_bone_offset =
-                (link == 0) ? rotate_vec(inv_head, {0.08f * std::cos(angle), 0.06f, 0.08f * std::sin(angle)})
-                            : (dir_unit * 0.06f);
-            d.rest_dir = (link == 0) ? normalize_safe(rotate_vec(inv_head, dir_unit)) : dir_unit;
-            d.bone_length = 0.065f;
-            d.hit_radius = 0.018f;
-            d.stiffness = 0.68f;
-            d.drag_force = 0.38f;
-            d.gravity_power = 0.12f;
+            d.bone_index = sp.bone_index;
+            d.parent_joint_index = sp.parent_spring_index;
+            d.parent_bone_index = sp.parent_bone_index;
+            d.center_bone_index = sp.center_bone_index;
+            d.local_bone_offset = sp.local_bone_offset;
+            d.rest_dir = sp.rest_dir;
+            d.bone_length = sp.bone_length;
+            d.hit_radius = sp.hit_radius;
+            d.stiffness = sp.stiffness;
+            d.drag_force = sp.drag_force;
+            d.gravity_power = sp.gravity_power;
+            d.gravity_dir = sp.gravity_dir;
+            d.collider_mask = sp.collider_group_mask;
+            d.filter_colliders_by_mask = sp.filter_colliders_by_mask;
             (void)add_joint(d);
         }
+    } else {
+        const Quat inv_head = conjugate(unit_rest_rot(AETHER_BONE_HEAD));
+        // 8 hair strands x 4 joints (indices 64..95) fallback when asset lacks authored VRM spring chains
+        for (int strand = 0; strand < 8; ++strand) {
+            const float angle = static_cast<float>(strand) * (kTwoPi / 8.0f);
+            const Vec3 dir_out{std::cos(angle) * 0.25f, -0.95f, std::sin(angle) * 0.25f};
+            const Vec3 dir_unit = normalize_safe(dir_out);
+            for (int link = 0; link < 4; ++link) {
+                const uint32_t j = static_cast<uint32_t>(strand * 4 + link);
+                SpringJointDesc d{};
+                d.bone_index = static_cast<int32_t>(64U + j);
+                d.parent_joint_index = (link == 0) ? -1 : static_cast<int32_t>(j - 1U);
+                d.parent_bone_index =
+                    (link == 0) ? static_cast<int32_t>(AETHER_BONE_HEAD) : static_cast<int32_t>(64U + j - 1U);
+                d.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
+                d.local_bone_offset =
+                    (link == 0) ? rotate_vec(inv_head, {0.08f * std::cos(angle), 0.06f, 0.08f * std::sin(angle)})
+                                : (dir_unit * 0.06f);
+                d.rest_dir = (link == 0) ? normalize_safe(rotate_vec(inv_head, dir_unit)) : dir_unit;
+                d.bone_length = 0.065f;
+                d.hit_radius = 0.018f;
+                d.stiffness = 0.68f;
+                d.drag_force = 0.38f;
+                d.gravity_power = 0.12f;
+                (void)add_joint(d);
+            }
+        }
     }
+    auto_calibrate_clearance_ = true;
+}
+
+void SpringBoneSimulator::calibrate_rest_collider_clearance(const std::array<Vec3, kMaxBones>& bone_pos_ws,
+                                                              const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept {
+    pair_shrink_1e5m_.fill(0);
+    if (count_ == 0U || colliders_.count == 0U) {
+        return;
+    }
+    evaluate_colliders(bone_pos_ws, bone_rot_ws);
+    constexpr float kClearanceMarginM = 0.002f;
+    for (uint32_t j = 0; j < count_; ++j) {
+        const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
+                                                          local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
+                                                          curr_y_, curr_z_, bone_pos_ws, bone_rot_ws);
+        const int32_t pb = parent_bone_idx_[j];
+        const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? bone_rot_ws[static_cast<size_t>(pb)]
+                                                                           : Quat::identity();
+        const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
+        const Vec3 tail = head + world_rest_dir * bone_len_[j];
+        curr_x_[j] = tail.x;
+        curr_y_[j] = tail.y;
+        curr_z_[j] = tail.z;
+
+        const float hr = hit_radius_[j];
+        const uint64_t col_mask = collider_mask_[j];
+        const uint8_t filter_mask = filter_by_mask_[j];
+        for (uint32_t c = 0; c < colliders_.count; ++c) {
+            if (!collider_matches_joint(c, col_mask, filter_mask, colliders_)) {
+                continue;
+            }
+            const Vec3 ca{colliders_.center_ax[c], colliders_.center_ay[c], colliders_.center_az[c]};
+            Vec3 closest = ca;
+            if (colliders_.shape[c] == static_cast<uint8_t>(ColliderShape::Capsule)) {
+                const Vec3 cb{colliders_.center_bx[c], colliders_.center_by[c], colliders_.center_bz[c]};
+                const Vec3 ab = cb - ca;
+                const float ab2 = dot(ab, ab);
+                const float t = (ab2 > 1e-10f) ? std::clamp(dot(tail - ca, ab) / ab2, 0.0f, 1.0f) : 0.0f;
+                closest = ca + ab * t;
+            }
+            const float dist = length(tail - closest);
+            const float nominal_sum = hr + colliders_.radius[c];
+            if (dist < nominal_sum + kClearanceMarginM) {
+                const float shrink_m = (nominal_sum + kClearanceMarginM) - dist;
+                pair_shrink_1e5m_[static_cast<size_t>(j) * kMaxSpringColliders + c] = encode_shrink_mm5(shrink_m);
+            }
+        }
+    }
+}
+
+void SpringBoneSimulator::warmup_settle(std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+                                        std::array<Quat, kMaxBones>& io_bone_rot_ws, uint32_t bone_count,
+                                        uint32_t steps) noexcept {
+    if (count_ == 0U) {
+        return;
+    }
+    if (!state_initialized_) {
+        reset_state(io_bone_pos_ws, io_bone_rot_ws, bone_count);
+    }
+    evaluate_colliders(io_bone_pos_ws, io_bone_rot_ws);
+    constexpr float kWarmupDt = 1.0f / 60.0f;
+    constexpr float kWarmupDtSq = kWarmupDt * kWarmupDt;
+    for (uint32_t s = 0; s < steps; ++s) {
+        active_contact_.fill(0);
+        joint_contact_.fill(0);
+        step_scalar(kWarmupDt, kWarmupDtSq, Vec3{}, 1.0f, true, io_bone_pos_ws, io_bone_rot_ws);
+    }
+    prev_root_pos_ = io_bone_pos_ws[AETHER_BONE_HIPS];
+    prev_head_pos_ = io_bone_pos_ws[AETHER_BONE_HEAD];
+    const Quat qh = io_bone_rot_ws[AETHER_BONE_HEAD];
+    prev_head_rot_ = (dot(qh, qh) > 1e-6f) ? normalize(qh) : Quat::identity();
+    has_motion_ref_ = true;
 }
 
 void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_pos_ws,
@@ -325,7 +475,11 @@ void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_po
                                       uint32_t /*bone_count*/) noexcept {
     active_contact_.fill(0);
     joint_contact_.fill(0);
-    evaluate_colliders(bone_pos_ws, bone_rot_ws);
+    if (auto_calibrate_clearance_) {
+        calibrate_rest_collider_clearance(bone_pos_ws, bone_rot_ws);
+    } else {
+        evaluate_colliders(bone_pos_ws, bone_rot_ws);
+    }
     for (uint32_t j = 0; j < count_; ++j) {
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
                                                           local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
@@ -338,14 +492,16 @@ void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_po
                                                                            : Quat::identity();
         const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
         Vec3 tail = head + world_rest_dir * bone_len_[j];
-        // Push rest-pose tail out of any overlapping colliders (multi-pass relaxation for nested colliders)
+        // Push rest-pose tail out of any remaining colliders (calibrated pairs already have >= 2 mm clearance)
         for (int pass = 0; pass < 4; ++pass) {
             bool moved = false;
             for (uint32_t c = 0; c < colliders_.count; ++c) {
                 if (!collider_matches_joint(c, collider_mask_[j], filter_by_mask_[j], colliders_)) {
                     continue;
                 }
-                if (push_out_single_collider(c, head, world_rest_dir, bone_len_[j], hit_radius_[j], colliders_, tail)) {
+                const float eff_sum_r =
+                    effective_collider_sum_r(j, c, hit_radius_[j], colliders_.radius[c], pair_shrink_1e5m_);
+                if (push_out_single_collider(c, head, world_rest_dir, bone_len_[j], eff_sum_r, colliders_, tail)) {
                     moved = true;
                 }
             }
@@ -361,13 +517,19 @@ void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_po
         prev_z_[j] = tail.z;
     }
     prev_root_pos_ = bone_pos_ws[AETHER_BONE_HIPS];
+    prev_head_pos_ = bone_pos_ws[AETHER_BONE_HEAD];
+    const Quat qh = bone_rot_ws[AETHER_BONE_HEAD];
+    prev_head_rot_ = (dot(qh, qh) > 1e-6f) ? normalize(qh) : Quat::identity();
+    has_motion_ref_ = true;
     state_initialized_ = true;
 }
 
 void SpringBoneSimulator::evaluate_colliders(const std::array<Vec3, kMaxBones>& bone_pos_ws,
                                              const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept {
-    // Evaluate collider spheres/capsules in `center` (root hips) space when center_bone_index >= 0 on rig
-    const Vec3 center_pos = bone_pos_ws[AETHER_BONE_HIPS];
+    // Evaluate collider spheres/capsules in `center` space (hips for VRM avatars, origin when center < 0)
+    const int32_t cb0 = (count_ > 0U) ? center_bone_idx_[0] : static_cast<int32_t>(AETHER_BONE_HIPS);
+    const Vec3 center_pos =
+        (cb0 >= 0 && static_cast<uint32_t>(cb0) < kMaxBones) ? bone_pos_ws[static_cast<size_t>(cb0)] : Vec3{};
     last_center_pos_ = center_pos;
     for (uint32_t c = 0; c < colliders_.count; ++c) {
         const int32_t b = colliders_.attached_bone[c];
@@ -392,11 +554,24 @@ void SpringBoneSimulator::evaluate_colliders(const std::array<Vec3, kMaxBones>& 
     }
 }
 
-void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+static inline void write_spring_joint_bone_ws(int32_t bi, int32_t cb, Vec3 head, Vec3 next, Vec3 world_rest_dir,
+                                              const Quat& pr, std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+                                              std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
+    if (bi >= 0 && static_cast<uint32_t>(bi) < kMaxBones) {
+        const Vec3 c_pos =
+            (cb >= 0 && static_cast<uint32_t>(cb) < kMaxBones) ? io_bone_pos_ws[static_cast<size_t>(cb)] : Vec3{};
+        io_bone_pos_ws[static_cast<size_t>(bi)] = head + c_pos;
+        const Vec3 final_dir = normalize_safe(next - head, world_rest_dir);
+        io_bone_rot_ws[static_cast<size_t>(bi)] = normalize(quat_from_to_sb(world_rest_dir, final_dir) * pr);
+    }
+}
+
+void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                                       std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                       std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
     const float drag_pow = dt_s * 60.0f;
     for (uint32_t j = 0; j < count_; ++j) {
+        const Vec3 old_head{head_x_[j], head_y_[j], head_z_[j]};
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
                                                           local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
                                                           curr_y_, curr_z_, io_bone_pos_ws, io_bone_rot_ws);
@@ -404,14 +579,16 @@ void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, f
         head_y_[j] = head.y;
         head_z_[j] = head.z;
 
-        const Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
-        const Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
+        Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
+        Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
 
         const int32_t pb = parent_bone_idx_[j];
         const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? io_bone_rot_ws[static_cast<size_t>(pb)]
                                                                            : Quat::identity();
         const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
         const float len = bone_len_[j];
+        Vec3 anchor_shift{};
+        prepare_sleep_carried_state(sleep_gate, head, old_head, world_rest_dir, len, cur, prv, anchor_shift);
         Vec3 next = integrate_verlet_constrained_next(head, cur, prv, world_rest_dir,
                                                       {grav_x_[j], grav_y_[j], grav_z_[j]}, ext_accel, stiffness_[j],
                                                       drag_[j], ext_drag_scale, dt_s, dt_sq, drag_pow, len);
@@ -419,7 +596,7 @@ void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, f
         const Vec3 pre_col_next = next;
         bool had_contact = false;
         const float hr = hit_radius_[j];
-        const uint32_t col_mask = collider_mask_[j];
+        const uint64_t col_mask = collider_mask_[j];
         const uint8_t filter_mask = filter_by_mask_[j];
         for (int pass = 0; pass < 2; ++pass) {
             bool pass_hit = false;
@@ -427,7 +604,9 @@ void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, f
                 if (!collider_matches_joint(c, col_mask, filter_mask, colliders_)) {
                     continue;
                 }
-                if (push_out_single_collider(c, head, world_rest_dir, len, hr, colliders_, next)) {
+                const float eff_sum_r =
+                    effective_collider_sum_r(j, c, hr, colliders_.radius[c], pair_shrink_1e5m_);
+                if (push_out_single_collider(c, head, world_rest_dir, len, eff_sum_r, colliders_, next)) {
                     active_contact_[c] = 1U;
                     joint_contact_[j] = 1U;
                     had_contact = true;
@@ -439,22 +618,14 @@ void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, f
             }
         }
 
-        finalize_joint_verlet_step(j, cur, prv, pre_col_next, had_contact, next, len, dt_s, prev_x_, prev_y_, prev_z_,
-                                   curr_x_, curr_y_, curr_z_);
-
-        const int32_t bi = bone_idx_[j];
-        if (bi >= 0 && static_cast<uint32_t>(bi) < kMaxBones) {
-            const int32_t cb = center_bone_idx_[j];
-            const Vec3 c_pos =
-                (cb >= 0 && static_cast<uint32_t>(cb) < kMaxBones) ? io_bone_pos_ws[static_cast<size_t>(cb)] : Vec3{};
-            io_bone_pos_ws[static_cast<size_t>(bi)] = head + c_pos;
-            const Vec3 final_dir = normalize_safe(next - head, world_rest_dir);
-            io_bone_rot_ws[static_cast<size_t>(bi)] = normalize(quat_from_to_sb(world_rest_dir, final_dir) * pr);
-        }
+        finalize_joint_verlet_step(j, cur, prv, pre_col_next, anchor_shift, had_contact, sleep_gate, next, len, dt_s,
+                                   prev_x_, prev_y_, prev_z_, curr_x_, curr_y_, curr_z_);
+        write_spring_joint_bone_ws(bone_idx_[j], center_bone_idx_[j], head, next, world_rest_dir, pr, io_bone_pos_ws,
+                                   io_bone_rot_ws);
     }
 }
 
-void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                     std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
     // 8-wide AVX2 collider evaluation per joint + scalar topological length-constraint match (`<= 1e-5 m` parity).
@@ -464,6 +635,7 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
     const float drag_pow = dt_s * 60.0f;
 
     for (uint32_t j = 0; j < count_; ++j) {
+        const Vec3 old_head{head_x_[j], head_y_[j], head_z_[j]};
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
                                                           local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
                                                           curr_y_, curr_z_, io_bone_pos_ws, io_bone_rot_ws);
@@ -471,14 +643,16 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
         head_y_[j] = head.y;
         head_z_[j] = head.z;
 
-        const Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
-        const Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
+        Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
+        Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
 
         const int32_t pb = parent_bone_idx_[j];
         const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? io_bone_rot_ws[static_cast<size_t>(pb)]
                                                                            : Quat::identity();
         const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
         const float len = bone_len_[j];
+        Vec3 anchor_shift{};
+        prepare_sleep_carried_state(sleep_gate, head, old_head, world_rest_dir, len, cur, prv, anchor_shift);
         Vec3 next = integrate_verlet_constrained_next(head, cur, prv, world_rest_dir,
                                                       {grav_x_[j], grav_y_[j], grav_z_[j]}, ext_accel, stiffness_[j],
                                                       drag_[j], ext_drag_scale, dt_s, dt_sq, drag_pow, len);
@@ -487,14 +661,14 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
         bool had_contact = false;
         const float hr = hit_radius_[j];
         const __m256 v_hr = _mm256_set1_ps(hr);
-        const uint32_t col_mask = collider_mask_[j];
+        const uint64_t col_mask = collider_mask_[j];
         const uint8_t filter_mask = filter_by_mask_[j];
 
         for (int pass = 0; pass < 2; ++pass) {
             bool pass_hit = false;
             uint32_t c = 0;
             for (; c + 8U <= colliders_.count; c += 8U) {
-                // Test 8 colliders against `next` concurrently in AVX2 registers
+                // Broadphase 8 colliders against `next` concurrently (unshrunk `hr + radius` is a strict superset)
                 const __m256 nx = _mm256_set1_ps(next.x);
                 const __m256 ny = _mm256_set1_ps(next.y);
                 const __m256 nz = _mm256_set1_ps(next.z);
@@ -520,7 +694,6 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
                 const __m256 safe_ab2 = _mm256_max_ps(ab2, v_eps);
                 __m256 t = _mm256_div_ps(ap_dot_ab, safe_ab2);
                 t = _mm256_min_ps(v_one, _mm256_max_ps(v_zero, t));
-                // For sphere colliders (ab == 0), mask t -> 0 cleanly
                 const __m256 has_len = _mm256_cmp_ps(ab2, v_eps, _CMP_GT_OQ);
                 t = _mm256_and_ps(t, has_len);
 
@@ -539,14 +712,15 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
                 const int mask = _mm256_movemask_ps(hit_mask);
 
                 if (mask != 0) {
-                    // Push against hitting lanes in ascending order (exact sequential parity)
                     for (int k = 0; k < 8; ++k) {
                         if (mask & (1 << k)) {
                             const uint32_t ck = c + static_cast<uint32_t>(k);
                             if (!collider_matches_joint(ck, col_mask, filter_mask, colliders_)) {
                                 continue;
                             }
-                            if (push_out_single_collider(ck, head, world_rest_dir, len, hr, colliders_, next)) {
+                            const float eff_sum_r =
+                                effective_collider_sum_r(j, ck, hr, colliders_.radius[ck], pair_shrink_1e5m_);
+                            if (push_out_single_collider(ck, head, world_rest_dir, len, eff_sum_r, colliders_, next)) {
                                 active_contact_[ck] = 1U;
                                 joint_contact_[j] = 1U;
                                 had_contact = true;
@@ -556,12 +730,13 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
                     }
                 }
             }
-            // Tail scalar colliders (< 8 remainder)
             for (; c < colliders_.count; ++c) {
                 if (!collider_matches_joint(c, col_mask, filter_mask, colliders_)) {
                     continue;
                 }
-                if (push_out_single_collider(c, head, world_rest_dir, len, hr, colliders_, next)) {
+                const float eff_sum_r =
+                    effective_collider_sum_r(j, c, hr, colliders_.radius[c], pair_shrink_1e5m_);
+                if (push_out_single_collider(c, head, world_rest_dir, len, eff_sum_r, colliders_, next)) {
                     active_contact_[c] = 1U;
                     joint_contact_[j] = 1U;
                     had_contact = true;
@@ -573,26 +748,18 @@ void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, flo
             }
         }
 
-        finalize_joint_verlet_step(j, cur, prv, pre_col_next, had_contact, next, len, dt_s, prev_x_, prev_y_, prev_z_,
-                                   curr_x_, curr_y_, curr_z_);
-
-        const int32_t bi = bone_idx_[j];
-        if (bi >= 0 && static_cast<uint32_t>(bi) < kMaxBones) {
-            const int32_t cb = center_bone_idx_[j];
-            const Vec3 c_pos =
-                (cb >= 0 && static_cast<uint32_t>(cb) < kMaxBones) ? io_bone_pos_ws[static_cast<size_t>(cb)] : Vec3{};
-            io_bone_pos_ws[static_cast<size_t>(bi)] = head + c_pos;
-            const Vec3 final_dir = normalize_safe(next - head, world_rest_dir);
-            io_bone_rot_ws[static_cast<size_t>(bi)] = normalize(quat_from_to_sb(world_rest_dir, final_dir) * pr);
-        }
+        finalize_joint_verlet_step(j, cur, prv, pre_col_next, anchor_shift, had_contact, sleep_gate, next, len, dt_s,
+                                   prev_x_, prev_y_, prev_z_, curr_x_, curr_y_, curr_z_);
+        write_spring_joint_bone_ws(bone_idx_[j], center_bone_idx_[j], head, next, world_rest_dir, pr, io_bone_pos_ws,
+                                   io_bone_rot_ws);
     }
 }
 
-void SpringBoneSimulator::step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+void SpringBoneSimulator::step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                                       std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                       std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
-    // Dispatches to wide SIMD lane path safely cleanly without requiring AVX-512 compiler codegen flags
-    step_avx2(dt_s, dt_sq, ext_accel, ext_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+    // Dispatches to wide SIMD lane path safely without requiring AVX-512 compiler codegen flags
+    step_avx2(dt_s, dt_sq, ext_accel, ext_drag_scale, sleep_gate, io_bone_pos_ws, io_bone_rot_ws);
 }
 
 void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float external_drag_scale,
@@ -613,14 +780,33 @@ void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float e
         reset_state(io_bone_pos_ws, io_bone_rot_ws, bone_count);
         return;
     }
+
+    const float dt = std::clamp(fixed_dt_s, 1.0f / 240.0f, 1.0f / 30.0f);
+    const float dt_sq = dt * dt;
+
+    // Sleep gate engages when head angular velocity < 0.5 deg/s and character/wind are stationary
+    const Vec3 head_pos_now = io_bone_pos_ws[AETHER_BONE_HEAD];
+    const Quat qh = io_bone_rot_ws[AETHER_BONE_HEAD];
+    const Quat head_rot_now = (dot(qh, qh) > 1e-6f) ? normalize(qh) : Quat::identity();
+    bool sleep_gate = false;
+    if (has_motion_ref_) {
+        const float angle_rad = angle_between(prev_head_rot_, head_rot_now);
+        const float ang_vel_deg_s = (angle_rad * (180.0f / kPi)) / dt;
+        const float head_lin_vel = length(head_pos_now - prev_head_pos_) / dt;
+        const float root_lin_vel = length(root_now - prev_root_pos_) / dt;
+        if (ang_vel_deg_s < 0.5f && head_lin_vel < 0.005f && root_lin_vel < 0.005f &&
+            length_sq(external_accel_ws) < 1e-4f) {
+            sleep_gate = true;
+        }
+    }
     prev_root_pos_ = root_now;
+    prev_head_pos_ = head_pos_now;
+    prev_head_rot_ = head_rot_now;
+    has_motion_ref_ = true;
 
     active_contact_.fill(0);
     joint_contact_.fill(0);
     evaluate_colliders(io_bone_pos_ws, io_bone_rot_ws);
-
-    const float dt = std::clamp(fixed_dt_s, 1.0f / 240.0f, 1.0f / 30.0f);
-    const float dt_sq = dt * dt;
 
     SimdPath effective = force_path;
     if (effective == SimdPath::Avx512 && detected_path_ != SimdPath::Avx512) {
@@ -632,13 +818,13 @@ void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float e
 
     switch (effective) {
     case SimdPath::Scalar:
-        step_scalar(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_scalar(dt, dt_sq, external_accel_ws, external_drag_scale, sleep_gate, io_bone_pos_ws, io_bone_rot_ws);
         break;
     case SimdPath::Avx2:
-        step_avx2(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_avx2(dt, dt_sq, external_accel_ws, external_drag_scale, sleep_gate, io_bone_pos_ws, io_bone_rot_ws);
         break;
     case SimdPath::Avx512:
-        step_avx512(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_avx512(dt, dt_sq, external_accel_ws, external_drag_scale, sleep_gate, io_bone_pos_ws, io_bone_rot_ws);
         break;
     }
 }

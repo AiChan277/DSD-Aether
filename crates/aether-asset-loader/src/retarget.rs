@@ -735,6 +735,9 @@ pub fn build_spring_descriptors(
         });
     }
 
+    let mut joint_to_spring: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+
     for (chain_id, chain) in avatar.spring_chains.iter().enumerate() {
         let chain_start = springs.len();
         for (depth, node) in chain.joints.iter().enumerate() {
@@ -745,6 +748,22 @@ pub fn build_spring_descriptors(
                 continue;
             }
             let p_cur = Vec3::from_array(poses[node.joint_index].world_pos);
+            let fallback_tail = poses[node.joint_index].tail_length.max(0.05);
+            let parent_dir = if depth > 0 {
+                let prev_j = chain.joints[depth - 1].joint_index;
+                if prev_j < poses.len() {
+                    let d = p_cur - Vec3::from_array(poses[prev_j].world_pos);
+                    if d.length() > 1e-4 {
+                        Some(d.normalize().to_array())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let (rest_dir, bone_len) = match chain.joints.get(depth + 1) {
                 Some(nxt) if nxt.joint_index < poses.len() => {
                     let delta = Vec3::from_array(poses[nxt.joint_index].world_pos) - p_cur;
@@ -752,22 +771,24 @@ pub fn build_spring_descriptors(
                     if len > 1e-4 {
                         ((delta / len).to_array(), len)
                     } else {
-                        (
-                            [0.0, -1.0, 0.0],
-                            poses[node.joint_index].tail_length.max(0.05),
-                        )
+                        (parent_dir.unwrap_or([0.0, -1.0, 0.0]), fallback_tail)
                     }
                 }
-                _ => (
-                    [0.0, -1.0, 0.0],
-                    poses[node.joint_index].tail_length.max(0.05),
-                ),
+                _ => (parent_dir.unwrap_or([0.0, -1.0, 0.0]), fallback_tail),
             };
-            let parent_spring_index = if depth == 0 {
-                -1
-            } else {
+            let parent_spring_index = if depth > 0 {
                 (chain_start + depth - 1) as i32
+            } else if let Some(skel_parent) =
+                avatar.joints.get(node.joint_index).and_then(|j| j.parent)
+                && let Some(&parent_s_idx) = joint_to_spring.get(&skel_parent)
+            {
+                parent_s_idx as i32
+            } else {
+                -1
             };
+            joint_to_spring
+                .entry(node.joint_index)
+                .or_insert(springs.len());
             springs.push(aether_ffi::AetherSpringJointDesc {
                 collider_group_mask: chain.collider_group_mask,
                 gravity_dir: node.gravity_dir,

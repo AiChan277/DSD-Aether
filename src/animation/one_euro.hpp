@@ -12,6 +12,7 @@ struct OneEuroParams {
     float beta{0.45f};
     float dcutoff{1.0f};
     float deadband{0.0f};
+    float vel_threshold_rad_s{0.0f};
 };
 
 /** Scalar 1-Euro low-pass filter (`§9.2`, Casiez et al.) with measured capture `Te`. */
@@ -42,6 +43,10 @@ class OneEuroQuat {
 
   private:
     Quat q_hat_{Quat::identity()};
+    Quat q_anchor_{Quat::identity()};
+    Quat q_vel_ref_{Quat::identity()};
+    Vec3 edx_{};
+    float vel_ema_{0.0f};
     std::array<OneEuroScalar, 3> tangent_filters_{};
     bool initialized_{false};
 };

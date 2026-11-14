@@ -1724,6 +1724,20 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                 group_masks.push(1u64 << g_bit.min(63));
             }
         }
+        // Build parent -> children adjacency over skinned joints so each VRM 0.x
+        // `boneGroups[].bones` entry (which lists chain roots only per spec) expands
+        // recursively into separate linear descendant chains rather than grouping
+        // unrelated sibling roots together or omitting child joints.
+        let mut children_by_joint: Vec<Vec<usize>> = vec![Vec::new(); joints.len()];
+        for (ji, j) in joints.iter().enumerate() {
+            if let Some(p) = j.parent
+                && p < children_by_joint.len()
+            {
+                children_by_joint[p].push(ji);
+            }
+        }
+        let mut visited_spring_joints: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         if let Some(bg_arr) = sa.get("boneGroups").and_then(Value::as_array) {
             for bg in bg_arr {
                 let center_joint = bg.get("center").and_then(Value::as_i64).and_then(|n| {
@@ -1754,30 +1768,71 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                         }
                     }
                 }
-                let mut s_nodes = Vec::new();
+                let make_node = |joint_index: usize| RawSpringNode {
+                    joint_index,
+                    hit_radius: hrad,
+                    stiffness: stiff,
+                    drag_force: drag,
+                    gravity_power: gpow,
+                    gravity_dir: gdir,
+                    from_mmd: false,
+                };
                 if let Some(bones) = bg.get("bones").and_then(Value::as_array) {
-                    for b in bones {
-                        if let Some(n_i) = b.as_u64()
-                            && let Some(&j_idx) = node_to_joint.get(&(n_i as usize))
-                        {
-                            s_nodes.push(RawSpringNode {
-                                joint_index: j_idx,
-                                hit_radius: hrad,
-                                stiffness: stiff,
-                                drag_force: drag,
-                                gravity_power: gpow,
-                                gravity_dir: gdir,
-                                from_mmd: false,
-                            });
+                    let group_roots: Vec<usize> = bones
+                        .iter()
+                        .filter_map(|b| b.as_u64())
+                        .filter_map(|n_i| node_to_joint.get(&(n_i as usize)).copied())
+                        .collect();
+                    let root_set: std::collections::HashSet<usize> =
+                        group_roots.iter().copied().collect();
+                    for root_j in group_roots {
+                        // Skip any entry whose skeleton ancestor is already listed in this group
+                        // so explicitly listed sub-bones never start duplicate chains.
+                        let mut anc = joints.get(root_j).and_then(|j| j.parent);
+                        let mut has_listed_anc = false;
+                        while let Some(a) = anc {
+                            if root_set.contains(&a) {
+                                has_listed_anc = true;
+                                break;
+                            }
+                            anc = joints.get(a).and_then(|j| j.parent);
+                        }
+                        if has_listed_anc || !visited_spring_joints.insert(root_j) {
+                            continue;
+                        }
+                        // Walk linear segments; if a joint forks into multiple children, keep the
+                        // first unvisited child on the current chain and queue side branches as
+                        // independent chains whose parent_spring_index links back to the fork.
+                        let mut pending_starts = vec![root_j];
+                        while let Some(start_j) = pending_starts.pop() {
+                            let mut chain_nodes = Vec::new();
+                            let mut cur_opt = Some(start_j);
+                            while let Some(cur_j) = cur_opt {
+                                chain_nodes.push(make_node(cur_j));
+                                let unvisited_children: Vec<usize> = children_by_joint
+                                    .get(cur_j)
+                                    .into_iter()
+                                    .flat_map(|v| v.iter().copied())
+                                    .filter(|c| visited_spring_joints.insert(*c))
+                                    .collect();
+                                if let Some(&primary) = unvisited_children.first() {
+                                    for &branch in unvisited_children.iter().skip(1).rev() {
+                                        pending_starts.push(branch);
+                                    }
+                                    cur_opt = Some(primary);
+                                } else {
+                                    cur_opt = None;
+                                }
+                            }
+                            if !chain_nodes.is_empty() {
+                                spring_chains.push(RawSpringChain {
+                                    joints: chain_nodes,
+                                    center_joint,
+                                    collider_group_mask: mask,
+                                });
+                            }
                         }
                     }
-                }
-                if !s_nodes.is_empty() {
-                    spring_chains.push(RawSpringChain {
-                        joints: s_nodes,
-                        center_joint,
-                        collider_group_mask: mask,
-                    });
                 }
             }
         }

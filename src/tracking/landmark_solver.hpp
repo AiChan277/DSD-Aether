@@ -2,6 +2,7 @@
 
 #include "aether_ffi_contract.h"
 #include "animation/live2d_params.hpp"
+#include "tracking/blink_gaze_filter.hpp"
 #include "tracking/manifest.hpp"
 #include "tracking/roi_preprocess.hpp"
 
@@ -165,6 +166,7 @@ class LandmarkPoseSolver {
     bool has_prev_raw_quat_{false};
     float last_emitted_head_quat_[4]{0.0f, 0.0f, 0.0f, 1.0f};
     bool has_emitted_head_quat_{false};
+    BlinkGazeStabilizer blink_gaze_{};
     TrackingOverlaySnapshot overlay_{};
 };
 

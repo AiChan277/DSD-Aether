@@ -331,4 +331,200 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
     compute_fk();
 }
 
+RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
+    const AetherAvatarDesc& desc, const AetherJointDesc* joints, size_t joint_count,
+    const std::array<float, 3>* joint_rest_world_pos, size_t rest_pos_count,
+    const AetherColliderDesc* colliders, size_t collider_count,
+    const AetherSpringJointDesc* springs, size_t spring_count,
+    bool has_split_brow_morphs) noexcept {
+    RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
+    if (joints == nullptr || joint_rest_world_pos == nullptr || joint_count == 0U ||
+        rest_pos_count != joint_count) {
+        return rm;
+    }
+
+    constexpr size_t kMaxAvatarJoints = 1024U;
+    const size_t n_j = std::min(joint_count, kMaxAvatarJoints);
+    std::array<Quat, kMaxAvatarJoints> joint_world_rot{};
+    std::array<uint8_t, kMaxAvatarJoints> rot_resolved{};
+    joint_world_rot.fill(Quat::identity());
+
+    auto resolve_joint_world_rot = [&](auto& self, size_t idx, int depth) noexcept -> Quat {
+        if (idx >= n_j || depth > 128) {
+            return Quat::identity();
+        }
+        if (rot_resolved[idx] != 0U) {
+            return joint_world_rot[idx];
+        }
+        const auto& j = joints[idx];
+        const float* br = j.bind_rotation_quat;
+        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
+        const Quat q_local =
+            (q2 > 1e-6f) ? normalize(Quat{br[0], br[1], br[2], br[3]}) : Quat::identity();
+        Quat q_parent = Quat::identity();
+        if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < n_j) {
+            q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
+        }
+        joint_world_rot[idx] = normalize(q_parent * q_local);
+        rot_resolved[idx] = 1U;
+        return joint_world_rot[idx];
+    };
+    for (size_t i = 0; i < n_j; ++i) {
+        (void)resolve_joint_world_rot(resolve_joint_world_rot, i, 0);
+    }
+
+    auto find_humanoid_ancestor = [&](uint32_t j) noexcept -> uint16_t {
+        uint32_t cur = j;
+        for (size_t steps = 0; steps < n_j && cur < n_j; ++steps) {
+            const uint16_t candidate = joints[cur].humanoid_bone;
+            if (candidate < AETHER_HUMANOID_BONE_COUNT) {
+                return candidate;
+            }
+            const int32_t p_idx = joints[cur].parent_index;
+            if (p_idx < 0 || static_cast<size_t>(p_idx) >= n_j || static_cast<uint32_t>(p_idx) == cur) {
+                break;
+            }
+            cur = static_cast<uint32_t>(p_idx);
+        }
+        return AETHER_BONE_HIPS;
+    };
+
+    std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
+    const uint16_t hips_j = desc.humanoid_to_joint[AETHER_BONE_HIPS];
+    if (hips_j < n_j) {
+        const auto& hp = joint_rest_world_pos[hips_j];
+        world[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
+        rm.rest_world_rotations[AETHER_BONE_HIPS] = joint_world_rot[hips_j];
+    } else {
+        world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
+        rm.rest_world_rotations[AETHER_BONE_HIPS] = Quat::identity();
+    }
+    rm.rest_local_rotations[AETHER_BONE_HIPS] = rm.rest_world_rotations[AETHER_BONE_HIPS];
+
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        const uint16_t j = desc.humanoid_to_joint[b];
+        if (j < n_j) {
+            const auto& jp = joint_rest_world_pos[j];
+            world[b] = {jp[0], jp[1], jp[2]};
+            rm.rest_world_rotations[b] = joint_world_rot[j];
+        } else {
+            world[b] = world[pi] + rm.rest_local_positions[b];
+            rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
+        }
+        rm.rest_local_rotations[b] =
+            normalize(conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
+    }
+
+    rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        rm.rest_local_positions[b] = world[b] - world[pi];
+        rm.bone_lengths[b] = std::max(length(rm.rest_local_positions[b]), 0.02f);
+    }
+
+    uint32_t custom_col_cnt = 0;
+    if (colliders != nullptr) {
+        for (size_t ci = 0; ci < collider_count && custom_col_cnt < kMaxRestColliders; ++ci) {
+            const auto& col = colliders[ci];
+            uint16_t hb = AETHER_BONE_HIPS;
+            Vec3 j_pos{};
+            Quat col_j_rot = Quat::identity();
+            if (col.joint_index < n_j) {
+                const auto& jr = joint_rest_world_pos[col.joint_index];
+                j_pos = {jr[0], jr[1], jr[2]};
+                col_j_rot = joint_world_rot[col.joint_index];
+                hb = find_humanoid_ancestor(col.joint_index);
+            }
+            auto& dst = rm.custom_colliders[custom_col_cnt++];
+            dst.attached_bone = static_cast<int32_t>(hb);
+            dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
+            dst.group_bit = col.group_bit;
+            dst.radius = std::clamp(col.radius, 0.005f, 0.50f);
+            const Vec3 a_ws = j_pos + rotate_vec(col_j_rot, {col.offset[0], col.offset[1], col.offset[2]});
+            const Vec3 b_ws = j_pos + rotate_vec(col_j_rot, {col.tail[0], col.tail[1], col.tail[2]});
+            const Quat inv_hb_rot = conjugate(rm.rest_world_rotations[hb]);
+            dst.local_a = rotate_vec(inv_hb_rot, a_ws - world[hb]);
+            dst.local_b = rotate_vec(inv_hb_rot, b_ws - world[hb]);
+        }
+    }
+    rm.custom_collider_count = custom_col_cnt;
+
+    // Populate authored VRM SpringBone joints anchored relative to each chain's humanoid base rotation.
+    uint32_t custom_sp_cnt = 0;
+    if (springs != nullptr && spring_count > 0U) {
+        std::array<int32_t, kMaxRestSprings> src_to_dst{};
+        src_to_dst.fill(-1);
+        const size_t n_sp = std::min(spring_count, static_cast<size_t>(kMaxRestSprings));
+        for (size_t si = 0; si < n_sp && custom_sp_cnt < kMaxRestSprings; ++si) {
+            const auto& sp = springs[si];
+            if (sp.joint_index >= n_j) {
+                continue;
+            }
+            const auto& jp = joint_rest_world_pos[sp.joint_index];
+            const Vec3 pos_ws{jp[0], jp[1], jp[2]};
+
+            int32_t mapped_ps = -1;
+            if (sp.parent_spring_index >= 0 && static_cast<size_t>(sp.parent_spring_index) < n_sp) {
+                mapped_ps = src_to_dst[static_cast<size_t>(sp.parent_spring_index)];
+            }
+
+            uint16_t hb_base = find_humanoid_ancestor(sp.joint_index);
+            if (mapped_ps >= 0 && static_cast<uint32_t>(mapped_ps) < custom_sp_cnt) {
+                hb_base = static_cast<uint16_t>(rm.custom_springs[static_cast<size_t>(mapped_ps)].skin_base_humanoid);
+            }
+            const Quat inv_base_rot = conjugate(rm.rest_world_rotations[hb_base]);
+
+            const uint32_t dst_idx = custom_sp_cnt++;
+            src_to_dst[si] = static_cast<int32_t>(dst_idx);
+            auto& dst = rm.custom_springs[dst_idx];
+            dst.bone_index = static_cast<int32_t>(kCustomSpringBoneOffset + dst_idx);
+            dst.skin_base_humanoid = static_cast<int32_t>(hb_base);
+            dst.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
+            dst.rest_world_pos = pos_ws;
+
+            const Vec3 raw_rdir = normalize_safe({sp.rest_dir[0], sp.rest_dir[1], sp.rest_dir[2]}, {0.0f, -1.0f, 0.0f});
+            dst.rest_dir = normalize_safe(rotate_vec(inv_base_rot, raw_rdir), {0.0f, -1.0f, 0.0f});
+
+            if (mapped_ps >= 0 && static_cast<uint32_t>(mapped_ps) < dst_idx) {
+                const auto& p_dst = rm.custom_springs[static_cast<size_t>(mapped_ps)];
+                const auto& p_sp = springs[static_cast<size_t>(sp.parent_spring_index)];
+                const Vec3 p_dir = normalize_safe({p_sp.rest_dir[0], p_sp.rest_dir[1], p_sp.rest_dir[2]},
+                                                  {0.0f, -1.0f, 0.0f});
+                const Vec3 expected_tail = p_dst.rest_world_pos + p_dir * std::max(p_dst.bone_length, 0.01f);
+                if (length(pos_ws - expected_tail) <= 2e-3f) {
+                    dst.parent_spring_index = mapped_ps;
+                    dst.parent_bone_index = static_cast<int32_t>(kCustomSpringBoneOffset + mapped_ps);
+                    dst.local_bone_offset = {};
+                } else {
+                    // Side fork branch off parent spring joint: anchor via parent spring bone rotation + local offset.
+                    dst.parent_spring_index = -1;
+                    dst.parent_bone_index = static_cast<int32_t>(kCustomSpringBoneOffset + mapped_ps);
+                    dst.local_bone_offset = rotate_vec(inv_base_rot, pos_ws - p_dst.rest_world_pos);
+                }
+            } else {
+                dst.parent_spring_index = -1;
+                dst.parent_bone_index = static_cast<int32_t>(hb_base);
+                dst.local_bone_offset = rotate_vec(inv_base_rot, pos_ws - world[hb_base]);
+            }
+
+            dst.bone_length = std::max(sp.bone_length, 0.01f);
+            dst.hit_radius = std::max(sp.hit_radius, 0.005f);
+            dst.stiffness = std::clamp(sp.stiffness, 0.01f, 4.0f);
+            dst.drag_force = std::clamp(sp.drag_force, 0.0f, 1.0f);
+            dst.gravity_power = std::clamp(sp.gravity_power, 0.0f, 5.0f);
+            dst.gravity_dir =
+                normalize_safe({sp.gravity_dir[0], sp.gravity_dir[1], sp.gravity_dir[2]}, {0.0f, -1.0f, 0.0f});
+            dst.collider_group_mask = sp.collider_group_mask;
+            dst.filter_colliders_by_mask = true;
+        }
+    }
+    rm.custom_spring_count = custom_sp_cnt;
+    rm.has_split_brow_morphs = has_split_brow_morphs;
+    rm.valid = true;
+    return rm;
+}
+
 } // namespace aether::animation

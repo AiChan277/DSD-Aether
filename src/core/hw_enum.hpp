@@ -28,6 +28,12 @@ struct CameraDeviceInfo {
     bool likely_virtual{false};
 };
 
+struct AudioInputDeviceInfo {
+    std::string device_id;
+    std::string friendly_name;
+    bool is_default{false};
+};
+
 struct NpuStatusInfo {
     bool probed{false};
     bool available{false};
@@ -40,9 +46,15 @@ struct HardwareInventory {
     CpuTopology cpu;
     std::vector<GpuAdapterInfo> gpus;
     std::vector<CameraDeviceInfo> cameras;
+    std::vector<AudioInputDeviceInfo> audio_inputs;
     NpuStatusInfo npu;
     uint64_t total_ram_mb{0};
 };
+
+/**
+ * Enumerates active Windows WASAPI audio capture endpoints (microphones) without opening any audio stream.
+ */
+[[nodiscard]] std::vector<AudioInputDeviceInfo> enumerate_audio_input_devices();
 
 /**
  * Queries real system hardware inventory (`§4.9`): CPUID + P/E topology, total RAM,

@@ -343,118 +343,10 @@ std::string find_default_interactive_avatar() {
 }
 
 animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::GpuAvatar& avatar) noexcept {
-    animation::RestSkeletonMetrics rm = animation::build_default_humanoid_rest_metrics();
-    if (avatar.joint_rest_world_pos.size() != avatar.joints.size()) {
-        return rm;
-    }
-
-    std::vector<animation::Quat> joint_world_rot(avatar.joints.size(), animation::Quat::identity());
-    std::vector<uint8_t> rot_resolved(avatar.joints.size(), 0U);
-    auto resolve_joint_world_rot = [&](auto& self, size_t idx, int depth) -> animation::Quat {
-        if (idx >= avatar.joints.size() || depth > 128) {
-            return animation::Quat::identity();
-        }
-        if (rot_resolved[idx] != 0U) {
-            return joint_world_rot[idx];
-        }
-        const auto& j = avatar.joints[idx];
-        const float* br = j.bind_rotation_quat;
-        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
-        const animation::Quat q_local =
-            (q2 > 1e-6f) ? animation::normalize(animation::Quat{br[0], br[1], br[2], br[3]})
-                         : animation::Quat::identity();
-        animation::Quat q_parent = animation::Quat::identity();
-        if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar.joints.size()) {
-            q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
-        }
-        joint_world_rot[idx] = animation::normalize(q_parent * q_local);
-        rot_resolved[idx] = 1U;
-        return joint_world_rot[idx];
-    };
-    for (size_t i = 0; i < avatar.joints.size(); ++i) {
-        (void)resolve_joint_world_rot(resolve_joint_world_rot, i, 0);
-    }
-
-    std::array<animation::Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
-    const uint16_t hips_j = avatar.desc.humanoid_to_joint[AETHER_BONE_HIPS];
-    if (hips_j < avatar.joint_rest_world_pos.size()) {
-        const auto& hp = avatar.joint_rest_world_pos[hips_j];
-        world[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
-        rm.rest_world_rotations[AETHER_BONE_HIPS] =
-            (hips_j < joint_world_rot.size()) ? joint_world_rot[hips_j] : animation::Quat::identity();
-    } else {
-        world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
-        rm.rest_world_rotations[AETHER_BONE_HIPS] = animation::Quat::identity();
-    }
-    rm.rest_local_rotations[AETHER_BONE_HIPS] = rm.rest_world_rotations[AETHER_BONE_HIPS];
-
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        const uint16_t j = avatar.desc.humanoid_to_joint[b];
-        if (j < avatar.joint_rest_world_pos.size()) {
-            const auto& jp = avatar.joint_rest_world_pos[j];
-            world[b] = {jp[0], jp[1], jp[2]};
-            rm.rest_world_rotations[b] =
-                (j < joint_world_rot.size()) ? joint_world_rot[j] : rm.rest_world_rotations[pi];
-        } else {
-            world[b] = world[pi] + rm.rest_local_positions[b];
-            rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
-        }
-        rm.rest_local_rotations[b] =
-            animation::normalize(animation::conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
-    }
-
-    rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        rm.rest_local_positions[b] = world[b] - world[pi];
-        rm.bone_lengths[b] = std::max(animation::length(rm.rest_local_positions[b]), 0.02f);
-    }
-
-    uint32_t custom_cnt = 0;
-    for (const auto& col : avatar.colliders) {
-        if (custom_cnt >= rm.custom_colliders.size()) {
-            break;
-        }
-        uint16_t hb = AETHER_BONE_HIPS;
-        std::array<float, 3> jr{0.0f, 0.0f, 0.0f};
-        animation::Quat col_j_rot = animation::Quat::identity();
-        if (col.joint_index < avatar.joints.size()) {
-            jr = avatar.joint_rest_world_pos[col.joint_index];
-            col_j_rot = joint_world_rot[col.joint_index];
-            uint32_t j = col.joint_index;
-            for (size_t steps = 0; steps < avatar.joints.size() && j < avatar.joints.size(); ++steps) {
-                const uint16_t candidate = avatar.joints[j].humanoid_bone;
-                if (candidate < AETHER_HUMANOID_BONE_COUNT) {
-                    hb = candidate;
-                    break;
-                }
-                const int32_t p_idx = avatar.joints[j].parent_index;
-                if (p_idx < 0 || static_cast<size_t>(p_idx) >= avatar.joints.size()) {
-                    break;
-                }
-                j = static_cast<uint32_t>(p_idx);
-            }
-        }
-        auto& dst = rm.custom_colliders[custom_cnt++];
-        dst.attached_bone = static_cast<int32_t>(hb);
-        dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
-        dst.radius = std::clamp(col.radius, 0.01f, 0.50f);
-        const animation::Vec3 j_pos{jr[0], jr[1], jr[2]};
-        const animation::Vec3 a_ws =
-            j_pos + animation::rotate_vec(col_j_rot, {col.offset[0], col.offset[1], col.offset[2]});
-        const animation::Vec3 b_ws =
-            j_pos + animation::rotate_vec(col_j_rot, {col.tail[0], col.tail[1], col.tail[2]});
-        const animation::Quat inv_hb_rot = animation::conjugate(rm.rest_world_rotations[hb]);
-        dst.local_a = animation::rotate_vec(inv_hb_rot, a_ws - world[hb]);
-        dst.local_b = animation::rotate_vec(inv_hb_rot, b_ws - world[hb]);
-    }
-    rm.custom_collider_count = custom_cnt;
-    rm.has_split_brow_morphs = avatar.has_split_brow_morphs;
-    rm.valid = true;
-    return rm;
+    return animation::build_rest_metrics_from_avatar_streams(
+        avatar.desc, avatar.joints.data(), avatar.joints.size(), avatar.joint_rest_world_pos.data(),
+        avatar.joint_rest_world_pos.size(), avatar.colliders.data(), avatar.colliders.size(), avatar.springs.data(),
+        avatar.springs.size(), avatar.has_split_brow_morphs);
 }
 
 void pump_t3_inputs(WindowSharedState& shared, ui::DevShellInputEcho& echo, ImGuiIO& io) noexcept {
@@ -1010,6 +902,10 @@ int run_application(const AppLaunchOptions& opts) {
     pipe_cfg.camera_active = (opts.smoke_frames == 0);
     pipe_cfg.camera_fps = static_cast<uint32_t>(std::max(30, boot_params.get_int(ui::ParamId::TrackingCameraFps)));
     pipe_cfg.preferred_camera_link = boot_settings.preferred_camera_link;
+    pipe_cfg.enable_audio_lipsync = boot_params.get_bool(ui::ParamId::TrackingAudioAssist);
+    pipe_cfg.mic_gain = boot_params.get_float(ui::ParamId::TrackingMicGain);
+    pipe_cfg.mic_noise_gate_db = boot_params.get_float(ui::ParamId::TrackingMicNoiseGate);
+    pipe_cfg.preferred_mic_id = boot_settings.preferred_mic_id;
     pipe_cfg.preferred_ep =
         ui::tracking_ep_mode_to_router_override(boot_params.get_int(ui::ParamId::TrackingEpMode));
     pipe_cfg.ov_cache_dir = std::filesystem::path(paths.cache_dir) / "ov_cache";
@@ -1413,6 +1309,10 @@ int run_application(const AppLaunchOptions& opts) {
                 if (track_hud.camera_symlink[0] != '\0') {
                     pipe_cfg.preferred_camera_link = track_hud.camera_symlink;
                 }
+                pipe_cfg.enable_audio_lipsync = vp_actions.audio_assist_enabled;
+                pipe_cfg.mic_gain = vp_actions.mic_gain;
+                pipe_cfg.mic_noise_gate_db = vp_actions.mic_noise_gate_db;
+                pipe_cfg.preferred_mic_id = shell.workspace().settings().preferred_mic_id;
                 pipe_cfg.preferred_ep = track_hud.selected_ep_override;
                 pipe_cfg.output_cfg = active_out_cfg;
                 (void)pipeline->wait_output_slots_drained(250u);
@@ -1920,6 +1820,18 @@ int run_application(const AppLaunchOptions& opts) {
                 pipeline->send_tracking_command(cmd);
                 vp_actions.request_select_camera = false;
             }
+            if (vp_actions.request_select_mic) {
+                TrackingControlCommand cmd{};
+                cmd.kind = TrackingCmdKind::SelectAudioDevice;
+                std::snprintf(cmd.str_arg, sizeof(cmd.str_arg), "%s", vp_actions.select_mic_id.data());
+                pipeline->send_tracking_command(cmd);
+                vp_actions.request_select_mic = false;
+            }
+            if (vp_actions.audio_lipsync_dirty) {
+                pipeline->set_audio_lipsync_params(vp_actions.audio_assist_enabled, vp_actions.mic_gain,
+                                                   vp_actions.mic_noise_gate_db);
+                vp_actions.audio_lipsync_dirty = false;
+            }
             if (vp_actions.request_ep_override != -99) {
                 pipeline->send_tracking_command({TrackingCmdKind::SetEpOverride, vp_actions.request_ep_override});
                 vp_actions.request_ep_override = -99;
@@ -2188,7 +2100,9 @@ int run_application(const AppLaunchOptions& opts) {
                         }
                     }
                 }
-                current_avatar->update_pose(frame.frame_slot, skin_snap.frame_sequence, skin_snap.frame.bone_matrices,
+                const uint64_t gpu_pose_seq =
+                    (skin_snap.sim_sequence != 0ULL) ? skin_snap.sim_sequence : skin_snap.frame_sequence;
+                current_avatar->update_pose(frame.frame_slot, gpu_pose_seq, skin_snap.frame.bone_matrices,
                                             skin_snap.frame.bone_count, latched_morphs.data(), morph_count, true,
                                             &skin_snap.frame.live2d);
                 if (dsp_voice_on) {
@@ -2486,6 +2400,13 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.active_ep_label = track_hud.active_ep_label;
                     tracking_view.camera_label = track_hud.camera_label;
                     tracking_view.camera_symlink = track_hud.camera_symlink;
+                    tracking_view.audio_mic_available = track_hud.audio_mic_available;
+                    tracking_view.audio_assist_enabled = track_hud.audio_assist_enabled;
+                    tracking_view.audio_vad = track_hud.audio_vad;
+                    tracking_view.audio_rms_db = track_hud.audio_rms_db;
+                    tracking_view.audio_open_y = track_hud.audio_open_y;
+                    tracking_view.audio_device_label = track_hud.audio_device_label;
+                    tracking_view.audio_device_id = track_hud.audio_device_id;
                     tracking_view.neutral_calibrated = track_hud.neutral_calibrated;
                     tracking_view.stable_lock_frames = track_hud.stable_lock_frames;
                     tracking_view.head_euler_deg = {track_hud.head_euler_deg[0], track_hud.head_euler_deg[1],

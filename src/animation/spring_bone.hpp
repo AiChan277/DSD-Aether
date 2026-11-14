@@ -55,7 +55,7 @@ struct SpringJointDesc {
     float drag_force{0.40f};
     float gravity_power{0.08f};
     Vec3 gravity_dir{0.0f, -1.0f, 0.0f};
-    uint32_t collider_mask{0};
+    uint64_t collider_mask{0};
     bool filter_colliders_by_mask{false};
 };
 
@@ -105,9 +105,30 @@ class alignas(64) SpringBoneSimulator {
     void reset_state(const std::array<Vec3, kMaxBones>& bone_pos_ws, const std::array<Quat, kMaxBones>& bone_rot_ws,
                      uint32_t bone_count) noexcept;
 
+    /**
+     * Records per-(joint, collider) rest-pose penetration / near-contact (< 2 mm) as a shrink
+     * baseline so authored overlapping hair/clothing chains never oscillate in static rest pose.
+     */
+    void calibrate_rest_collider_clearance(const std::array<Vec3, kMaxBones>& bone_pos_ws,
+                                           const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept;
+
+    /** Runs `steps` static warm-up Verlet substeps so all chains enter equilibrium on Frame 1. */
+    void warmup_settle(std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+                       std::array<Quat, kMaxBones>& io_bone_rot_ws, uint32_t bone_count,
+                       uint32_t steps = 60U) noexcept;
+
     void step(float fixed_dt_s, Vec3 external_accel_ws, float external_drag_scale,
               std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws,
               uint32_t bone_count, SimdPath force_path = SimdPath::Avx2) noexcept;
+
+    /** Instantaneous tip speed of joint `idx` (`|curr - prev| / dt`), used by stillness verification tests. */
+    [[nodiscard]] float joint_velocity_mps(uint32_t idx, float dt_s = 1.0f / 60.0f) const noexcept {
+        if (idx >= count_ || dt_s <= 1e-6f) {
+            return 0.0f;
+        }
+        return length(Vec3{curr_x_[idx] - prev_x_[idx], curr_y_[idx] - prev_y_[idx], curr_z_[idx] - prev_z_[idx]}) /
+               dt_s;
+    }
 
     [[nodiscard]] uint32_t joint_count() const noexcept { return count_; }
     [[nodiscard]] uint32_t collider_count() const noexcept { return colliders_.count; }
@@ -130,24 +151,29 @@ class alignas(64) SpringBoneSimulator {
   private:
     void evaluate_colliders(const std::array<Vec3, kMaxBones>& bone_pos_ws,
                             const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept;
-    void step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+    void step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                      std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                      std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
-    void step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+    void step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                    std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                    std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
-    void step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+    void step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
                      std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                      std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
 
     uint32_t count_{0};
     uint32_t teleport_resets_{0};
     bool state_initialized_{false};
+    bool auto_calibrate_clearance_{false};
+    bool has_motion_ref_{false};
     Vec3 prev_root_pos_{};
     Vec3 last_center_pos_{};
+    Vec3 prev_head_pos_{};
+    Quat prev_head_rot_{Quat::identity()};
     SimdPath detected_path_{SimdPath::Scalar};
     std::array<uint8_t, kMaxSpringColliders> active_contact_{};
     std::array<uint8_t, kMaxSpringJoints> joint_contact_{};
+    alignas(64) std::array<uint16_t, kMaxSpringJoints * kMaxSpringColliders> pair_shrink_1e5m_{};
 
     // SoA joint arrays aligned for 512-bit SIMD loads:
     alignas(64) float curr_x_[kMaxSpringJoints]{};
@@ -169,7 +195,7 @@ class alignas(64) SpringBoneSimulator {
     alignas(64) float drag_[kMaxSpringJoints]{};
     alignas(64) float bone_len_[kMaxSpringJoints]{};
     alignas(64) float hit_radius_[kMaxSpringJoints]{};
-    alignas(64) uint32_t collider_mask_[kMaxSpringJoints]{};
+    alignas(64) uint64_t collider_mask_[kMaxSpringJoints]{};
     alignas(64) uint8_t filter_by_mask_[kMaxSpringJoints]{};
 
     alignas(64) int32_t bone_idx_[kMaxSpringJoints]{};

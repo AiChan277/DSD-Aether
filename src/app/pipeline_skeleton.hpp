@@ -14,6 +14,7 @@
 #include "output/vmc_sender.hpp"
 #include "rhi/rhi_device.hpp"
 #include "tracking/tracking_engine.hpp"
+#include "tracking/wasapi_audio_lipsync.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -27,6 +28,7 @@ struct SkinningSnapshot {
     aether::animation::SkinningFrame frame{};
     AetherGraphOutputs outputs{};
     uint64_t frame_sequence{0};
+    uint64_t sim_sequence{0};
     uint64_t t1_capture_us{0};
     uint64_t t2_start_us{0};
     uint64_t t2_done_us{0};
@@ -38,7 +40,7 @@ struct SkinningSnapshot {
     std::array<aether::animation::SpringColliderOverlay, aether::animation::kMaxOverlayColliders> spring_colliders{};
     std::array<aether::animation::SpringSegmentOverlay, aether::animation::kMaxOverlaySpringSegments>
         spring_segments{};
-    uint64_t reserved_[2]{};
+    uint64_t reserved_[1]{};
 };
 
 struct TrackingHudSnapshot {
@@ -67,6 +69,13 @@ struct TrackingHudSnapshot {
     char active_ep_label[64]{"Initializing..."};
     char camera_label[128]{"Synthetic 60Hz"};
     char camera_symlink[256]{};
+    bool audio_mic_available{false};
+    bool audio_assist_enabled{true};
+    bool audio_vad{false};
+    float audio_rms_db{-96.0f};
+    float audio_open_y{0.0f};
+    char audio_device_label[96]{"System Default"};
+    char audio_device_id[192]{};
 };
 
 enum class TrackingCmdKind : uint8_t {
@@ -76,6 +85,7 @@ enum class TrackingCmdKind : uint8_t {
     SetCameraActive = 3,
     SelectCameraDevice = 4,
     SetSyntheticCamera = 5,
+    SelectAudioDevice = 6,
 };
 
 struct TrackingControlCommand {
@@ -91,6 +101,10 @@ struct PipelineConfig {
     uint32_t camera_fps{60};
     int32_t preferred_ep{-1};
     std::string preferred_camera_link{};
+    bool enable_audio_lipsync{true};
+    float mic_gain{1.25f};
+    float mic_noise_gate_db{-48.0f};
+    std::string preferred_mic_id{};
     std::filesystem::path manifest_path{};
     std::filesystem::path ov_cache_dir{};
     rhi::RhiDevice* output_device{nullptr};
@@ -99,6 +113,7 @@ struct PipelineConfig {
 
 struct OutputWorkItem {
     uint64_t frame_sequence{0};
+    uint64_t sim_sequence{0};
     uint64_t t1_capture_us{0};
     uint64_t t2_start_us{0};
     uint64_t t2_done_us{0};
@@ -150,8 +165,11 @@ class PipelineSkeleton {
     /** Pushes newly loaded avatar rest metrics from T3 -> T2 without locks (`HR-02`). */
     void push_rest_skeleton(const aether::animation::RestSkeletonMetrics& rest) noexcept;
 
-    /** Sends non-blocking T3 UI commands (calibrate/camera/EP switch) to T1 (`HR-02`). */
+    /** Sends non-blocking T3 UI commands (calibrate/camera/EP/mic switch) to T1 (`HR-02`). */
     void send_tracking_command(const TrackingControlCommand& cmd) noexcept;
+
+    /** Wait-free audio lip-sync parameter update (`HR-02`) called by T3. */
+    void set_audio_lipsync_params(bool assist_enabled, float mic_gain, float noise_gate_db) noexcept;
 
     [[nodiscard]] TrackingHudSnapshot latest_tracking_hud() noexcept;
     [[nodiscard]] bool acquire_live_preview(tracking::LiveCameraPreviewFrame& out) noexcept;
@@ -208,6 +226,7 @@ class PipelineSkeleton {
     CpuTopology topology_{};
     PipelineConfig cfg_{};
     std::unique_ptr<aether::animation::SimEngine> sim_engine_;
+    std::unique_ptr<aether::tracking::WasapiAudioLipsync> audio_lipsync_;
 
     // VMC Protocol performer output (T2, 60 Hz) mirroring the Studio OSC toggle.
     std::atomic<bool> vmc_enabled_{false};

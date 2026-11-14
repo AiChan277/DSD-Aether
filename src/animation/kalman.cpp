@@ -175,7 +175,16 @@ void KalmanPosePredictor::predict(float horizon_s, const FilteredTrackingState& 
                                   const KalmanConfig& cfg) const noexcept {
     out = base;
     const bool roi_reset = (base.valid_flags & 0x10U) != 0U;
-    const float h = roi_reset ? 0.0f : std::clamp(horizon_s, 0.0f, cfg.max_horizon_s);
+    float h = 0.0f;
+    if (!roi_reset && horizon_s > 0.0f) {
+        if (horizon_s <= cfg.max_horizon_s) {
+            h = horizon_s;
+        } else {
+            const float tail_dt = std::min(horizon_s, cfg.max_extrapolated_s) - cfg.max_horizon_s;
+            const float tau = std::max(cfg.tail_decay_tau_s, 1e-4f);
+            h = cfg.max_horizon_s + tau * (1.0f - std::exp(-tail_dt / tau));
+        }
+    }
     const float h_bs = ((base.valid_flags & 0x01U) != 0U) ? h : 0.0f;
     for (size_t i = 0; i < 52U; ++i) {
         out.blendshapes[i] = std::clamp(bs_kf_[i].predict(h_bs), 0.0f, 1.0f);

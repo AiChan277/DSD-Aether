@@ -427,6 +427,10 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.osc_enabled = params_.get_bool(ParamId::OutputOscEnabled);
     v.dsp_user_offset_ms = params_.get_float(ParamId::DspUserOffsetMs);
     v.output_config_dirty = true;
+    v.audio_assist_enabled = params_.get_bool(ParamId::TrackingAudioAssist);
+    v.mic_gain = params_.get_float(ParamId::TrackingMicGain);
+    v.mic_noise_gate_db = params_.get_float(ParamId::TrackingMicNoiseGate);
+    v.audio_lipsync_dirty = true;
 
     if (params_.get_bool(ParamId::RndDebugForceDeviceLost)) {
         params_.set(ParamId::RndDebugForceDeviceLost, 0.0);

@@ -43,7 +43,8 @@ class alignas(64) SimEngine {
 
     void tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyncPacket& dsp,
               const AetherGraphOutputs& graph_out, uint64_t now_us, float horizon_override_s,
-              const SimEngineConfig& cfg, SkinningFrame& out_skinning) noexcept;
+              const SimEngineConfig& cfg, SkinningFrame& out_skinning,
+              const AudioLipSyncFrame* audio_lipsync = nullptr, float audio_assist_weight = 0.65f) noexcept;
 
     [[nodiscard]] SpringBoneSimulator& spring_simulator() noexcept { return spring_; }
     [[nodiscard]] const SpringBoneSimulator& spring_simulator() const noexcept { return spring_; }

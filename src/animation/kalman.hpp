@@ -7,7 +7,9 @@
 namespace aether::animation {
 
 struct KalmanConfig {
-    float max_horizon_s{0.014f};       // Appendix C: 14 ms
+    float max_horizon_s{0.014f};       // Appendix C: 14 ms exact linear horizon
+    float max_extrapolated_s{0.042f};  // Continuous damped packet-bridge window for 30 Hz cameras
+    float tail_decay_tau_s{0.018f};    // Exponential velocity attenuation tau past max_horizon_s
     float sigma_a_pos{8.0f};           // m/s^2
     float sigma_a_bs{35.0f};           // blendshape units/s^2
     float sigma_m_pos{0.002f};         // 2 mm

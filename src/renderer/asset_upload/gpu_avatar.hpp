@@ -77,6 +77,7 @@ struct GpuAvatar {
     std::vector<std::array<float, 3>> joint_rest_world_pos;
     std::vector<std::array<float, 3>> joint_anim_world_pos;
     std::vector<int32_t> joint_humanoid_source;
+    std::vector<int32_t> joint_spring_source;
     std::vector<std::array<float, 12>> joint_skin_matrices;
     std::vector<BoneLineVertex> bone_line_scratch;
 
@@ -95,6 +96,21 @@ struct GpuAvatar {
     std::vector<AetherColliderDesc> colliders;
     std::vector<AetherMorphRangeDesc> morph_ranges;
     std::vector<AetherExpressionBindingDesc> expressions;
+    std::vector<AetherExpressionBindingDesc> deduped_expressions;
+    enum class MorphRegion : uint8_t {
+        Other = 0,
+        EyeL = 1,
+        EyeR = 2,
+        Brow = 3,
+        Mouth = 4,
+        Emotion = 5,
+    };
+    struct MorphMeta {
+        MorphRegion region{MorphRegion::Other};
+        bool affects_eyelids{false};
+        bool is_blink{false};
+    };
+    std::vector<MorphMeta> morph_meta;
     struct BrowBoneBinding {
         uint32_t joint_index{0};
         uint8_t side{0}; // 0=left, 1=right, 2=center

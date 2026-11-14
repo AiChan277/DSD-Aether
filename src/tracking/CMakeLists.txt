@@ -4,8 +4,10 @@ add_library(aether_tracking STATIC
     file_camera.cpp
     roi_preprocess.cpp
     ort_router.cpp
+    blink_gaze_filter.cpp
     landmark_solver.cpp
     tracking_engine.cpp
+    wasapi_audio_lipsync.cpp
 )
 
 target_link_libraries(aether_tracking

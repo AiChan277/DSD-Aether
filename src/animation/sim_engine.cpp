@@ -55,6 +55,46 @@ void write_bone_skin_matrix(const Vec3& world_pos, const Quat& world_rot, const 
     out_mat[11] = tz;
 }
 
+void init_neutral_pose_and_springs(const RestSkeletonMetrics& rm, VisibilityFirstSolver& vis_solver,
+                                   FullBodyIkSolver& ik_solver, SpringBoneSimulator& spring,
+                                   SolvedBodyPose& solved_body,
+                                   std::array<Vec3, AETHER_HUMANOID_BONE_COUNT>& ik_world_pos,
+                                   std::array<Quat, AETHER_HUMANOID_BONE_COUNT>& ik_world_rot,
+                                   std::array<Vec3, kMaxBones>& bone_pos_ws,
+                                   std::array<Quat, kMaxBones>& bone_rot_ws) noexcept {
+    // Place skeleton in neutral upright A-pose BEFORE initializing SpringBone lengths/colliders.
+    FilteredTrackingState neutral{};
+    AetherGraphOutputs empty_graph{};
+    VisibilityFirstConfig vcfg{};
+    vis_solver.solve(neutral, empty_graph, 1.0f / 60.0f, vcfg, solved_body);
+    ik_solver.solve(solved_body, empty_graph, solved_body.local_rotations, ik_world_pos, ik_world_rot);
+    bone_pos_ws.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
+    bone_rot_ws.fill(Quat::identity());
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        bone_pos_ws[b] = ik_world_pos[b];
+        bone_rot_ws[b] = ik_world_rot[b];
+    }
+
+    spring.configure_default_skirt_and_hair(rm);
+    if (rm.custom_spring_count > 0U) {
+        const uint32_t custom_n = std::min<uint32_t>(rm.custom_spring_count, kMaxRestSprings);
+        for (uint32_t si = 0; si < custom_n; ++si) {
+            const auto& sp = rm.custom_springs[si];
+            const size_t bi = static_cast<size_t>(kCustomSpringBoneOffset + si);
+            if (bi < kMaxBones) {
+                bone_pos_ws[bi] = sp.rest_world_pos;
+                const uint32_t hb = static_cast<uint32_t>(sp.skin_base_humanoid);
+                bone_rot_ws[bi] =
+                    (hb < AETHER_HUMANOID_BONE_COUNT) ? rm.rest_world_rotations[hb] : Quat::identity();
+            }
+        }
+    }
+    const uint32_t total_bones =
+        std::min(kMaxBones, (spring.joint_count() > 0) ? (64U + spring.joint_count()) : AETHER_HUMANOID_BONE_COUNT);
+    spring.reset_state(bone_pos_ws, bone_rot_ws, total_bones);
+    spring.warmup_settle(bone_pos_ws, bone_rot_ws, total_bones, 60U);
+}
+
 } // namespace
 
 SimEngine::SimEngine() noexcept {
@@ -83,24 +123,9 @@ void SimEngine::reset(const RestSkeletonMetrics& rest) noexcept {
     solved_body_ = {};
     ik_world_pos_.fill({});
     ik_world_rot_.fill(Quat::identity());
-    bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
-    bone_rot_ws_.fill(Quat::identity());
 
-    // Place skeleton in neutral upright A-pose BEFORE initializing SpringBone lengths/colliders.
-    FilteredTrackingState neutral{};
-    AetherGraphOutputs empty_graph{};
-    VisibilityFirstConfig vcfg{};
-    vis_solver_.solve(neutral, empty_graph, 1.0f / 60.0f, vcfg, solved_body_);
-    ik_solver_.solve(solved_body_, empty_graph, solved_body_.local_rotations, ik_world_pos_, ik_world_rot_);
-    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        bone_pos_ws_[b] = ik_world_pos_[b];
-        bone_rot_ws_[b] = ik_world_rot_[b];
-    }
-
-    spring_.configure_default_skirt_and_hair(rm);
-    const uint32_t total_bones =
-        std::min(kMaxBones, (spring_.joint_count() > 0) ? (64U + spring_.joint_count()) : AETHER_HUMANOID_BONE_COUNT);
-    spring_.reset_state(bone_pos_ws_, bone_rot_ws_, total_bones);
+    init_neutral_pose_and_springs(rm, vis_solver_, ik_solver_, spring_, solved_body_, ik_world_pos_, ik_world_rot_,
+                                  bone_pos_ws_, bone_rot_ws_);
 
     last_seen_frame_seq_ = 0;
     last_tick_us_ = 0;
@@ -121,26 +146,14 @@ void SimEngine::set_rest_metrics(const RestSkeletonMetrics& rest) noexcept {
     vis_solver_.set_rest_anchors(hips_rest, l_foot_rest, r_foot_rest);
     vis_solver_.set_rest_metrics(rm);
 
-    FilteredTrackingState neutral{};
-    AetherGraphOutputs empty_graph{};
-    VisibilityFirstConfig vcfg{};
-    vis_solver_.solve(neutral, empty_graph, 1.0f / 60.0f, vcfg, solved_body_);
-    ik_solver_.solve(solved_body_, empty_graph, solved_body_.local_rotations, ik_world_pos_, ik_world_rot_);
-    bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
-    bone_rot_ws_.fill(Quat::identity());
-    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        bone_pos_ws_[b] = ik_world_pos_[b];
-        bone_rot_ws_[b] = ik_world_rot_[b];
-    }
-    spring_.configure_default_skirt_and_hair(rm);
-    const uint32_t total_bones =
-        std::min(kMaxBones, (spring_.joint_count() > 0) ? (64U + spring_.joint_count()) : AETHER_HUMANOID_BONE_COUNT);
-    spring_.reset_state(bone_pos_ws_, bone_rot_ws_, total_bones);
+    init_neutral_pose_and_springs(rm, vis_solver_, ik_solver_, spring_, solved_body_, ik_world_pos_, ik_world_rot_,
+                                  bone_pos_ws_, bone_rot_ws_);
 }
 
 void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyncPacket& dsp,
                      const AetherGraphOutputs& graph_out, uint64_t now_us, float horizon_override_s,
-                     const SimEngineConfig& cfg, SkinningFrame& out_skinning) noexcept {
+                     const SimEngineConfig& cfg, SkinningFrame& out_skinning,
+                     const AudioLipSyncFrame* audio_lipsync, float audio_assist_weight) noexcept {
     float dt_s = 1.0f / 240.0f;
     if (last_tick_us_ > 0 && now_us > last_tick_us_) {
         dt_s = std::clamp(static_cast<float>(now_us - last_tick_us_) * 1e-6f, 1.0f / 480.0f, 0.05f);
@@ -161,13 +174,14 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
         kalman_.tick_low_conf_damping(filtered_state_, cfg.kalman);
     }
 
-    // 2. Dead-reckoning prediction horizon (measured capture-to-tick clamped to `<= 14 ms`)
+    // 2. Dead-reckoning prediction horizon: exact linear up to max_horizon_s (14 ms), then
+    // smoothly damped velocity continuation across 30 Hz camera intervals up to max_extrapolated_s (42 ms).
     float horizon_s = 0.0f;
     if (horizon_override_s >= 0.0f) {
-        horizon_s = std::clamp(horizon_override_s, 0.0f, cfg.kalman.max_horizon_s);
+        horizon_s = std::clamp(horizon_override_s, 0.0f, cfg.kalman.max_extrapolated_s);
     } else if (filtered_state_.inference_complete_us > 0 && now_us > filtered_state_.inference_complete_us) {
         horizon_s = std::clamp(static_cast<float>(now_us - filtered_state_.inference_complete_us) * 1e-6f, 0.0f,
-                               cfg.kalman.max_horizon_s);
+                               cfg.kalman.max_extrapolated_s);
     }
     kalman_.predict(horizon_s, filtered_state_, predicted_state_, cfg.kalman);
 
@@ -219,10 +233,21 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
         write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], rest_world_pos[b], rm.rest_world_rotations[b],
                                out_skinning.bone_matrices[b]);
     }
+    const uint32_t custom_n =
+        (rm.custom_spring_count > 0U) ? std::min<uint32_t>(rm.custom_spring_count, kMaxRestSprings) : 0U;
     for (size_t b = AETHER_HUMANOID_BONE_COUNT; b < total_bones; ++b) {
-        // Virtual hair/cloth chain bones keep bind identity relative to their animated spring positions
-        write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], bone_pos_ws_[b], bone_rot_ws_[b],
-                               out_skinning.bone_matrices[b]);
+        if (b >= kCustomSpringBoneOffset && b - kCustomSpringBoneOffset < custom_n) {
+            const auto& sp = rm.custom_springs[b - kCustomSpringBoneOffset];
+            const uint32_t hb = static_cast<uint32_t>(sp.skin_base_humanoid);
+            const Quat base_rest_rot =
+                (hb < AETHER_HUMANOID_BONE_COUNT) ? rm.rest_world_rotations[hb] : Quat::identity();
+            write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], sp.rest_world_pos, base_rest_rot,
+                                   out_skinning.bone_matrices[b]);
+        } else {
+            // Virtual hair/cloth fallback chain bones keep bind identity relative to animated spring poses
+            write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], bone_pos_ws_[b], bone_rot_ws_[b],
+                                   out_skinning.bone_matrices[b]);
+        }
     }
 
     // 7. Blendshapes + Live2D parameters + 60 ms DSP mouth-ownership transition
@@ -232,7 +257,8 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
     out_skinning.live2d = Live2DParameters{};
     expr_mixer_.update(predicted_state_.blendshapes.data(), dsp, graph_out, dt_s, out_skinning.morph_weights,
                        out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data(),
-                       rm.has_split_brow_morphs, opt_raw_l2d, &out_skinning.live2d);
+                       rm.has_split_brow_morphs, opt_raw_l2d, &out_skinning.live2d, audio_lipsync,
+                       audio_assist_weight);
 
     const auto world_delta_euler_deg = [&](uint32_t bone_id) noexcept -> Vec3 {
         const Quat rw = rm.rest_world_rotations[bone_id];

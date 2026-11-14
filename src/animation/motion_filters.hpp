@@ -116,10 +116,12 @@ class TricksterChannel {
  */
 class TricksterFrameStabilizer {
   public:
-    static constexpr float kRotDeadzoneDeg = 0.25f;
-    static constexpr float kRotRampDeg = 0.45f;
-    static constexpr float kPosDeadzoneM = 0.0015f;
-    static constexpr float kBlendDeadzone = 0.015f;
+    static constexpr float kRotDeadzoneDeg = 0.0f;
+    static constexpr float kRotRampDeg = 0.0f;
+    static constexpr float kPosDeadzoneM = 0.0f;
+    static constexpr float kBlendDeadzone = 0.0f;
+    static constexpr float kRotOutlierJumpDeg = 30.0f;
+    static constexpr float kPosOutlierJumpM = 0.25f;
 
     void reset() noexcept { primed_ = false; }
 
@@ -150,8 +152,19 @@ class TricksterFrameStabilizer {
         }
         float rv_out[3]{};
         for (size_t k = 0; k < 3; ++k) {
-            rv_out[k] = rot_[k].push(rv_in[k], kRotDeadzoneDeg, kRotRampDeg);
-            hp[k] = pos_[k].push(hp[k], kPosDeadzoneM);
+            // Task 5: Pass normal head turns with 0-frame lag so Warudo 1-Euro + Cubic Deadzone
+            // owns smoothing exclusively; invoke median-3 only to guard unphysical 1-frame spikes.
+            if (std::abs(rv_in[k] - rot_[k].value()) > kRotOutlierJumpDeg) {
+                rv_out[k] = rot_[k].push(rv_in[k], kRotDeadzoneDeg, kRotRampDeg);
+            } else {
+                rot_[k].reset(rv_in[k]);
+                rv_out[k] = rv_in[k];
+            }
+            if (std::abs(hp[k] - pos_[k].value()) > kPosOutlierJumpM) {
+                hp[k] = pos_[k].push(hp[k], kPosDeadzoneM);
+            } else {
+                pos_[k].reset(hp[k]);
+            }
         }
         const Quat q = rotvec_to_quat(Vec3{rv_out[0], rv_out[1], rv_out[2]} * kDegToRad);
         hq[0] = q.x;
@@ -159,10 +172,16 @@ class TricksterFrameStabilizer {
         hq[2] = q.z;
         hq[3] = q.w;
         for (size_t i = 0; i < bs_.size(); ++i) {
+            // Blink (0, 7), iris gaze (1..4, 8..11), and mouth/jaw channels (17..38) are stabilized
+            // authoritatively by BlinkGazeStabilizer and Hybrid Audio-Visual ExpressionMixer.
+            if (i <= 4U || (i >= 7U && i <= 11U) || (i >= 17U && i <= 38U)) {
+                bs_[i].reset(f.arkit_blendshapes[i]);
+                continue;
+            }
             f.arkit_blendshapes[i] = std::clamp(bs_[i].push(f.arkit_blendshapes[i], kBlendDeadzone), 0.0f, 1.0f);
         }
         for (size_t i = 0; i < vis_.size(); ++i) {
-            f.webcam_visemes[i] = std::clamp(vis_[i].push(f.webcam_visemes[i], kBlendDeadzone), 0.0f, 1.0f);
+            vis_[i].reset(f.webcam_visemes[i]);
         }
     }
 

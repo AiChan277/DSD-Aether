@@ -223,6 +223,15 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 }
                 draw_property_row(ParamId::TrackingAntiFlicker, params, undo, fonts, row_actions);
                 draw_property_row(ParamId::TrackingExposureLock, params, undo, fonts, row_actions);
+                if (draw_property_row(ParamId::TrackingAudioAssist, params, undo, fonts, row_actions) ||
+                    draw_property_row(ParamId::TrackingMicGain, params, undo, fonts, row_actions) ||
+                    draw_property_row(ParamId::TrackingMicNoiseGate, params, undo, fonts, row_actions)) {
+                    actions.viewport.audio_assist_enabled = params.get_bool(ParamId::TrackingAudioAssist);
+                    actions.viewport.mic_gain = params.get_float(ParamId::TrackingMicGain);
+                    actions.viewport.mic_noise_gate_db = params.get_float(ParamId::TrackingMicNoiseGate);
+                    actions.viewport.audio_lipsync_dirty = true;
+                    settings_dirty = true;
+                }
                 end_property_table();
             }
             ImGui::Spacing();
@@ -252,10 +261,55 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 actions.viewport.request_set_camera_active = true;
                 actions.viewport.target_camera_active = !tracking.camera_active;
             }
+            const int active_mic = active_audio_device_index(hw, tracking, settings);
+            const char* mic_preview = settings.preferred_mic_id.empty()
+                                          ? (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
+                                                 ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
+                                                 : tr("System Default"))
+                                          : (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
+                                                 ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
+                                                 : tracking.audio_device_label);
+            ImGui::SetNextItemWidth(full_w * 0.65f);
+            if (ImGui::BeginCombo("##InspMicCombo", mic_preview)) {
+                const bool def_sel = settings.preferred_mic_id.empty();
+                if (ImGui::Selectable(tr("System Default##imic_def"), def_sel)) {
+                    select_audio_device_action("", settings, settings_dirty, actions);
+                }
+                for (int i = 0; i < static_cast<int>(hw.audio_inputs.size()); ++i) {
+                    const auto& mic = hw.audio_inputs[static_cast<size_t>(i)];
+                    char lbl[192]{};
+                    std::snprintf(lbl, sizeof(lbl), "%s%s##imic_%d", mic.friendly_name.c_str(),
+                                  mic.is_default ? " [Default]" : "", i);
+                    const bool is_sel = !def_sel && (mic.device_id == settings.preferred_mic_id);
+                    if (ImGui::Selectable(lbl, is_sel)) {
+                        select_audio_device_action(mic.device_id, settings, settings_dirty, actions);
+                    }
+                    if (is_sel) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted(tr("Audio Input"));
             ImGui::Spacing();
             char cam_buf[192]{};
             format_camera_status_badge(tracking, cam_buf, sizeof(cam_buf));
             draw_status_badge(fonts, tr("Camera"), cam_buf, tracking.camera_active ? t.status_ok : t.status_warn);
+            char mic_buf[160]{};
+            if (!tracking.audio_assist_enabled) {
+                std::snprintf(mic_buf, sizeof(mic_buf), "Disabled");
+            } else if (!tracking.audio_mic_available) {
+                std::snprintf(mic_buf, sizeof(mic_buf), "%s (Webcam Fallback)",
+                              tracking.audio_device_label != nullptr ? tracking.audio_device_label : "No Mic");
+            } else {
+                std::snprintf(mic_buf, sizeof(mic_buf), "%s · %.1f dB · Open %.2f",
+                              tracking.audio_vad ? "VAD Active" : "Silence Lock",
+                              static_cast<double>(tracking.audio_rms_db), static_cast<double>(tracking.audio_open_y));
+            }
+            draw_status_badge(fonts, tr("Audio Lip-Sync"), mic_buf,
+                              tracking.audio_vad ? t.status_ok
+                                                 : (tracking.audio_mic_available ? t.text_primary : t.status_warn));
             char ep_buf[128]{};
             std::snprintf(ep_buf, sizeof(ep_buf), "%s · %llu frames", tracking.active_ep_label,
                           static_cast<unsigned long long>(tracking.frames_processed));

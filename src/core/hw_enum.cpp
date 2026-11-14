@@ -11,6 +11,8 @@
 #include <dxgi1_6.h>
 #include <mfapi.h>
 #include <mfidl.h>
+#include <mmdeviceapi.h>
+#include <propsys.h>
 #include <wrl/client.h>
 #endif
 
@@ -228,6 +230,70 @@ bool check_openvino_ep_dll_present() {
     return ::SearchPathW(nullptr, L"onnxruntime_providers_openvino.dll", nullptr, 0, nullptr, nullptr) > 0;
 }
 
+void enum_wasapi_audio_inputs(std::vector<AudioInputDeviceInfo>& out) {
+    out.clear();
+    const HRESULT co_hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool com_owned = (co_hr == S_OK || co_hr == S_FALSE);
+
+    Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+    if (SUCCEEDED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator))) &&
+        enumerator) {
+        std::string default_id;
+        Microsoft::WRL::ComPtr<IMMDevice> def_dev;
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &def_dev)) && def_dev) {
+            LPWSTR wid = nullptr;
+            if (SUCCEEDED(def_dev->GetId(&wid)) && wid != nullptr) {
+                default_id = wide_to_utf8(wid);
+                ::CoTaskMemFree(wid);
+            }
+        }
+
+        Microsoft::WRL::ComPtr<IMMDeviceCollection> coll;
+        if (SUCCEEDED(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &coll)) && coll) {
+            UINT count = 0;
+            if (SUCCEEDED(coll->GetCount(&count))) {
+                for (UINT i = 0; i < count; ++i) {
+                    Microsoft::WRL::ComPtr<IMMDevice> dev;
+                    if (FAILED(coll->Item(i, &dev)) || !dev) {
+                        continue;
+                    }
+                    AudioInputDeviceInfo info{};
+                    LPWSTR wid = nullptr;
+                    if (SUCCEEDED(dev->GetId(&wid)) && wid != nullptr) {
+                        info.device_id = wide_to_utf8(wid);
+                        ::CoTaskMemFree(wid);
+                    }
+                    info.is_default = (!default_id.empty() && info.device_id == default_id);
+
+                    Microsoft::WRL::ComPtr<IPropertyStore> props;
+                    if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props)) && props) {
+                        static constexpr PROPERTYKEY kFriendlyNameKey = {
+                            {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80U, 0x20U, 0x67U, 0xd1U, 0x46U, 0xa8U, 0x50U, 0xe0U}}, 14};
+                        PROPVARIANT var{};
+                        PropVariantInit(&var);
+                        if (SUCCEEDED(props->GetValue(kFriendlyNameKey, &var)) && var.vt == VT_LPWSTR &&
+                            var.pwszVal != nullptr) {
+                            info.friendly_name = wide_to_utf8(var.pwszVal);
+                        }
+                        ::PropVariantClear(&var);
+                    }
+                    if (info.friendly_name.empty()) {
+                        info.friendly_name = "Audio Capture Device";
+                    }
+                    out.push_back(std::move(info));
+                }
+            }
+        }
+    }
+
+    std::stable_partition(out.begin(), out.end(),
+                          [](const AudioInputDeviceInfo& d) { return d.is_default; });
+
+    if (com_owned) {
+        ::CoUninitialize();
+    }
+}
+
 void probe_npu_hardware(NpuStatusInfo& out) {
     out.probed = true;
     out.available = false;
@@ -301,6 +367,7 @@ HardwareInventory enumerate_hardware() {
     }
     enum_dxgi_gpus(inv.gpus);
     enum_mf_cameras(inv.cameras);
+    enum_wasapi_audio_inputs(inv.audio_inputs);
     probe_npu_hardware(inv.npu);
 #else
     inv.npu.probed = true;
@@ -310,11 +377,19 @@ HardwareInventory enumerate_hardware() {
     inv.npu.note = "Non-Windows platform";
 #endif
 
-    AETHER_LOG_INFO("hw", "CPU: %s (%uP/%uE, %uT), RAM: %llu MiB, GPUs: %zu, Cameras: %zu, NPU: %s (%s)",
+    AETHER_LOG_INFO("hw", "CPU: %s (%uP/%uE, %uT), RAM: %llu MiB, GPUs: %zu, Cameras: %zu, Mics: %zu, NPU: %s (%s)",
                     inv.cpu.brand_string.c_str(), inv.cpu.p_core_count, inv.cpu.e_core_count,
                     inv.cpu.logical_processors, static_cast<unsigned long long>(inv.total_ram_mb), inv.gpus.size(),
-                    inv.cameras.size(), inv.npu.device_name.c_str(), inv.npu.note.c_str());
+                    inv.cameras.size(), inv.audio_inputs.size(), inv.npu.device_name.c_str(), inv.npu.note.c_str());
     return inv;
+}
+
+std::vector<AudioInputDeviceInfo> enumerate_audio_input_devices() {
+    std::vector<AudioInputDeviceInfo> out;
+#if defined(_WIN32)
+    enum_wasapi_audio_inputs(out);
+#endif
+    return out;
 }
 
 } // namespace aether

@@ -518,6 +518,8 @@ bool load_app_settings_toml(const std::filesystem::path& path, AppSettings& sett
                 settings.hw_inventory_hash = std::strtoull(val.c_str(), nullptr, 10);
             } else if (key == "preferred_camera_link") {
                 settings.preferred_camera_link = unquote_toml_str(val);
+            } else if (key == "preferred_mic_id") {
+                settings.preferred_mic_id = unquote_toml_str(val);
             } else if (key == "preferred_gpu_luid") {
                 settings.preferred_gpu_luid = unquote_toml_str(val);
             } else if (key == "preferred_gpu_name") {
@@ -562,6 +564,7 @@ bool save_app_settings_toml(const std::filesystem::path& path, const AppSettings
     oss << "wizard_completed = " << (settings.wizard_completed ? "true" : "false") << "\n";
     oss << "hw_inventory_hash = " << settings.hw_inventory_hash << "\n";
     oss << "preferred_camera_link = " << quote_toml_str(settings.preferred_camera_link) << "\n";
+    oss << "preferred_mic_id = " << quote_toml_str(settings.preferred_mic_id) << "\n";
     oss << "preferred_gpu_luid = " << quote_toml_str(settings.preferred_gpu_luid) << "\n";
     oss << "preferred_gpu_name = " << quote_toml_str(settings.preferred_gpu_name) << "\n";
     oss << "active_project_path = " << quote_toml_str(settings.active_project_path) << "\n";

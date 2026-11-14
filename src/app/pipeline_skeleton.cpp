@@ -119,6 +119,11 @@ bool PipelineSkeleton::start(const HardwareInventory& hw, const PipelineConfig& 
     cfg_ = cfg;
     sim_engine_ = std::make_unique<animation::SimEngine>();
     sim_engine_->reset();
+    if (cfg_.enable_live_tracking) {
+        audio_lipsync_ = std::make_unique<tracking::WasapiAudioLipsync>();
+        (void)audio_lipsync_->start(cfg_.preferred_mic_id, cfg_.mic_gain, cfg_.mic_noise_gate_db,
+                                    cfg_.enable_audio_lipsync);
+    }
     (void)dsp_reader_bridge_.init();
     t3_dsp_stale_count_ = 0;
     pending_output_slots_.store(0u, std::memory_order_release);
@@ -167,6 +172,10 @@ void PipelineSkeleton::stop() noexcept {
     }
     if (t4_thread_.joinable()) {
         t4_thread_.join();
+    }
+    if (audio_lipsync_) {
+        audio_lipsync_->stop();
+        audio_lipsync_.reset();
     }
     dsp_reader_bridge_.shutdown();
     sim_engine_.reset();
@@ -260,6 +269,14 @@ void PipelineSkeleton::push_rest_skeleton(const animation::RestSkeletonMetrics& 
 
 void PipelineSkeleton::send_tracking_command(const TrackingControlCommand& cmd) noexcept {
     (void)tracking_cmd_ring_.try_push(cmd);
+}
+
+void PipelineSkeleton::set_audio_lipsync_params(bool assist_enabled, float mic_gain, float noise_gate_db) noexcept {
+    if (audio_lipsync_) {
+        audio_lipsync_->set_assist_enabled(assist_enabled);
+        audio_lipsync_->set_gain(mic_gain);
+        audio_lipsync_->set_noise_gate_db(noise_gate_db);
+    }
 }
 
 TrackingHudSnapshot PipelineSkeleton::latest_tracking_hud() noexcept {
@@ -401,6 +418,26 @@ void PipelineSkeleton::t1_entry() {
             std::snprintf(hud.camera_label, sizeof(hud.camera_label), "%s",
                           !camera_active ? "Camera Stopped" : (use_synthetic ? "Synthetic 60Hz" : "Camera"));
         }
+        if (audio_lipsync_) {
+            const auto af = audio_lipsync_->latest();
+            hud.audio_mic_available = af.device_available;
+            hud.audio_assist_enabled = audio_lipsync_->assist_enabled();
+            hud.audio_vad = (af.vad > 0.0f);
+            hud.audio_rms_db = af.rms_db;
+            hud.audio_open_y = af.audio_open_y;
+            std::snprintf(hud.audio_device_label, sizeof(hud.audio_device_label), "%s",
+                          audio_lipsync_->active_device_label().c_str());
+            std::snprintf(hud.audio_device_id, sizeof(hud.audio_device_id), "%s",
+                          audio_lipsync_->active_device_id().c_str());
+        } else {
+            hud.audio_mic_available = false;
+            hud.audio_assist_enabled = false;
+            hud.audio_vad = false;
+            hud.audio_rms_db = -96.0f;
+            hud.audio_open_y = 0.0f;
+            std::snprintf(hud.audio_device_label, sizeof(hud.audio_device_label), "Disabled");
+            hud.audio_device_id[0] = '\0';
+        }
         tracking_hud_buffer_.publish();
     };
 
@@ -475,6 +512,11 @@ void PipelineSkeleton::t1_entry() {
                 engine->shutdown();
                 init_err.clear();
                 engine_ready = init_engine(*engine, init_err);
+                publish_hud(engine.get(), engine_ready, engine_ready ? nullptr : init_err.c_str());
+            } else if (cmd.kind == TrackingCmdKind::SelectAudioDevice) {
+                if (audio_lipsync_) {
+                    audio_lipsync_->select_device(cmd.str_arg);
+                }
                 publish_hud(engine.get(), engine_ready, engine_ready ? nullptr : init_err.c_str());
             }
         }
@@ -587,8 +629,12 @@ void PipelineSkeleton::t2_entry() {
 
             SkinningSnapshot& snap = skinning_buffer_.staging();
             vmc_frame_.valid = false;
+            const animation::AudioLipSyncFrame audio_frame =
+                audio_lipsync_ ? audio_lipsync_->latest() : animation::AudioLipSyncFrame{};
+            const animation::AudioLipSyncFrame* const opt_audio = audio_lipsync_ ? &audio_frame : nullptr;
             if (sim_engine_) {
-                sim_engine_->tick(latest_pose, dsp_pkt, graph_out, t2_start, -1.0f, sim_cfg, snap.frame);
+                sim_engine_->tick(latest_pose, dsp_pkt, graph_out, t2_start, -1.0f, sim_cfg, snap.frame, opt_audio,
+                                  0.65f);
                 if ((sim_tick % 4U) == 0U && vmc_enabled_.load(std::memory_order_acquire)) {
                     sim_engine_->export_vmc_pose(snap.frame, static_cast<float>(static_cast<double>(t2_start) * 1e-6),
                                                  vmc_frame_);
@@ -601,6 +647,7 @@ void PipelineSkeleton::t2_entry() {
             const uint64_t t2_done = now_us();
             snap.frame.sim_tick_ms = static_cast<float>(t2_done - t2_start) * 0.001f;
             snap.frame_sequence = latest_pose.frame_sequence;
+            snap.sim_sequence = sim_tick + 1ULL;
             snap.t1_capture_us = latest_pose.capture_timestamp_us;
             snap.t2_start_us = t2_start;
             snap.t2_done_us = t2_done;

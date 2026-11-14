@@ -47,6 +47,9 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `tracking.anti_flicker` | Tracking | Anti-Flicker | `enum` | T1 | `2.0` | `[0.0, 2.0]` | — | — | persist, app |
 | `tracking.exposure_lock` | Tracking | Lock Exposure | `bool` | T1 | `0.0` | `[0.0, 1.0]` | — | — | persist, app |
 | `tracking.synthetic_camera` | Tracking | Synthetic Feed | `bool` | T1 | `0.0` | `[0.0, 1.0]` | — | — | persist, app |
+| `tracking.audio_assist` | Tracking | Audio Lip-Sync | `bool` | T2 | `1.0` | `[0.0, 1.0]` | — | — | persist, app |
+| `tracking.mic_gain` | Tracking | Mic Gain | `float` | T2 | `1.25` | `[0.10, 4.00]` | x | — | persist, app |
+| `tracking.mic_noise_gate` | Tracking | Mic Noise Gate | `float` | T2 | `-48.0` | `[-72.0, -18.0]` | dB | — | persist, app |
 | `output.resolution` | Output | Resolution Preset | `enum` | T4 | `1.0` | `[0.0, 3.0]` | — | — | persist, project, undoable |
 | `output.fps` | Output | Output Frame Rate | `int` | T4 | `60.0` | `[30.0, 120.0]` | fps | — | persist, project, undoable |
 | `output.premul_alpha` | Output | Premultiplied Alpha | `bool` | T4 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |

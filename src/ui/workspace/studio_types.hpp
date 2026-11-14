@@ -289,6 +289,38 @@ inline void select_camera_device_action(const CameraDeviceInfo& cam, ParamStore&
                   settings.preferred_camera_link.c_str());
 }
 
+[[nodiscard]] inline int active_audio_device_index(const HardwareInventory& hw, const DevShellTrackingView& tracking,
+                                                   const AppSettings& settings) noexcept {
+    if (hw.audio_inputs.empty()) {
+        return -1;
+    }
+    const char* active_id = (tracking.audio_device_id != nullptr && tracking.audio_device_id[0] != '\0')
+                                ? tracking.audio_device_id
+                                : settings.preferred_mic_id.c_str();
+    if (active_id != nullptr && active_id[0] != '\0') {
+        for (int i = 0; i < static_cast<int>(hw.audio_inputs.size()); ++i) {
+            if (hw.audio_inputs[static_cast<size_t>(i)].device_id == active_id) {
+                return i;
+            }
+        }
+    }
+    for (int i = 0; i < static_cast<int>(hw.audio_inputs.size()); ++i) {
+        if (hw.audio_inputs[static_cast<size_t>(i)].is_default) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+inline void select_audio_device_action(std::string_view device_id, AppSettings& settings, bool& settings_dirty,
+                                       StudioActions& actions) noexcept {
+    settings.preferred_mic_id.assign(device_id);
+    settings_dirty = true;
+    actions.viewport.request_select_mic = true;
+    std::snprintf(actions.viewport.select_mic_id.data(), actions.viewport.select_mic_id.size(), "%s",
+                  settings.preferred_mic_id.c_str());
+}
+
 inline void format_camera_status_badge(const DevShellTrackingView& tracking, char* out, size_t out_cap) noexcept {
     if (out == nullptr || out_cap == 0U) {
         return;

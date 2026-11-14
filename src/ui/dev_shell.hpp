@@ -93,6 +93,13 @@ struct DevShellTrackingView {
     const char* active_ep_label{"Initializing..."};
     const char* camera_label{"Synthetic 60Hz"};
     const char* camera_symlink{""};
+    bool audio_mic_available{false};
+    bool audio_assist_enabled{true};
+    bool audio_vad{false};
+    float audio_rms_db{-96.0f};
+    float audio_open_y{0.0f};
+    const char* audio_device_label{"System Default"};
+    const char* audio_device_id{""};
 
     bool neutral_calibrated{false};
     uint32_t stable_lock_frames{0};
@@ -280,6 +287,12 @@ struct DevShellViewportActions {
     bool osc_enabled{true};
     float dsp_user_offset_ms{0.0f};
     bool output_config_dirty{false};
+    bool audio_assist_enabled{true};
+    float mic_gain{1.25f};
+    float mic_noise_gate_db{-48.0f};
+    bool audio_lipsync_dirty{false};
+    bool request_select_mic{false};
+    std::array<char, 192> select_mic_id{};
 };
 
 /**

@@ -46,8 +46,10 @@ if(WIN32)
         mfplat
         mfreadwrite
         ole32
+        propsys
         setupapi
         shell32
+        uuid
         avrt
     )
 endif()

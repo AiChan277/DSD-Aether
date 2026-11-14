@@ -92,7 +92,10 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
 
     const CapturedFrameBuffer* cam_frame = nullptr;
     if (!camera_ || !camera_->read_latest_blocking(wait_timeout_ms, cam_frame) || cam_frame == nullptr) {
-        if (synthetic_fallback_when_no_frame) {
+        // Real/open hardware or file cameras run slower than the 60 Hz polling loop (e.g., 30 FPS = 33.3 ms);
+        // never clobber the active ROI/face lock with a synthetic zero-confidence idle frame between packets.
+        const bool live_camera_open = (camera_ != nullptr && camera_->is_open() && !camera_->is_synthetic());
+        if (synthetic_fallback_when_no_frame && !live_camera_open) {
             step_synthetic_idle_frame(out_buffer, aether::now_us());
             return true;
         }

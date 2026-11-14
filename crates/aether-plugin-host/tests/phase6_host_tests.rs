@@ -568,7 +568,8 @@ fn cpp_default_6_node_graph_json_parses_and_compiles_cleanly()
     let mut out = AetherGraphOutputs::default_zero();
     plan.evaluate(&inp, &mut out);
     assert!(out.expression_weights[52] > 0.8);
-    assert!(out.expression_weights[24] > 0.6);
+    assert!(out.expression_weights[17] > 0.6);
+    assert!(out.expression_weights[24].abs() < 1e-6);
 
     let host = PluginHost::create(&base_host_config())?;
     host.compile_graph(cpp_default_json)?;
@@ -1316,7 +1317,8 @@ fn audio_frame_and_viseme_types_distinct_with_legacy_json_compat() -> Result<(),
     let mut out = AetherGraphOutputs::default_zero();
     host.evaluate_active(&inp, &mut out)?;
     assert!((out.expression_weights[52] - 0.8).abs() < 1e-4);
-    assert!(out.expression_weights[24] > 0.5);
+    assert!(out.expression_weights[17] > 0.5);
+    assert!(out.expression_weights[24].abs() < 1e-6);
 
     // Pin readouts report AETHER_PIN_VALUE_AUDIO (with F1/F2 formants) on DspAudio and AETHER_PIN_VALUE_VISEME on FormantLipSync.
     let mut ro = AetherGraphTelemetryReadout::default_zero();
