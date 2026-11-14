@@ -36,7 +36,8 @@ class TimelineConsole {
     ConsoleTabResult draw_console_tab(std::span<const LogRecord> logs, size_t log_head, size_t log_count,
                                       const UiFontSet& fonts);
 
-    void draw_expressions_tab(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts);
+    void draw_expressions_tab(std::span<ExpressionSlotInfo> expressions, const DevShellTrackingView& tracking,
+                              const UiFontSet& fonts);
 
     void draw_timeline_tab(const TelemetrySnapshot& telemetry, const DevShellRenderView& render_view,
                            const DevShellTrackingView& tracking, ParamStore& params, const UiFontSet& fonts);

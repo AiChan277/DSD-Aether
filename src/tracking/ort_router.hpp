@@ -23,6 +23,8 @@ struct TrackingRouterConfig {
     double health_budget_ms{28.0};
     // CI testing bitmask: bit `k` set forces tier `EpTier(k)` initialization to simulate failure.
     uint32_t forced_fail_ep_mask{0};
+    // Hand tracking disabled by default so compute and stability focus 100% on face/head/upper-body.
+    bool enable_hand_tracking{false};
 };
 
 struct PreallocatedModelBuffers {
@@ -71,6 +73,7 @@ class AetherTrackingRouter {
     [[nodiscard]] PreallocatedModelBuffers& buffers() noexcept { return buffers_; }
     [[nodiscard]] const PreallocatedModelBuffers& buffers() const noexcept { return buffers_; }
     [[nodiscard]] const TrackingModelManifest& manifest() const noexcept { return manifest_; }
+    [[nodiscard]] const TrackingRouterConfig& config() const noexcept { return cfg_; }
 
     /** Zero-alloc hot-path inference steps using pre-bound `Ort::IoBinding`. */
     [[nodiscard]] AetherStatus run_m0_face_detector() noexcept;

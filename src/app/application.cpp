@@ -452,6 +452,7 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         dst.local_b = animation::rotate_vec(inv_hb_rot, b_ws - world[hb]);
     }
     rm.custom_collider_count = custom_cnt;
+    rm.has_split_brow_morphs = avatar.has_split_brow_morphs;
     rm.valid = true;
     return rm;
 }
@@ -2188,7 +2189,8 @@ int run_application(const AppLaunchOptions& opts) {
                     }
                 }
                 current_avatar->update_pose(frame.frame_slot, skin_snap.frame_sequence, skin_snap.frame.bone_matrices,
-                                            skin_snap.frame.bone_count, latched_morphs.data(), morph_count, true);
+                                            skin_snap.frame.bone_count, latched_morphs.data(), morph_count, true,
+                                            &skin_snap.frame.live2d);
                 if (dsp_voice_on) {
                     last_late_latch_us = now_us() - ll_start;
                 }
@@ -2479,6 +2481,7 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.jaw_open_preview = skin_snap.frame.arkit_preview[17]; // jawOpen
                     tracking_view.blink_l_preview = skin_snap.frame.arkit_preview[0];   // eyeBlinkLeft
                     tracking_view.blink_r_preview = skin_snap.frame.arkit_preview[7];   // eyeBlinkRight
+                    tracking_view.live2d = skin_snap.frame.live2d;
                     tracking_view.valid_flags = skin_snap.frame.tracking_valid_flags;
                     tracking_view.active_ep_label = track_hud.active_ep_label;
                     tracking_view.camera_label = track_hud.camera_label;
@@ -2498,11 +2501,20 @@ int run_application(const AppLaunchOptions& opts) {
                         tracking_view.live_preview_face_locked = ov.face_locked;
                         tracking_view.live_preview_face_roi = {ov.face_roi.cx, ov.face_roi.cy, ov.face_roi.width,
                                                                ov.face_roi.height};
-                        const uint32_t kp_count = std::min<uint32_t>(ov.keypoint_count, 24U);
+                        const uint32_t kp_count = std::min<uint32_t>(ov.keypoint_count, 68U);
+                        tracking_view.live_preview_keypoint_count = kp_count;
+                        tracking_view.live_preview_keypoint_valid.fill(0U);
                         for (uint32_t k = 0; k < kp_count; ++k) {
                             tracking_view.live_preview_keypoints[k] = {ov.keypoints_norm[k * 2U + 0U],
                                                                        ov.keypoints_norm[k * 2U + 1U]};
                             tracking_view.live_preview_keypoint_valid[k] = 1U;
+                        }
+                        tracking_view.live_preview_iris_valid = ov.iris_valid;
+                        if (ov.iris_valid) {
+                            tracking_view.live_preview_iris_centers[0] = {ov.iris_centers_norm[0],
+                                                                          ov.iris_centers_norm[1]};
+                            tracking_view.live_preview_iris_centers[1] = {ov.iris_centers_norm[2],
+                                                                          ov.iris_centers_norm[3]};
                         }
                         tracking_view.live_preview_axes_valid = ov.head_axes_valid;
                         if (ov.head_axes_valid) {

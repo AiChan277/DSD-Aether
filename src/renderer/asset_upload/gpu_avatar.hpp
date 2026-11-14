@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aether_ffi_contract.h"
+#include "animation/live2d_params.hpp"
 #include "core/expected.hpp"
 #include "rhi/rhi_device.hpp"
 
@@ -94,8 +95,15 @@ struct GpuAvatar {
     std::vector<AetherColliderDesc> colliders;
     std::vector<AetherMorphRangeDesc> morph_ranges;
     std::vector<AetherExpressionBindingDesc> expressions;
+    struct BrowBoneBinding {
+        uint32_t joint_index{0};
+        uint8_t side{0}; // 0=left, 1=right, 2=center
+    };
+
     std::vector<AetherTextureDesc> texture_descs;
     std::string strings;
+    std::vector<BrowBoneBinding> brow_bones;
+    bool has_split_brow_morphs{false};
 
     ~GpuAvatar() { destroy(); }
     GpuAvatar() = default;
@@ -109,7 +117,8 @@ struct GpuAvatar {
      * zero heap allocations (`HR-01`, `P3-07`).
      */
     void update_pose(uint32_t frame_slot, uint64_t pose_seq, const float (*bone_matrices)[12], uint32_t bone_count,
-                     const float* expr_weights, uint32_t expr_count, bool update_mesh_vertices = true) noexcept;
+                     const float* expr_weights, uint32_t expr_count, bool update_mesh_vertices = true,
+                     const animation::Live2DParameters* opt_live2d = nullptr) noexcept;
 
     [[nodiscard]] std::string string_slice(uint32_t offset, uint32_t len) const;
     [[nodiscard]] uint32_t mapped_humanoid_count() const noexcept;

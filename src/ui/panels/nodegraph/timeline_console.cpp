@@ -170,50 +170,148 @@ ConsoleTabResult TimelineConsole::draw_console_tab(std::span<const LogRecord> lo
     return result;
 }
 
-void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts) {
+void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> expressions,
+                                           const DevShellTrackingView& tracking, const UiFontSet& fonts) {
     const PrecisionDarkTokens& t = tokens();
     const float scale = ImGui::GetFontSize() / std::max(1.0f, t.type_body_px);
-    if (ImGui::BeginTable("##ExprMatrix", 4,
-                          ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn(tr("Hotkey"), ImGuiTableColumnFlags_WidthFixed, 64.0f * scale);
-        ImGui::TableSetupColumn(tr("Expression"), ImGuiTableColumnFlags_WidthFixed, 150.0f * scale);
-        ImGui::TableSetupColumn(tr("Live Weight"), ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn(tr("Trigger"), ImGuiTableColumnFlags_WidthFixed, 92.0f * scale);
-        ImGui::TableHeadersRow();
 
-        for (size_t i = 0; i < expressions.size() && i < StudioActions::kQuickExpressionSlots; ++i) {
-            ExpressionSlotInfo& ex = expressions[i];
-            ImGui::PushID(static_cast<int>(ex.slot));
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            if (fonts.mono != nullptr) {
-                ImGui::PushFont(fonts.mono);
+    if (ImGui::BeginTable("##ExprSplit", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("##HotkeysCol", ImGuiTableColumnFlags_WidthStretch, 0.32f);
+        ImGui::TableSetupColumn("##Live2DCol", ImGuiTableColumnFlags_WidthStretch, 0.68f);
+        ImGui::TableNextRow();
+
+        ImGui::TableSetColumnIndex(0);
+        if (ImGui::BeginTable("##ExprMatrix", 4,
+                              ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn(tr("Hotkey"), ImGuiTableColumnFlags_WidthFixed, 52.0f * scale);
+            ImGui::TableSetupColumn(tr("Expression"), ImGuiTableColumnFlags_WidthFixed, 120.0f * scale);
+            ImGui::TableSetupColumn(tr("Live Weight"), ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(tr("Trigger"), ImGuiTableColumnFlags_WidthFixed, 76.0f * scale);
+            ImGui::TableHeadersRow();
+
+            for (size_t i = 0; i < expressions.size() && i < StudioActions::kQuickExpressionSlots; ++i) {
+                ExpressionSlotInfo& ex = expressions[i];
+                ImGui::PushID(static_cast<int>(ex.slot));
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (fonts.mono != nullptr) {
+                    ImGui::PushFont(fonts.mono);
+                }
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(t.text_secondary, "%s", ex.hotkey.data());
+                if (fonts.mono != nullptr) {
+                    ImGui::PopFont();
+                }
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(t.text_primary, "%s", ex.name.data());
+
+                ImGui::TableSetColumnIndex(2);
+                char pct[16]{};
+                std::snprintf(pct, sizeof(pct), "%.0f%%", static_cast<double>(ex.current_weight * 100.0f));
+                ImGui::ProgressBar(std::clamp(ex.current_weight, 0.0f, 1.0f), ImVec2(-FLT_MIN, 0.0f), pct);
+
+                ImGui::TableSetColumnIndex(3);
+                const bool latched = ex.triggered_override;
+                ImGui::PushStyleColor(ImGuiCol_Button, latched ? t.accent_button : t.bg_raised);
+                ImGui::PushStyleColor(ImGuiCol_Text, latched ? t.text_on_accent : t.text_primary);
+                if (ImGui::Button(latched ? tr("Release") : tr("Latch"), ImVec2(-FLT_MIN, 0.0f))) {
+                    ex.triggered_override = !ex.triggered_override;
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::PopID();
             }
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(t.text_secondary, "%s", ex.hotkey.data());
-            if (fonts.mono != nullptr) {
-                ImGui::PopFont();
-            }
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(t.text_primary, "%s", ex.name.data());
-
-            ImGui::TableSetColumnIndex(2);
-            char pct[16]{};
-            std::snprintf(pct, sizeof(pct), "%.0f%%", static_cast<double>(ex.current_weight * 100.0f));
-            ImGui::ProgressBar(std::clamp(ex.current_weight, 0.0f, 1.0f), ImVec2(-FLT_MIN, 0.0f), pct);
-
-            ImGui::TableSetColumnIndex(3);
-            const bool latched = ex.triggered_override;
-            ImGui::PushStyleColor(ImGuiCol_Button, latched ? t.accent_button : t.bg_raised);
-            ImGui::PushStyleColor(ImGuiCol_Text, latched ? t.text_on_accent : t.text_primary);
-            if (ImGui::Button(latched ? tr("Release") : tr("Latch"), ImVec2(-FLT_MIN, 0.0f))) {
-                ex.triggered_override = !ex.triggered_override;
-            }
-            ImGui::PopStyleColor(2);
-            ImGui::PopID();
+            ImGui::EndTable();
         }
+
+        ImGui::TableSetColumnIndex(1);
+        const auto& l2d = tracking.live2d;
+        const bool l2d_active = tracking.ready && tracking.face_confidence > 0.0f;
+        ImGui::TextDisabled("Live2D Parameter Pipeline (%s)", l2d_active ? "ACTIVE" : "IDLE");
+
+        struct ParamCell {
+            const char* name;
+            float value;
+            float min_val;
+            float max_val;
+            ImU32 color;
+        };
+        const ImU32 col_angle = IM_COL32(82, 168, 255, 210);
+        const ImU32 col_eye = IM_COL32(72, 224, 232, 210);
+        const ImU32 col_brow = IM_COL32(250, 206, 72, 210);
+        const ImU32 col_mouth = IM_COL32(255, 110, 196, 210);
+        const ImU32 col_vowel = IM_COL32(120, 232, 152, 220);
+
+        constexpr size_t kRows = 8U;
+        const ParamCell col0[kRows] = {
+            {"ParamAngleX", l2d.param_angle_x, -30.0f, 30.0f, col_angle},
+            {"ParamAngleY", l2d.param_angle_y, -30.0f, 30.0f, col_angle},
+            {"ParamAngleZ", l2d.param_angle_z, -30.0f, 30.0f, col_angle},
+            {"ParamBodyAngleX", l2d.param_body_angle_x, -10.0f, 10.0f, col_angle},
+            {"ParamBodyAngleY", l2d.param_body_angle_y, -10.0f, 10.0f, col_angle},
+            {"ParamBodyAngleZ", l2d.param_body_angle_z, -10.0f, 10.0f, col_angle},
+            {"ParamEyeBallX", l2d.param_eye_ball_x, -1.0f, 1.0f, col_eye},
+            {"ParamEyeBallY", l2d.param_eye_ball_y, -1.0f, 1.0f, col_eye},
+        };
+        const ParamCell col1[kRows] = {
+            {"ParamEyeLOpen", l2d.param_eye_l_open, 0.0f, 1.0f, col_eye},
+            {"ParamEyeROpen", l2d.param_eye_r_open, 0.0f, 1.0f, col_eye},
+            {"ParamBrowLY", l2d.param_brow_l_y, -1.0f, 1.0f, col_brow},
+            {"ParamBrowRY", l2d.param_brow_r_y, -1.0f, 1.0f, col_brow},
+            {"ParamBrowLAngle", l2d.param_brow_l_angle, -1.0f, 1.0f, col_brow},
+            {"ParamBrowRAngle", l2d.param_brow_r_angle, -1.0f, 1.0f, col_brow},
+            {"ParamBrowLForm", l2d.param_brow_l_form, -1.0f, 1.0f, col_brow},
+            {"ParamBrowRForm", l2d.param_brow_r_form, -1.0f, 1.0f, col_brow},
+        };
+        const ParamCell col2[kRows] = {
+            {"ParamMouthOpenY", l2d.param_mouth_open_y, 0.0f, 1.0f, col_mouth},
+            {"ParamMouthForm", l2d.param_mouth_form, -1.0f, 1.0f, col_mouth},
+            {"Vowel A", l2d.vowel_a, 0.0f, 1.0f, col_vowel},
+            {"Vowel I", l2d.vowel_i, 0.0f, 1.0f, col_vowel},
+            {"Vowel U", l2d.vowel_u, 0.0f, 1.0f, col_vowel},
+            {"Vowel E", l2d.vowel_e, 0.0f, 1.0f, col_vowel},
+            {"Vowel O", l2d.vowel_o, 0.0f, 1.0f, col_vowel},
+            {nullptr, 0.0f, 0.0f, 1.0f, col_vowel},
+        };
+
+        auto draw_cell = [](int base_col, const ParamCell& c) {
+            if (c.name == nullptr) {
+                return;
+            }
+            const float span = (c.max_val > c.min_val) ? (c.max_val - c.min_val) : 1.0f;
+            const float frac = std::clamp((c.value - c.min_val) / span, 0.0f, 1.0f);
+            char overlay[16]{};
+            std::snprintf(overlay, sizeof(overlay), "%.2f", static_cast<double>(c.value));
+            ImGui::TableSetColumnIndex(base_col);
+            ImGui::TextUnformatted(c.name);
+            ImGui::TableSetColumnIndex(base_col + 1);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, c.color);
+            ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 13.0f * ImGui::GetFontSize() / 13.0f), overlay);
+            ImGui::PopStyleColor();
+        };
+
+        if (ImGui::BeginTable("##Live2DParamsTable", 6,
+                              ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Head / Gaze", ImGuiTableColumnFlags_WidthFixed, 118.0f * scale);
+            ImGui::TableSetupColumn("Val##0", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Eyes / Brows", ImGuiTableColumnFlags_WidthFixed, 118.0f * scale);
+            ImGui::TableSetupColumn("Val##1", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Mouth / Vowel", ImGuiTableColumnFlags_WidthFixed, 118.0f * scale);
+            ImGui::TableSetupColumn("Val##2", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            for (size_t r = 0; r < kRows; ++r) {
+                ImGui::TableNextRow();
+                draw_cell(0, col0[r]);
+                draw_cell(2, col1[r]);
+                draw_cell(4, col2[r]);
+            }
+            ImGui::EndTable();
+        }
+
         ImGui::EndTable();
     }
 }

@@ -37,7 +37,8 @@ struct VisibilityFirstConfig {
     float idle_wrist_flex_deg{8.0f};    // relaxed wrist
     float idle_finger_curl_rad{0.26f};  // base per-joint finger curl
     float idle_sway_deg{0.45f};         // slow torso sway amplitude (with breathing)
-    bool enable_idle_breathing{true};    // Warudo additive idle breathing (0.22 Hz, 1.2 deg chest, 0.8 deg shoulders)
+    bool enable_idle_breathing{true};   // Warudo additive idle breathing (0.22 Hz, 1.2 deg chest, 0.8 deg shoulders)
+    bool enable_hand_ik{false};         // Hard-bypass hand tracking & arm IK; lock clean relaxed standing arm pose
 };
 
 struct FootPlantState {

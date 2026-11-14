@@ -1,11 +1,13 @@
 #include "renderer/asset_upload/gpu_avatar.hpp"
 
+#include "animation/math_quat.hpp"
 #include "core/clock.hpp"
 #include "core/log.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 
 namespace aether::renderer {
 namespace {
@@ -136,6 +138,78 @@ void emit_bone_line_vertices(const std::vector<AetherJointDesc>& joints,
     }
 }
 
+inline void mul_3x4(const std::array<float, 12>& a, const std::array<float, 12>& b,
+                    std::array<float, 12>& out) noexcept {
+    for (int r = 0; r < 3; ++r) {
+        const float a0 = a[static_cast<size_t>(r) * 4U + 0U];
+        const float a1 = a[static_cast<size_t>(r) * 4U + 1U];
+        const float a2 = a[static_cast<size_t>(r) * 4U + 2U];
+        const float a3 = a[static_cast<size_t>(r) * 4U + 3U];
+        out[static_cast<size_t>(r) * 4U + 0U] = a0 * b[0] + a1 * b[4] + a2 * b[8];
+        out[static_cast<size_t>(r) * 4U + 1U] = a0 * b[1] + a1 * b[5] + a2 * b[9];
+        out[static_cast<size_t>(r) * 4U + 2U] = a0 * b[2] + a1 * b[6] + a2 * b[10];
+        out[static_cast<size_t>(r) * 4U + 3U] = a0 * b[3] + a1 * b[7] + a2 * b[11] + a3;
+    }
+}
+
+void detect_brow_bone_bindings(const std::vector<AetherJointDesc>& joints, const std::string& strings,
+                               const std::vector<int32_t>& joint_humanoid_source,
+                               const std::vector<std::array<float, 3>>& rest_world_pos,
+                               std::vector<GpuAvatar::BrowBoneBinding>& out_bones) {
+    out_bones.clear();
+    auto contains_ci = [](std::string_view hay, std::string_view needle) noexcept -> bool {
+        if (needle.empty() || hay.size() < needle.size()) {
+            return false;
+        }
+        for (size_t i = 0; i <= hay.size() - needle.size(); ++i) {
+            bool match = true;
+            for (size_t j = 0; j < needle.size(); ++j) {
+                char a = hay[i + j];
+                if (a >= 'A' && a <= 'Z') {
+                    a = static_cast<char>(a + ('a' - 'A'));
+                }
+                if (a != needle[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (size_t j = 0; j < joints.size(); ++j) {
+        const AetherJointDesc& jd = joints[j];
+        if (jd.humanoid_bone < AETHER_HUMANOID_BONE_COUNT || jd.name_len == 0U ||
+            static_cast<uint64_t>(jd.name_offset) + jd.name_len > strings.size()) {
+            continue;
+        }
+        if (j < joint_humanoid_source.size() && joint_humanoid_source[j] != AETHER_BONE_HEAD &&
+            joint_humanoid_source[j] >= 0) {
+            continue;
+        }
+        const std::string_view name(strings.data() + jd.name_offset, jd.name_len);
+        const bool is_brow = contains_ci(name, "brow") || contains_ci(name, "mayu") ||
+                             name.find("\xE7\x9C\x89") != std::string_view::npos ||
+                             name.find("\xE3\x81\xBE\xE3\x82\x86") != std::string_view::npos;
+        if (!is_brow) {
+            continue;
+        }
+        uint8_t side = 2U;
+        if (contains_ci(name, "left") || contains_ci(name, "_l") || contains_ci(name, ".l") ||
+            name.find("\xE5\xB7\xA6") != std::string_view::npos) {
+            side = 0U;
+        } else if (contains_ci(name, "right") || contains_ci(name, "_r") || contains_ci(name, ".r") ||
+                   name.find("\xE5\x8F\xB3") != std::string_view::npos) {
+            side = 1U;
+        } else if (j < rest_world_pos.size()) {
+            side = (rest_world_pos[j][0] > 0.004f) ? 0U : ((rest_world_pos[j][0] < -0.004f) ? 1U : 2U);
+        }
+        out_bones.push_back(GpuAvatar::BrowBoneBinding{static_cast<uint32_t>(j), side});
+    }
+}
+
 void build_joint_humanoid_sources(const std::vector<AetherJointDesc>& joints, const AetherAvatarDesc& desc,
                                   std::vector<int32_t>& out_sources) {
     out_sources.assign(joints.size(), -1);
@@ -252,7 +326,7 @@ void GpuAvatar::destroy() noexcept {
 
 void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float (*bone_matrices)[12],
                             uint32_t bone_count, const float* expr_weights, uint32_t expr_count,
-                            bool update_mesh_vertices) noexcept {
+                            bool update_mesh_vertices, const animation::Live2DParameters* opt_live2d) noexcept {
     if (device == nullptr || frame_slot >= kPoseSlotCount || pose_seq == 0ULL || bone_matrices == nullptr ||
         bone_count == 0U || slot_applied_pose_seq[frame_slot] == pose_seq) {
         return;
@@ -267,6 +341,50 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
         } else {
             joint_skin_matrices[j] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
         }
+    }
+
+    // Task 4(c): Drive VRM eyebrow child bones (`LeftEyeBrow`, `RightEyeBrow`, `mayu`, etc.) when present
+    if (!brow_bones.empty()) {
+        float brow_l_y = 0.0f, brow_r_y = 0.0f;
+        float brow_l_ang = 0.0f, brow_r_ang = 0.0f;
+        if (opt_live2d != nullptr) {
+            brow_l_y = std::clamp(opt_live2d->param_brow_l_y, -1.0f, 1.0f);
+            brow_r_y = std::clamp(opt_live2d->param_brow_r_y, -1.0f, 1.0f);
+            brow_l_ang = std::clamp(opt_live2d->param_brow_l_angle, -1.0f, 1.0f);
+            brow_r_ang = std::clamp(opt_live2d->param_brow_r_angle, -1.0f, 1.0f);
+        } else if (expr_weights != nullptr && expr_count > 45U) {
+            brow_l_y = std::clamp(0.5f * expr_weights[43] + 0.5f * expr_weights[44] - expr_weights[41], -1.0f, 1.0f);
+            brow_r_y = std::clamp(0.5f * expr_weights[43] + 0.5f * expr_weights[45] - expr_weights[42], -1.0f, 1.0f);
+            brow_l_ang = std::clamp(expr_weights[43] - 0.5f * expr_weights[44] - 0.5f * expr_weights[41], -1.0f, 1.0f);
+            brow_r_ang = std::clamp(expr_weights[43] - 0.5f * expr_weights[45] - 0.5f * expr_weights[42], -1.0f, 1.0f);
+        }
+        for (const BrowBoneBinding& bb : brow_bones) {
+            const uint32_t j = bb.joint_index;
+            if (j >= j_count) {
+                continue;
+            }
+            const float by = (bb.side == 0U) ? brow_l_y : ((bb.side == 1U) ? brow_r_y : 0.5f * (brow_l_y + brow_r_y));
+            const float ba =
+                (bb.side == 0U) ? brow_l_ang : ((bb.side == 1U) ? brow_r_ang : 0.5f * (brow_l_ang + brow_r_ang));
+            const float ty = by * 0.010f;
+            const float sign = (bb.side == 1U) ? 1.0f : -1.0f;
+            const float rz = ba * 0.14f * sign;
+            const float c = std::cos(rz);
+            const float s = std::sin(rz);
+            const float px = joint_rest_world_pos[j][0];
+            const float py = joint_rest_world_pos[j][1];
+            const std::array<float, 12> delta{
+                c,    -s,   0.0f, px - (c * px - s * py),
+                s,    c,    0.0f, py + ty - (s * px + c * py),
+                0.0f, 0.0f, 1.0f, 0.0f,
+            };
+            std::array<float, 12> composed{};
+            mul_3x4(joint_skin_matrices[j], delta, composed);
+            joint_skin_matrices[j] = composed;
+        }
+    }
+
+    for (size_t j = 0; j < j_count; ++j) {
         transform_point_3x4(joint_skin_matrices[j], joint_rest_world_pos[j].data(), joint_anim_world_pos[j].data());
     }
 
@@ -551,6 +669,15 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     compute_rest_joint_world_positions(avatar->joints, avatar->joint_rest_world_pos);
     avatar->joint_anim_world_pos = avatar->joint_rest_world_pos;
     build_joint_humanoid_sources(avatar->joints, avatar->desc, avatar->joint_humanoid_source);
+    detect_brow_bone_bindings(avatar->joints, avatar->strings, avatar->joint_humanoid_source,
+                              avatar->joint_rest_world_pos, avatar->brow_bones);
+    avatar->has_split_brow_morphs = false;
+    for (const AetherExpressionBindingDesc& eb : avatar->expressions) {
+        if (eb.input_slot >= 41U && eb.input_slot <= 45U) {
+            avatar->has_split_brow_morphs = true;
+            break;
+        }
+    }
     avatar->joint_skin_matrices.assign(avatar->joints.size(),
                                        {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f});
     avatar->bone_line_scratch.resize(avatar->joints.size() * 4U);

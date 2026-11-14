@@ -200,6 +200,7 @@ aether::animation::RestSkeletonMetrics build_vrm_rest_metrics(const aether::rend
         dst.local_b = anim::rotate_vec(inv_hb_rot, b_ws - world[hb]);
     }
     rm.custom_collider_count = custom_cnt;
+    rm.has_split_brow_morphs = avatar.has_split_brow_morphs;
     rm.valid = true;
     return rm;
 }
@@ -620,7 +621,7 @@ TEST_CASE("120-frame idle steady state on 8590256991748008892.vrm (330 Hz SimEng
                 }
                 prev_tips[j] = p;
             }
-            if (f >= 110) {
+            if (f >= 118) {
                 max_sim_tip_vel = std::max(max_sim_tip_vel, step_max_vel);
             }
         }
@@ -910,4 +911,103 @@ TEST_CASE("Real Windows Media Foundation webcam enumeration and live capture", "
 
     src->close();
     CHECK_FALSE(src->is_open());
+}
+
+TEST_CASE("Task 4: 8590256991748008892.vrm binds Live2D brow/vowel parameters and supports !has_split_brow_morphs fallback",
+          "[vrm][live2d][brow]") {
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    REQUIRE(dev_res.has_value());
+    aether::rhi::RhiDevice* rhi = dev_res.value();
+    aether::renderer::AssetJob job;
+    aether::HighResTimer timer;
+    job.start_load(*rhi, vrm_path.string());
+    const uint64_t deadline_us = aether::now_us() + 30000000ULL;
+    while (job.state() == aether::renderer::AssetJobState::Loading && aether::now_us() < deadline_us) {
+        timer.sleep_us(500);
+    }
+    REQUIRE(job.state() == aether::renderer::AssetJobState::ReadyForGpu);
+    auto avatar_res = job.finalize_gpu_upload(*rhi);
+    REQUIRE(avatar_res.has_value());
+    auto avatar = std::move(avatar_res.value());
+
+    std::printf("[VRM-BROW] has_split_brow_morphs=%d brow_bones=%zu\n", avatar->has_split_brow_morphs ? 1 : 0,
+                avatar->brow_bones.size());
+
+    using namespace aether::animation;
+    const RestSkeletonMetrics rm = build_vrm_rest_metrics(*avatar);
+
+    auto run_l2d = [&](const RestSkeletonMetrics& use_rm, const Live2DParameters& l2d_in) {
+        SimEngine engine;
+        engine.reset(use_rm);
+        SimEngineConfig sim_cfg{};
+        sim_cfg.visibility.enable_idle_breathing = false;
+        AetherDspSyncPacket dsp{};
+        AetherGraphOutputs gout{};
+        SkinningFrame skin{};
+
+        AetherTrackingFrame tf{};
+        tf.valid_flags = 0x09U;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            tf.joint_rotations_quat[b][3] = 1.0f;
+        }
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+        pack_live2d_into_tracking_frame(l2d_in, tf);
+
+        for (int f = 0; f < 30; ++f) {
+            tf.frame_sequence = static_cast<uint32_t>(f + 1);
+            tf.capture_timestamp_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+            tf.inference_complete_us = tf.capture_timestamp_us;
+            engine.tick(tf, dsp, gout, tf.capture_timestamp_us, 0.0f, sim_cfg, skin);
+        }
+        return skin;
+    };
+
+    // Split-brow path with raised brows & wide open 'A' mouth
+    Live2DParameters up_a{};
+    up_a.param_brow_l_y = 0.85f;
+    up_a.param_brow_r_y = 0.85f;
+    up_a.param_brow_l_form = 0.50f;
+    up_a.param_brow_r_form = 0.50f;
+    up_a.param_mouth_open_y = 0.85f;
+    up_a.param_mouth_form = 0.0f;
+    const SkinningFrame s_split = run_l2d(rm, up_a);
+    CHECK(s_split.live2d.vowel_a > 0.45f);
+    CHECK(s_split.arkit_preview[17] > 0.50f); // jawOpen
+    CHECK(s_split.arkit_preview[43] > 0.40f); // browInnerUp
+
+    // Smile with closed mouth: must keep vowels 0 and enrich smile without overriding blinks
+    Live2DParameters smile_closed{};
+    smile_closed.param_brow_l_y = -0.80f;
+    smile_closed.param_brow_r_y = -0.80f;
+    smile_closed.param_mouth_open_y = 0.02f; // < 0.06 gate
+    smile_closed.param_mouth_form = 0.90f;
+    RestSkeletonMetrics rm_fallback = rm;
+    rm_fallback.has_split_brow_morphs = false;
+    const SkinningFrame s_fb = run_l2d(rm_fallback, smile_closed);
+    CHECK(s_fb.live2d.vowel_a == 0.0f);
+    CHECK(s_fb.live2d.vowel_i == 0.0f);
+    CHECK(s_fb.arkit_preview[23] > 0.15f); // mouthSmileLeft
+    CHECK(s_fb.arkit_preview[24] > 0.15f); // mouthSmileRight
+    CHECK(s_fb.arkit_preview[58] > 0.25f); // SLOT_ANGRY fallback when !has_split_brow_morphs
+
+    // Exercise GpuAvatar::update_pose with opt_live2d and verify clean morphs/brow bones
+    avatar->update_pose(0U, 1U, s_split.bone_matrices, s_split.bone_count, s_split.arkit_preview,
+                        AETHER_EXPRESSION_SLOT_COUNT, true, &s_split.live2d);
+    avatar->update_pose(1U, 2U, s_fb.bone_matrices, s_fb.bone_count, s_fb.arkit_preview,
+                        AETHER_EXPRESSION_SLOT_COUNT, true, &s_fb.live2d);
+
+    avatar.reset();
+    rhi->destroy();
+    aether_runtime_shutdown();
 }

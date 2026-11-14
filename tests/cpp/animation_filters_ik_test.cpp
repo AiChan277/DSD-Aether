@@ -766,3 +766,144 @@ TEST_CASE("Emotion presets suppress tracked blink (VRM overrideBlink) but keep e
     mixer.update(cam.data(), dsp, gout, 1.0f / 60.0f, out.data(), blend);
     CHECK(out[0] > 0.99f);
 }
+
+TEST_CASE("Task 1 & Task 3: Hand tracking/arm IK stay bypassed and Live2D vowel manifold is gated",
+          "[animation][ik][live2d]") {
+    VisibilityFirstConfig default_ik{};
+    CHECK_FALSE(default_ik.enable_hand_ik);
+
+    const RestSkeletonMetrics rm = make_vrm_like_rest_metrics();
+
+    auto run_arm_eval = [&](bool adversarial_hands) {
+        SimEngine engine;
+        engine.reset(rm);
+        SimEngineConfig cfg{};
+        cfg.visibility.enable_idle_breathing = false;
+        AetherDspSyncPacket dsp{};
+        SkinningFrame skin{};
+        std::array<float, 2> drops{};
+
+        for (int f = 0; f < 30; ++f) {
+            AetherTrackingFrame raw{};
+            raw.frame_sequence = static_cast<uint32_t>(f + 1);
+            raw.capture_timestamp_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+            raw.inference_complete_us = raw.capture_timestamp_us;
+            raw.valid_flags = adversarial_hands ? 0x0FU : 0x09U;
+            raw.upper_body_confidence = 0.95f;
+            for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+                raw.joint_rotations_quat[b][3] = 1.0f;
+            }
+            raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+            raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+
+            AetherGraphOutputs gout{};
+            if (adversarial_hands) {
+                raw.left_hand_confidence = 0.99f;
+                raw.right_hand_confidence = 0.99f;
+                raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = 0.85f;
+                raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = 2.20f;
+                raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = -0.45f;
+                raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.99f;
+                raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = -0.85f;
+                raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = 0.25f;
+                raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = 0.60f;
+                raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.99f;
+                const Quat twisted = normalize(Quat{0.4f, 0.5f, 0.3f, 0.7f});
+                for (uint32_t b = AETHER_BONE_LEFT_SHOULDER; b <= AETHER_BONE_RIGHT_HAND; ++b) {
+                    raw.joint_rotations_quat[b][0] = twisted.x;
+                    raw.joint_rotations_quat[b][1] = twisted.y;
+                    raw.joint_rotations_quat[b][2] = twisted.z;
+                    raw.joint_rotations_quat[b][3] = twisted.w;
+                    gout.bone_rotation_offsets[b][0] = twisted.x;
+                    gout.bone_rotation_offsets[b][1] = twisted.y;
+                    gout.bone_rotation_offsets[b][2] = twisted.z;
+                    gout.bone_rotation_offsets[b][3] = twisted.w;
+                }
+                gout.ik_targets[1][0] = 0.9f;
+                gout.ik_targets[1][1] = 2.1f;
+                gout.ik_targets[1][2] = 0.5f;
+                gout.ik_targets[1][6] = 1.0f;
+                gout.ik_targets[1][7] = 1.0f;
+                gout.ik_targets[2][0] = -0.9f;
+                gout.ik_targets[2][1] = 0.2f;
+                gout.ik_targets[2][2] = 0.6f;
+                gout.ik_targets[2][6] = 1.0f;
+                gout.ik_targets[2][7] = 1.0f;
+            }
+            engine.tick(raw, dsp, gout, raw.capture_timestamp_us, 0.0f, cfg, skin);
+        }
+        drops[0] = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
+        drops[1] = arm_drop_deg(engine, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM);
+        return std::make_pair(skin, drops);
+    };
+
+    const auto [base_skin, base_drops] = run_arm_eval(false);
+    const auto [adv_skin, adv_drops] = run_arm_eval(true);
+    CHECK(base_drops[0] > 60.0f);
+    CHECK(base_drops[0] < 76.0f);
+    CHECK(base_drops[1] > 60.0f);
+    CHECK(base_drops[1] < 76.0f);
+    CHECK(std::abs(adv_drops[0] - base_drops[0]) < 1e-4f);
+    CHECK(std::abs(adv_drops[1] - base_drops[1]) < 1e-4f);
+    for (uint32_t b : {AETHER_BONE_LEFT_SHOULDER, AETHER_BONE_RIGHT_SHOULDER, AETHER_BONE_LEFT_UPPER_ARM,
+                       AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM, AETHER_BONE_RIGHT_LOWER_ARM,
+                       AETHER_BONE_LEFT_HAND, AETHER_BONE_RIGHT_HAND}) {
+        for (size_t k = 0; k < 12U; ++k) {
+            CHECK(std::abs(adv_skin.bone_matrices[b][k] - base_skin.bone_matrices[b][k]) < 1e-5f);
+        }
+    }
+
+    // Task 3: Live2D continuous 5-vowel manifold and closed-mouth noise gate (< 0.06).
+    for (float form : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+        float a = 1.0f, i = 1.0f, u = 1.0f, e = 1.0f, o = 1.0f;
+        solve_live2d_vowels(form, 0.059f, a, i, u, e, o);
+        CHECK(a == 0.0f);
+        CHECK(i == 0.0f);
+        CHECK(u == 0.0f);
+        CHECK(e == 0.0f);
+        CHECK(o == 0.0f);
+    }
+
+    auto check_dominant = [](float open_y, float form, int expected_idx) {
+        float v[5]{};
+        solve_live2d_vowels(form, open_y, v[0], v[1], v[2], v[3], v[4]);
+        const float sum = v[0] + v[1] + v[2] + v[3] + v[4];
+        CHECK(sum <= 1.001f);
+        CHECK(v[expected_idx] > 0.30f);
+        for (int k = 0; k < 5; ++k) {
+            if (k != expected_idx) {
+                CHECK(v[expected_idx] >= v[k]);
+            }
+        }
+    };
+    check_dominant(0.90f, 0.00f, 0);  // A
+    check_dominant(0.20f, 0.90f, 1);  // I
+    check_dominant(0.45f, -0.90f, 2); // U
+    check_dominant(0.48f, 0.70f, 3);  // E
+    check_dominant(0.80f, -0.60f, 4); // O
+
+    // Verify _reserved[16] packing round-trip without altering ABI struct size.
+    static_assert(sizeof(AetherTrackingFrame) == 2048U);
+    Live2DParameters src{};
+    src.param_brow_l_y = 0.65f;
+    src.param_brow_r_y = -0.35f;
+    src.param_brow_l_angle = 0.22f;
+    src.param_brow_r_angle = -0.18f;
+    src.param_brow_l_form = 0.50f;
+    src.param_brow_r_form = -0.45f;
+    src.param_mouth_open_y = 0.72f;
+    src.param_mouth_form = -0.25f;
+    AetherTrackingFrame packed{};
+    pack_live2d_into_tracking_frame(src, packed);
+    CHECK(has_packed_live2d(packed));
+    Live2DParameters dst{};
+    unpack_live2d_from_tracking_frame(packed, dst);
+    CHECK(std::abs(dst.param_brow_l_y - src.param_brow_l_y) < 1e-4f);
+    CHECK(std::abs(dst.param_brow_r_y - src.param_brow_r_y) < 1e-4f);
+    CHECK(std::abs(dst.param_brow_l_angle - src.param_brow_l_angle) < 1e-4f);
+    CHECK(std::abs(dst.param_brow_r_angle - src.param_brow_r_angle) < 1e-4f);
+    CHECK(std::abs(dst.param_brow_l_form - src.param_brow_l_form) < 1e-4f);
+    CHECK(std::abs(dst.param_brow_r_form - src.param_brow_r_form) < 1e-4f);
+    CHECK(std::abs(dst.param_mouth_open_y - src.param_mouth_open_y) < 1e-4f);
+    CHECK(std::abs(dst.param_mouth_form - src.param_mouth_form) < 1e-4f);
+}

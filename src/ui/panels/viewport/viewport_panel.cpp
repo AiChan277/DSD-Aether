@@ -606,13 +606,73 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
             dl->AddRect(r0, r1, roi_col, 3.0f * scale, 0, 1.6f * scale);
         }
 
-        for (size_t k = 0; k < tracking.live_preview_keypoints.size(); ++k) {
-            if (tracking.live_preview_keypoint_valid[k] == 0U) {
-                continue;
+        if (tracking.live_preview_keypoint_count >= 68U) {
+            auto kp_pt = [&](size_t idx) -> ImVec2 {
+                return ImVec2(img_p0.x + tracking.live_preview_keypoints[idx][0] * thumb_w,
+                              img_p0.y + tracking.live_preview_keypoints[idx][1] * thumb_h);
+            };
+            auto range_valid = [&](size_t begin_idx, size_t end_idx) -> bool {
+                for (size_t idx = begin_idx; idx <= end_idx; ++idx) {
+                    if (tracking.live_preview_keypoint_valid[idx] == 0U) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            auto draw_wire = [&](size_t begin_idx, size_t end_idx, ImU32 col, float thickness, bool closed) {
+                if (!range_valid(begin_idx, end_idx)) {
+                    return;
+                }
+                for (size_t idx = begin_idx; idx < end_idx; ++idx) {
+                    dl->AddLine(kp_pt(idx), kp_pt(idx + 1U), col, thickness);
+                }
+                if (closed && end_idx > begin_idx) {
+                    dl->AddLine(kp_pt(end_idx), kp_pt(begin_idx), col, thickness);
+                }
+            };
+
+            const ImU32 col_jaw = IM_COL32(72, 235, 138, 210);
+            const ImU32 col_nose = IM_COL32(96, 225, 156, 195);
+            const ImU32 col_brow = IM_COL32(255, 216, 76, 235);
+            const ImU32 col_eye = IM_COL32(80, 235, 255, 235);
+            const ImU32 col_iris = IM_COL32(210, 254, 255, 245);
+            const ImU32 col_lip_outer = IM_COL32(255, 102, 204, 235);
+            const ImU32 col_lip_inner = IM_COL32(255, 156, 224, 220);
+
+            draw_wire(0U, 16U, col_jaw, 1.3f * scale, false);
+            draw_wire(27U, 30U, col_nose, 1.15f * scale, false);
+            draw_wire(31U, 35U, col_nose, 1.15f * scale, false);
+
+            draw_wire(17U, 21U, col_brow, 1.5f * scale, false);
+            draw_wire(22U, 26U, col_brow, 1.5f * scale, false);
+            for (const size_t brow_pt : {size_t{17}, size_t{19}, size_t{21}, size_t{22}, size_t{24}, size_t{26}}) {
+                if (tracking.live_preview_keypoint_valid[brow_pt] != 0U) {
+                    dl->AddCircleFilled(kp_pt(brow_pt), 2.1f * scale, col_brow, 8);
+                }
             }
-            const ImVec2 kp(img_p0.x + tracking.live_preview_keypoints[k][0] * thumb_w,
-                            img_p0.y + tracking.live_preview_keypoints[k][1] * thumb_h);
-            dl->AddCircleFilled(kp, 1.8f * scale, IM_COL32(92, 236, 255, 225), 8);
+
+            draw_wire(36U, 41U, col_eye, 1.4f * scale, true);
+            draw_wire(42U, 47U, col_eye, 1.4f * scale, true);
+            if (tracking.live_preview_iris_valid) {
+                for (size_t e = 0U; e < 2U; ++e) {
+                    const ImVec2 iris_pt(img_p0.x + tracking.live_preview_iris_centers[e][0] * thumb_w,
+                                         img_p0.y + tracking.live_preview_iris_centers[e][1] * thumb_h);
+                    dl->AddCircleFilled(iris_pt, 2.2f * scale, col_iris, 10);
+                    dl->AddCircle(iris_pt, 3.6f * scale, col_eye, 12, 1.1f * scale);
+                }
+            }
+
+            draw_wire(48U, 59U, col_lip_outer, 1.5f * scale, true);
+            draw_wire(60U, 67U, col_lip_inner, 1.2f * scale, true);
+        } else {
+            for (size_t k = 0; k < tracking.live_preview_keypoints.size(); ++k) {
+                if (tracking.live_preview_keypoint_valid[k] == 0U) {
+                    continue;
+                }
+                const ImVec2 kp(img_p0.x + tracking.live_preview_keypoints[k][0] * thumb_w,
+                                img_p0.y + tracking.live_preview_keypoints[k][1] * thumb_h);
+                dl->AddCircleFilled(kp, 1.8f * scale, IM_COL32(92, 236, 255, 225), 8);
+            }
         }
 
         if (tracking.live_preview_axes_valid) {

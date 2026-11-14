@@ -381,8 +381,7 @@ fn eval_op(
                 } else {
                     0.0
                 };
-                arena.floats[out_hand_conf] =
-                    0.5 * (tr.left_hand_confidence + tr.right_hand_confidence).clamp(0.0, 2.0);
+                arena.floats[out_hand_conf] = 0.0;
                 arena.floats[out_body_conf] = tr.upper_body_confidence.clamp(0.0, 1.0);
                 arena.floats[out_ep_id] = tr.active_execution_provider as f32;
             } else {
@@ -501,18 +500,18 @@ fn eval_op(
             out_pose,
         } => {
             let mut pose = arena.poses[in_pose];
-            let hand_w = arena.floats[in_hand_conf].clamp(0.0, 1.0);
+            let _ = arena.floats[in_hand_conf];
             let body_w = arena.floats[in_body_conf].clamp(0.0, 1.0);
-            // Appendix A: legs/feet/toes are bones 9..=16; hands are 20 and 24, fingers 25..=54.
+            // Appendix A: legs/feet/toes are bones 9..=16; hands (20, 24) & fingers (25..=54) bypassed for stability.
             for p in &mut pose.pos[9..17] {
                 p[3] *= body_w;
             }
-            pose.pos[20][3] *= hand_w;
+            pose.pos[20][3] = 0.0;
             for p in &mut pose.pos[24..55] {
-                p[3] *= hand_w;
+                p[3] = 0.0;
             }
             arena.poses[out_pose] = pose;
-            hand_w
+            0.0
         }
 
         Op::LookAt {

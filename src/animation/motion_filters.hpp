@@ -48,12 +48,13 @@ namespace aether::animation {
 
 /** Warudo smooth times (seconds) for each driven channel. */
 struct SmoothTimes {
-    float head{0.075f};
-    float neck{0.105f};
-    float chest{0.145f};
-    float spine{0.185f};
+    float head{0.095f};
+    float neck{0.125f};
+    float chest{0.165f};
+    float spine{0.210f};
     float blink{0.028f};
     float mouth{0.038f};
+    float brow{0.055f};
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -77,7 +78,7 @@ class TricksterChannel {
         primed_ = true;
     }
 
-    [[nodiscard]] float push(float v, float deadzone) noexcept {
+    [[nodiscard]] float push(float v, float deadzone, float ramp_width = 0.0f) noexcept {
         if (!primed_) {
             reset(v);
             return v;
@@ -88,7 +89,15 @@ class TricksterChannel {
         const float med = median3(win_[0], win_[1], win_[2]);
         const float step = med - out_;
         const float mag = std::abs(step);
-        out_ += (mag < deadzone) ? step * smoothstep01(0.0f, deadzone, mag) : step;
+        if (ramp_width > 0.0f) {
+            if (mag <= deadzone) {
+                return out_;
+            }
+            const float w = smoothstep01(0.0f, ramp_width, mag - deadzone);
+            out_ += step * w;
+        } else {
+            out_ += (mag < deadzone) ? step * smoothstep01(0.0f, deadzone, mag) : step;
+        }
         return out_;
     }
 
@@ -107,7 +116,8 @@ class TricksterChannel {
  */
 class TricksterFrameStabilizer {
   public:
-    static constexpr float kRotDeadzoneDeg = 0.18f;
+    static constexpr float kRotDeadzoneDeg = 0.25f;
+    static constexpr float kRotRampDeg = 0.45f;
     static constexpr float kPosDeadzoneM = 0.0015f;
     static constexpr float kBlendDeadzone = 0.015f;
 
@@ -140,7 +150,7 @@ class TricksterFrameStabilizer {
         }
         float rv_out[3]{};
         for (size_t k = 0; k < 3; ++k) {
-            rv_out[k] = rot_[k].push(rv_in[k], kRotDeadzoneDeg);
+            rv_out[k] = rot_[k].push(rv_in[k], kRotDeadzoneDeg, kRotRampDeg);
             hp[k] = pos_[k].push(hp[k], kPosDeadzoneM);
         }
         const Quat q = rotvec_to_quat(Vec3{rv_out[0], rv_out[1], rv_out[2]} * kDegToRad);

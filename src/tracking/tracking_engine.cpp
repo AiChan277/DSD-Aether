@@ -161,41 +161,44 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
         return false;
     }
 
-    // 4. Conditional M1_hands (`batch=2` 224x224) gated by `>= 0.50` wrist confidence + un-letterboxed in-frame check
+    // 4. Conditional M1_hands (`batch=2` 224x224) — hard-bypassed when hand tracking is disabled
     const float pose_flag = router_.buffers().m1_body_flag[0];
-    HandRoiDecision hand_rois =
-        compute_hand_rois_from_pose(router_.buffers().m1_body_lm.data(), pose_flag, 0.50f, 0.05f);
-    auto unletterbox_hand_roi = [&](RoiRectNorm& r, bool& active) {
-        if (!active) {
-            return;
+    HandRoiDecision hand_rois{};
+    if (router_.config().enable_hand_tracking) {
+        hand_rois = compute_hand_rois_from_pose(router_.buffers().m1_body_lm.data(), pose_flag, 0.50f, 0.05f);
+        auto unletterbox_hand_roi = [&](RoiRectNorm& r, bool& active) {
+            if (!active) {
+                return;
+            }
+            r.cx = lb_roi.cx + (r.cx - 0.5f) * lb_roi.width;
+            r.cy = lb_roi.cy + (r.cy - 0.5f) * lb_roi.height;
+            r.width *= lb_roi.width;
+            r.height *= lb_roi.height;
+            if (r.cx < 0.05f || r.cx > 0.95f || r.cy < 0.05f || r.cy > 0.88f) {
+                active = false;
+                return;
+            }
+            r = enforce_square_pixel_roi(r, cam_frame->width, cam_frame->height, 0.14f, 0.48f);
+        };
+        unletterbox_hand_roi(hand_rois.left_roi, hand_rois.run_left);
+        unletterbox_hand_roi(hand_rois.right_roi, hand_rois.run_right);
+        if (hand_rois.run_left || hand_rois.run_right) {
+            const size_t hand_plane_floats = 3ULL * 224ULL * 224ULL;
+            if (hand_rois.run_left) {
+                warp_frame_to_nchw(*cam_frame, hand_rois.left_roi, 224, 224, RoiNormRange::ZeroToOne,
+                                   router_.buffers().m1_hands_in.data(), false);
+            } else {
+                std::memset(router_.buffers().m1_hands_in.data(), 0, hand_plane_floats * sizeof(float));
+            }
+            if (hand_rois.run_right) {
+                warp_frame_to_nchw(*cam_frame, hand_rois.right_roi, 224, 224, RoiNormRange::ZeroToOne,
+                                   router_.buffers().m1_hands_in.data() + hand_plane_floats, false);
+            } else {
+                std::memset(router_.buffers().m1_hands_in.data() + hand_plane_floats, 0,
+                            hand_plane_floats * sizeof(float));
+            }
+            (void)router_.run_m1_hands();
         }
-        r.cx = lb_roi.cx + (r.cx - 0.5f) * lb_roi.width;
-        r.cy = lb_roi.cy + (r.cy - 0.5f) * lb_roi.height;
-        r.width *= lb_roi.width;
-        r.height *= lb_roi.height;
-        if (r.cx < 0.05f || r.cx > 0.95f || r.cy < 0.05f || r.cy > 0.88f) {
-            active = false;
-            return;
-        }
-        r = enforce_square_pixel_roi(r, cam_frame->width, cam_frame->height, 0.14f, 0.48f);
-    };
-    unletterbox_hand_roi(hand_rois.left_roi, hand_rois.run_left);
-    unletterbox_hand_roi(hand_rois.right_roi, hand_rois.run_right);
-    if (hand_rois.run_left || hand_rois.run_right) {
-        const size_t hand_plane_floats = 3ULL * 224ULL * 224ULL;
-        if (hand_rois.run_left) {
-            warp_frame_to_nchw(*cam_frame, hand_rois.left_roi, 224, 224, RoiNormRange::ZeroToOne,
-                               router_.buffers().m1_hands_in.data(), false);
-        } else {
-            std::memset(router_.buffers().m1_hands_in.data(), 0, hand_plane_floats * sizeof(float));
-        }
-        if (hand_rois.run_right) {
-            warp_frame_to_nchw(*cam_frame, hand_rois.right_roi, 224, 224, RoiNormRange::ZeroToOne,
-                               router_.buffers().m1_hands_in.data() + hand_plane_floats, false);
-        } else {
-            std::memset(router_.buffers().m1_hands_in.data() + hand_plane_floats, 0, hand_plane_floats * sizeof(float));
-        }
-        (void)router_.run_m1_hands();
     }
 
     // 5. Extract 146x2 subset from M2 -> execute M3 blendshapes MLP

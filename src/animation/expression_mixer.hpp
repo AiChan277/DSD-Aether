@@ -27,19 +27,23 @@ class ExpressionMixer {
      */
     void update(const float arkit_cam[52], const AetherDspSyncPacket& dsp, const AetherGraphOutputs& graph_out,
                 float dt_s, float out_morphs[kMaxMorphs], float& out_mouth_owner_blend,
-                const float* webcam_visemes_5 = nullptr) noexcept;
+                const float* webcam_visemes_5 = nullptr, bool has_split_brow_morphs = true,
+                const Live2DParameters* in_live2d = nullptr, Live2DParameters* out_live2d = nullptr) noexcept;
 
     [[nodiscard]] float current_mouth_owner_blend() const noexcept { return mouth_owner_blend_; }
     [[nodiscard]] static bool is_mouth_arkit_slot(size_t slot) noexcept;
+    [[nodiscard]] static bool is_brow_arkit_slot(size_t slot) noexcept;
 
   private:
     float mouth_owner_blend_{0.0f}; // 0.0 = camera owns mouth, 1.0 = DSP owns mouth
     std::array<float, kMaxExpressionSlots> smoothed_overrides_{};
-    // Warudo SmoothDamp state for camera-driven channels (blink 28 ms, mouth / vowels 38 ms)
+    // Warudo SmoothDamp state for camera-driven channels (blink 28 ms, mouth / vowels 38 ms, brows 55 ms)
     std::array<float, 52> cam_val_{};
     std::array<float, 52> cam_vel_{};
     std::array<float, 5> vowel_val_{};
     std::array<float, 5> vowel_vel_{};
+    std::array<float, 10> live2d_val_{}; // [0..5]=brow L/R Y/Angle/Form, [6..7]=mouth OpenY/Form, [8..9]=eyeBall X/Y
+    std::array<float, 10> live2d_vel_{};
     bool primed_{false};
 };
 

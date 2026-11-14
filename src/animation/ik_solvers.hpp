@@ -33,6 +33,7 @@ struct RestSkeletonMetrics {
     std::array<RestColliderDef, 32> custom_colliders{};
     uint32_t custom_collider_count{0};
     bool valid{false};
+    bool has_split_brow_morphs{true};
 
     /// Convert a world-space incremental delta quaternion (relative to rest world pose)
     /// into this bone's local rotation: q_local = normalize(q_rest_local * q_delta_local).

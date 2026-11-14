@@ -192,6 +192,71 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         rig.tracking.active_ep_label = "OpenVINO NPU";
         rig.tracking.inference_ms = 5.4f;
         rig.tracking.face_confidence = 0.93f;
+        rig.tracking.camera_active = true;
+        rig.tracking.camera_label = "Integrated Camera";
+        rig.tracking.camera_width = 1280U;
+        rig.tracking.camera_height = 720U;
+        rig.tracking.camera_fps = 30U;
+        rig.tracking.neutral_calibrated = true;
+        rig.tracking.live_preview_valid = true;
+        rig.tracking.live_preview_texture_id = 2ULL;
+        rig.tracking.live_preview_width = 320U;
+        rig.tracking.live_preview_height = 180U;
+        rig.tracking.live_preview_face_locked = true;
+        rig.tracking.live_preview_face_roi = {0.50f, 0.48f, 0.44f, 0.62f};
+        rig.tracking.live_preview_keypoint_count = 68U;
+        rig.tracking.live_preview_keypoint_valid.fill(1U);
+        for (uint32_t i = 0; i <= 16U; ++i) {
+            const float t = static_cast<float>(i) / 16.0f;
+            rig.tracking.live_preview_keypoints[i] = {0.36f + t * 0.28f,
+                                                      0.45f + 0.24f * std::sin(t * 3.14159265f)};
+        }
+        for (uint32_t i = 0; i < 5U; ++i) {
+            const float t = static_cast<float>(i) / 4.0f;
+            rig.tracking.live_preview_keypoints[17U + i] = {0.39f + t * 0.08f,
+                                                            0.35f - 0.025f * std::sin(t * 3.14159265f)};
+            rig.tracking.live_preview_keypoints[22U + i] = {0.53f + t * 0.08f,
+                                                            0.35f - 0.025f * std::sin(t * 3.14159265f)};
+        }
+        for (uint32_t i = 0; i < 4U; ++i) {
+            rig.tracking.live_preview_keypoints[27U + i] = {0.50f, 0.39f + 0.04f * static_cast<float>(i)};
+        }
+        for (uint32_t i = 0; i < 5U; ++i) {
+            const float t = static_cast<float>(i) / 4.0f;
+            rig.tracking.live_preview_keypoints[31U + i] = {0.46f + t * 0.08f,
+                                                            0.53f - 0.015f * std::sin(t * 3.14159265f)};
+        }
+        for (uint32_t i = 0; i < 6U; ++i) {
+            const float a = static_cast<float>(i) * 6.2831853f / 6.0f;
+            rig.tracking.live_preview_keypoints[36U + i] = {0.43f + 0.032f * std::cos(a),
+                                                            0.41f + 0.018f * std::sin(a)};
+            rig.tracking.live_preview_keypoints[42U + i] = {0.57f + 0.032f * std::cos(a),
+                                                            0.41f + 0.018f * std::sin(a)};
+        }
+        rig.tracking.live_preview_iris_valid = true;
+        rig.tracking.live_preview_iris_centers[0] = {0.43f, 0.41f};
+        rig.tracking.live_preview_iris_centers[1] = {0.57f, 0.41f};
+        for (uint32_t i = 0; i < 12U; ++i) {
+            const float a = static_cast<float>(i) * 6.2831853f / 12.0f;
+            rig.tracking.live_preview_keypoints[48U + i] = {0.50f + 0.055f * std::cos(a),
+                                                            0.60f + 0.030f * std::sin(a)};
+        }
+        for (uint32_t i = 0; i < 8U; ++i) {
+            const float a = static_cast<float>(i) * 6.2831853f / 8.0f;
+            rig.tracking.live_preview_keypoints[60U + i] = {0.50f + 0.038f * std::cos(a),
+                                                            0.60f + 0.018f * std::sin(a)};
+        }
+        rig.tracking.live2d.param_angle_x = 4.2f;
+        rig.tracking.live2d.param_angle_y = -1.8f;
+        rig.tracking.live2d.param_angle_z = 0.9f;
+        rig.tracking.live2d.param_eye_l_open = 0.95f;
+        rig.tracking.live2d.param_eye_r_open = 0.95f;
+        rig.tracking.live2d.param_brow_l_y = 0.42f;
+        rig.tracking.live2d.param_brow_r_y = 0.39f;
+        rig.tracking.live2d.param_mouth_open_y = 0.58f;
+        rig.tracking.live2d.param_mouth_form = 0.25f;
+        rig.tracking.live2d.vowel_a = 0.52f;
+        rig.tracking.live2d.vowel_e = 0.22f;
         rig.render_view.total_gpu_ms = 2.9f;
         rig.render_view.denoiser_active_name = "NVIDIA NRD SIGMA (Composite)";
         rig.output_view.spout_active = true;
@@ -288,6 +353,16 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
                 rig.frame(ws);
             }
             save_snapshot("studio_nodes_wire_selected_100.png", w, h);
+
+            ws.switch_mode(StudioMode::LiveStudio);
+            for (int f = 0; f < 4; ++f) {
+                rig.frame(ws);
+            }
+            ImGui::SetWindowFocus("Expressions");
+            for (int f = 0; f < 4; ++f) {
+                rig.frame(ws);
+            }
+            save_snapshot("studio_expressions_100.png", w, h);
         }
 
         ws.shutdown();

@@ -331,19 +331,157 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
     CHECK(std::abs(solver.last_head_euler_deg().yaw) < 0.25f);
     CHECK(std::abs(solver.last_head_euler_deg().roll) < 0.25f);
 
-    // Apply EAR close & MAR open and verify geometric blendshapes drive blink + jawOpen cleanly
+    // Stage 1 3-frame median rejects a 1-frame landmark spike cleanly, then sustained EAR close & MAR open drive blink + jawOpen
     lm[160 * 3 + 1] = lm[144 * 3 + 1];
     lm[158 * 3 + 1] = lm[153 * 3 + 1];
     lm[13 * 3 + 1] -= 4.0f;
     lm[14 * 3 + 1] += 18.0f;
     solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
-                                   nullptr, nullptr, 600000ULL, 602000ULL, EpTier::NpuOpenVino, 17U, false, tf,
+                                   nullptr, nullptr, 566661ULL, 568661ULL, EpTier::NpuOpenVino, 17U, false, tf,
                                    kCamW, kCamH);
+    CHECK(tf.arkit_blendshapes[17] < 0.05f); // 1-frame spike suppressed by 3-frame median!
+
+    for (uint32_t f = 18U; f <= 29U; ++f) {
+        const uint64_t ts = static_cast<uint64_t>(f) * 33333ULL;
+        solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, ts, ts + 2000ULL, EpTier::NpuOpenVino, f, false, tf, kCamW,
+                                       kCamH);
+    }
     // Landmarks 160/144/158/153 belong to MediaPipe's 33/133 eye = the subject's RIGHT eye -> ARKit eyeBlinkRight (7).
     // The other eye stays open: a decisive one-eye close survives Kalidokit stabilizeBlink as a wink.
     CHECK(tf.arkit_blendshapes[7] > 0.65f);  // eyeBlinkRight
     CHECK(tf.arkit_blendshapes[0] < 0.20f);  // eyeBlinkLeft stays open
     CHECK(tf.arkit_blendshapes[17] > 0.40f); // jawOpen
-    CHECK(tf.webcam_visemes[0] > 0.50f);     // Kalidokit calcMouth "A" from the opened inner lips
+    CHECK(tf.webcam_visemes[0] > 0.50f);     // Live2D vowel "A" from the opened inner lips
     CHECK(tf.webcam_visemes[0] > tf.webcam_visemes[1]);
+}
+
+TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed), 0.25 deg lock, and 3-pt brow tracking",
+          "[tracking][live2d][brow]") {
+    constexpr uint32_t kCamW = 1280U;
+    constexpr uint32_t kCamH = 720U;
+    constexpr float kFocalPx = 900.0f;
+    const RoiRectNorm roi{0.50f, 0.50f, 0.45f, 0.45f, 0.0f, true};
+
+    auto make_face_roi_landmarks = [&](float yaw_rad, float pitch_rad, float roll_rad, float mouth_open_m,
+                                       float mouth_corner_dx_m, float brow_dy_m) {
+        std::array<float, 478 * 3> lm{};
+        auto is_brow_pt = [](uint32_t idx) -> bool {
+            constexpr uint32_t kBrows[] = {46, 52, 53, 55, 63, 65, 66, 70, 105, 107,
+                                           276, 282, 283, 285, 293, 295, 296, 300, 334, 336};
+            for (const uint32_t b : kBrows) {
+                if (idx == b) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (uint32_t i = 0; i < 478U; ++i) {
+            const float* base =
+                (i < kCanonicalFaceVertexCount)
+                    ? kCanonicalFaceVerticesM[i]
+                    : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
+            float p3[3]{base[0], base[1], base[2]};
+            if (i == 13U || i == 312U || i == 82U) {
+                p3[1] += mouth_open_m * 0.45f;
+            } else if (i == 14U || i == 317U || i == 87U) {
+                p3[1] -= mouth_open_m * 0.55f;
+            } else if (i == 61U || i == 78U) {
+                p3[0] -= mouth_corner_dx_m;
+            } else if (i == 291U || i == 308U) {
+                p3[0] += mouth_corner_dx_m;
+            } else if (is_brow_pt(i)) {
+                p3[1] += brow_dy_m;
+            }
+            float rot[3]{};
+            rotate_point_euler(yaw_rad, pitch_rad, roll_rad, p3, rot);
+            const float z = -0.55f + rot[2];
+            const float u_cam = 0.5f + (rot[0] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(kCamW));
+            const float v_cam = 0.5f - (rot[1] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(kCamH));
+            lm[i * 3 + 0] = ((u_cam - roi.cx) / roi.width + 0.5f) * 256.0f;
+            lm[i * 3 + 1] = ((v_cam - roi.cy) / roi.height + 0.5f) * 256.0f;
+            lm[i * 3 + 2] = -rot[2] * 100.0f;
+        }
+        return lm;
+    };
+
+    LandmarkPoseSolver solver;
+    solver.reset();
+    AetherTrackingFrame tf{};
+    // Calibrate neutral for 25 frames at zero expression
+    for (int f = 0; f < 25; ++f) {
+        const auto lm = make_face_roi_landmarks(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        const uint64_t ts = static_cast<uint64_t>(f + 1) * 33333ULL;
+        solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(f + 1), false, tf,
+                                       kCamW, kCamH);
+    }
+    REQUIRE(solver.neutral_calibrated());
+    const auto& ov = solver.overlay_snapshot();
+    CHECK(ov.keypoint_count == 68U);
+    CHECK(ov.iris_valid);
+    CHECK(ov.live2d.param_mouth_open_y == 0.0f);
+
+    // Stage 3: tiny 0.10 deg jitter inside 0.25 deg deadband stays locked at neutral.
+    {
+        const auto lm_tiny = make_face_roi_landmarks(0.10f * 0.01745329f, -0.08f * 0.01745329f, 0.0f, 0.0f, 0.0f, 0.0f);
+        for (int f = 0; f < 6; ++f) {
+            const uint64_t ts = static_cast<uint64_t>(30 + f) * 33333ULL;
+            solver.populate_tracking_frame(roi, lm_tiny.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
+                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(30 + f),
+                                           false, tf, kCamW, kCamH);
+        }
+        CHECK(std::abs(solver.last_head_euler_deg().yaw) < 0.25f);
+        CHECK(std::abs(solver.last_head_euler_deg().pitch) < 0.25f);
+    }
+
+    // Stage 2: large rigid head rotation (Yaw 18 deg, Pitch 15 deg, Roll 10 deg) with neutral face must not bleed
+    // into mouth opening or brow expression (< 0.03).
+    {
+        for (int f = 0; f < 30; ++f) {
+            const float s = std::min(1.0f, static_cast<float>(f + 1) / 15.0f);
+            const auto lm_rot = make_face_roi_landmarks(s * 18.0f * 0.01745329f, s * 15.0f * 0.01745329f,
+                                                        s * 10.0f * 0.01745329f, 0.0f, 0.0f, 0.0f);
+            const uint64_t ts = static_cast<uint64_t>(40 + f) * 33333ULL;
+            solver.populate_tracking_frame(roi, lm_rot.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
+                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(40 + f),
+                                           false, tf, kCamW, kCamH);
+        }
+        REQUIRE(aether::animation::has_packed_live2d(tf));
+        aether::animation::Live2DParameters l2d{};
+        aether::animation::unpack_live2d_from_tracking_frame(tf, l2d);
+        CHECK(std::abs(l2d.param_mouth_open_y) < 0.03f);
+        CHECK(std::abs(l2d.param_brow_l_y) < 0.05f);
+        CHECK(std::abs(l2d.param_brow_r_y) < 0.05f);
+    }
+
+    // Task 4: Raise & furrow brows at neutral pose -> verify positive and negative ParamBrowLY/RY & ARKit brows.
+    for (int f = 0; f < 25; ++f) {
+        const auto lm_up = make_face_roi_landmarks(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.010f);
+        const uint64_t ts = static_cast<uint64_t>(80 + f) * 33333ULL;
+        solver.populate_tracking_frame(roi, lm_up.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
+                                       nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(80 + f),
+                                       false, tf, kCamW, kCamH);
+    }
+    aether::animation::Live2DParameters brow_up{};
+    REQUIRE(aether::animation::has_packed_live2d(tf));
+    aether::animation::unpack_live2d_from_tracking_frame(tf, brow_up);
+    CHECK(brow_up.param_brow_l_y > 0.30f);
+    CHECK(brow_up.param_brow_r_y > 0.30f);
+    CHECK(tf.arkit_blendshapes[43] > 0.25f); // browInnerUp
+
+    for (int f = 0; f < 25; ++f) {
+        const auto lm_dn = make_face_roi_landmarks(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.010f);
+        const uint64_t ts = static_cast<uint64_t>(110 + f) * 33333ULL;
+        solver.populate_tracking_frame(roi, lm_dn.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
+                                       nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(110 + f),
+                                       false, tf, kCamW, kCamH);
+    }
+    aether::animation::Live2DParameters brow_dn{};
+    REQUIRE(aether::animation::has_packed_live2d(tf));
+    aether::animation::unpack_live2d_from_tracking_frame(tf, brow_dn);
+    CHECK(brow_dn.param_brow_l_y < -0.30f);
+    CHECK(brow_dn.param_brow_r_y < -0.30f);
+    CHECK(tf.arkit_blendshapes[41] > 0.25f); // browDownLeft
+    CHECK(tf.arkit_blendshapes[42] > 0.25f); // browDownRight
 }

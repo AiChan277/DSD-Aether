@@ -286,3 +286,40 @@ TEST_CASE("FileCamera synthetic stream drives TrackingEngine into LockFreeTriple
     CHECK(valid_frames >= 5);
     engine.shutdown();
 }
+
+TEST_CASE("Task 1: Hand tracking is disabled by default and emits zero hand confidence",
+          "[tracking][router][no-hands]") {
+    TrackingRouterConfig cfg{};
+    CHECK_FALSE(cfg.enable_hand_tracking);
+
+    const auto hw = aether::enumerate_hardware();
+    const auto manifest = repo_manifest_path();
+    REQUIRE(std::filesystem::exists(manifest));
+    cfg.manifest_path = manifest;
+    cfg.ov_cache_dir = temp_ov_cache_dir();
+    cfg.preferred_ep = EpTier::Cpu;
+
+    auto cam = create_file_camera_source({}, true, 640, 480, 60, 12);
+    REQUIRE(cam != nullptr);
+    TrackingEngine engine;
+    std::string err;
+    REQUIRE(engine.initialize(cfg, hw, std::move(cam), &err) == AETHER_OK);
+
+    aether::LockFreeTripleBuffer<AetherTrackingFrame> tb;
+    bool got_frame = false;
+    for (int i = 0; i < 6; ++i) {
+        if (engine.step_once(tb, 100, true) && tb.acquire()) {
+            const auto& f = tb.latest();
+            CHECK(f.left_hand_confidence == 0.0f);
+            CHECK(f.right_hand_confidence == 0.0f);
+            CHECK((f.valid_flags & 0x06U) == 0U);
+            got_frame = true;
+        }
+    }
+    REQUIRE(got_frame);
+    const auto stats = engine.snapshot_stats();
+    CHECK(stats.left_hand_confidence == 0.0f);
+    CHECK(stats.right_hand_confidence == 0.0f);
+
+    engine.shutdown();
+}

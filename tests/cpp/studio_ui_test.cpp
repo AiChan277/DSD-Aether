@@ -877,3 +877,115 @@ TEST_CASE("Quick expressions F1-F8 never drive ARKit eye-look slots and F8 is a 
         }
     }
 }
+
+TEST_CASE("Task 3-4: Expressions tab Live2D parameter monitor and 68-pt HUD overlay execute with zero steady-state allocations",
+          "[ui][live2d][perf]") {
+    aether::rhi::RhiDeviceConfig rhi_cfg{};
+    rhi_cfg.enable_validation = false;
+    rhi_cfg.require_validation = false;
+    rhi_cfg.headless = true;
+    auto rhi_res = aether::rhi::RhiDevice::create(rhi_cfg);
+    REQUIRE(rhi_res.has_value());
+
+    aether::ui::ScopedUiRig rig{};
+    rig.rhi = rhi_res.value();
+    REQUIRE(rig.arena.init(16ULL * 1024ULL * 1024ULL));
+    REQUIRE(aether::ui::install_imgui_arena(rig.arena));
+    ImGui::CreateContext();
+    rig.imgui_init = true;
+    ImPlot::CreateContext();
+    rig.implot_init = true;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1600.0f, 900.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigInputTrickleEventQueue = false;
+
+    const aether::RuntimePaths paths = aether::discover_runtime_paths();
+    aether::HardwareInventory hw{};
+    rig.ws.init(paths, hw, 1.0f, nullptr, false);
+    rig.ws_init = true;
+
+    unsigned char* tex_pixels = nullptr;
+    int tex_w = 0;
+    int tex_h = 0;
+    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
+    io.Fonts->SetTexID(static_cast<ImTextureID>(1));
+
+    aether::TelemetrySnapshot telem{};
+    telem.render_fps = 60.0f;
+    aether::ui::DevShellInputEcho echo{};
+    aether::ui::DevShellAvatarView avatar{};
+    avatar.has_avatar = true;
+    aether::ui::DevShellTrackingView tracking{};
+    tracking.ready = true;
+    tracking.face_confidence = 0.95f;
+    tracking.live_preview_valid = true;
+    tracking.live_preview_texture_id = 1ULL;
+    tracking.live_preview_width = 320U;
+    tracking.live_preview_height = 180U;
+    tracking.live_preview_face_locked = true;
+    tracking.live_preview_keypoint_count = 68U;
+    for (uint32_t k = 0; k < 68U; ++k) {
+        tracking.live_preview_keypoints[k] = {0.35f + 0.004f * static_cast<float>(k % 17U),
+                                              0.25f + 0.08f * static_cast<float>(k / 17U)};
+        tracking.live_preview_keypoint_valid[k] = 1U;
+    }
+    tracking.live_preview_iris_valid = true;
+    tracking.live_preview_iris_centers[0] = {0.42f, 0.42f};
+    tracking.live_preview_iris_centers[1] = {0.58f, 0.42f};
+    tracking.live2d.param_angle_x = 6.5f;
+    tracking.live2d.param_angle_y = -4.2f;
+    tracking.live2d.param_angle_z = 2.1f;
+    tracking.live2d.param_body_angle_x = 2.4f;
+    tracking.live2d.param_eye_l_open = 0.96f;
+    tracking.live2d.param_eye_r_open = 0.94f;
+    tracking.live2d.param_brow_l_y = 0.55f;
+    tracking.live2d.param_brow_r_y = 0.52f;
+    tracking.live2d.param_mouth_open_y = 0.62f;
+    tracking.live2d.param_mouth_form = 0.35f;
+    tracking.live2d.vowel_a = 0.65f;
+    tracking.live2d.vowel_e = 0.25f;
+
+    aether::ui::DevShellRenderView render_view{};
+    aether::ui::DevShellOutputView output_view{};
+    aether::ui::StudioActions actions{};
+
+    rig.ws.switch_mode(aether::ui::StudioMode::LiveStudio);
+    for (int f = 0; f < 6; ++f) {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                      render_view, output_view, actions);
+        ImGui::Render();
+    }
+    if (ImGuiWindow* expr_win = ImGui::FindWindowByName("Expressions"); expr_win != nullptr) {
+        ImGui::FocusWindow(expr_win);
+    }
+    for (int f = 6; f < 10; ++f) {
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                      render_view, output_view, actions);
+        ImGui::Render();
+    }
+
+    rig.arena.mark_warmup_complete();
+    aether::HotPathGuard::install();
+    const uint64_t hp_before = aether::HotPathGuard::total_violations();
+    for (int f = 10; f < 40; ++f) {
+        actions.reset_per_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        {
+            AETHER_HOT_PATH_SCOPE;
+            rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                          render_view, output_view, actions);
+        }
+        ImGui::Render();
+    }
+    CHECK(aether::HotPathGuard::total_violations() == hp_before);
+    CHECK(rig.arena.os_fallback_allocs() == 0ULL);
+    CHECK(rig.arena.steady_bump_growth_bytes() == 0ULL);
+}

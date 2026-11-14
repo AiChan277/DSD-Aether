@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aether_ffi_contract.h"
+#include "animation/live2d_params.hpp"
 #include "tracking/manifest.hpp"
 #include "tracking/roi_preprocess.hpp"
 
@@ -24,8 +25,11 @@ struct HeadEulerDeg {
 
 struct TrackingOverlaySnapshot {
     RoiRectNorm face_roi{};
-    std::array<float, 24U * 2U> keypoints_norm{};
+    std::array<float, 68U * 2U> keypoints_norm{};
     uint32_t keypoint_count{0};
+    // Normalized [0..1] camera coords: [0]=subject right iris (468, image-left), [1]=subject left iris (473, image-right)
+    std::array<float, 2U * 2U> iris_centers_norm{};
+    bool iris_valid{false};
     // 4 points in normalized [0..1] camera coords: [0]=nose origin, [1]=+X (right), [2]=+Y (up), [3]=+Z (fwd)
     std::array<float, 4U * 2U> head_axes_norm{};
     bool head_axes_valid{false};
@@ -33,6 +37,7 @@ struct TrackingOverlaySnapshot {
     bool neutral_calibrated{false};
     uint32_t stable_lock_frames{0};
     HeadEulerDeg head_euler_deg{};
+    animation::Live2DParameters live2d{};
 };
 
 /**
@@ -126,6 +131,15 @@ class LandmarkPoseSolver {
     [[nodiscard]] HeadEulerDeg last_head_euler_deg() const noexcept { return overlay_.head_euler_deg; }
 
   private:
+    struct LandmarkFilter2D {
+        float win_u[3]{};
+        float win_v[3]{};
+        float x_u{0.0f};
+        float dx_u{0.0f};
+        float x_v{0.0f};
+        float dx_v{0.0f};
+    };
+
     bool neutral_calibrated_{false};
     float neutral_head_quat_[4]{0.0f, 0.0f, 0.0f, 1.0f};
     float neutral_head_pos_[3]{0.0f, 0.0f, 0.0f};
@@ -135,8 +149,16 @@ class LandmarkPoseSolver {
     float neutral_ear_l_{0.28f};
     float neutral_ear_r_{0.28f};
     float neutral_mar_open_{0.04f};
-    float neutral_mouth_width_ratio_{0.52f};
+    float neutral_mouth_height_ratio_{0.0616f};
+    float neutral_mouth_width_ratio_{0.5525f};
     float neutral_plane_pitch_ratio_{0.42f};
+    std::array<float, 3> neutral_brow_l_{0.268f, 0.279f, 0.183f};
+    std::array<float, 3> neutral_brow_r_{0.268f, 0.279f, 0.183f};
+
+    std::array<LandmarkFilter2D, 478U> lm_filters_{};
+    std::array<float, 478U * 3U> filtered_lm_buf_{};
+    uint64_t last_lm_filter_ts_us_{0};
+    bool lm_filter_primed_{false};
 
     HeadPose6D last_pnp_pose_{};
     float prev_raw_head_quat_[4]{0.0f, 0.0f, 0.0f, 1.0f};

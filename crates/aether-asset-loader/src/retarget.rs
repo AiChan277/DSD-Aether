@@ -619,11 +619,13 @@ pub fn build_expression_retarget(avatar: &ParsedAvatar) -> Vec<ResolvedExprBindi
     let has_per_eye_blink = lower_names.iter().any(|n| is_left_blink_name(n))
         && lower_names.iter().any(|n| is_right_blink_name(n));
     let mut out = Vec::new();
+    let mut slot_has_binding = [false; AETHER_EXPRESSION_SLOT_COUNT as usize];
     for (p_idx, preset) in avatar.expr_presets.iter().enumerate() {
         for &(m_idx, w) in &preset.morph_binds {
             let cx = avatar.morphs.get(m_idx).map_or(0.0, |m| m.centroid_x);
             for (slot, slot_w) in map_preset_to_slots(&preset.name, cx, has_per_eye_blink) {
                 if slot < AETHER_EXPRESSION_SLOT_COUNT {
+                    slot_has_binding[slot as usize] = true;
                     out.push(ResolvedExprBinding {
                         preset_index: p_idx as u32,
                         input_slot: slot,
@@ -635,6 +637,72 @@ pub fn build_expression_retarget(avatar: &ParsedAvatar) -> Vec<ResolvedExprBindi
             }
         }
     }
+
+    // Fallback: bind split ARKit brow targets and isolated VRoid `Fcl_BRW_*` morphs into slots `41..=45`
+    // when VRM expression presets did not populate them (never touching whole-face `Fcl_ALL_*`).
+    let had_preset_brow_slots = (41usize..=45usize).any(|s| slot_has_binding[s]);
+    let mut push_brow_fallback = |slot: u32, m_idx: usize, w: f32, name: &str| {
+        out.push(ResolvedExprBinding {
+            preset_index: u32::MAX,
+            input_slot: slot,
+            morph_index: m_idx as u32,
+            weight: w,
+            preset_name: name.to_string(),
+        });
+    };
+    for (m_idx, morph) in avatar.morphs.iter().enumerate() {
+        let lower = morph.name.trim().to_ascii_lowercase();
+        if lower.contains("fcl_all_") {
+            continue;
+        }
+        let stripped: String = lower.chars().filter(char::is_ascii_alphanumeric).collect();
+        let exact_arkit = match stripped.as_str() {
+            "browdownleft" => Some(41u32),
+            "browdownright" => Some(42u32),
+            "browinnerup" => Some(43u32),
+            "browouterupleft" => Some(44u32),
+            "browouterupright" => Some(45u32),
+            _ => None,
+        };
+        if let Some(slot) = exact_arkit {
+            if !slot_has_binding[slot as usize] {
+                push_brow_fallback(slot, m_idx, 1.0, &morph.name);
+            }
+            continue;
+        }
+        if had_preset_brow_slots {
+            continue;
+        }
+        let is_brow_only =
+            lower.contains("fcl_brw_") || lower.contains("brow") || morph.name.contains('眉');
+        if !is_brow_only {
+            continue;
+        }
+        let has_l = lower.ends_with("_l") || lower.contains("left") || morph.name.contains('左');
+        let has_r = lower.ends_with("_r") || lower.contains("right") || morph.name.contains('右');
+        if lower.contains("angry") || lower.contains("down") || lower.contains("furrow") {
+            if has_l && !has_r {
+                push_brow_fallback(41, m_idx, 1.0, &morph.name);
+            } else if has_r && !has_l {
+                push_brow_fallback(42, m_idx, 1.0, &morph.name);
+            } else {
+                push_brow_fallback(41, m_idx, 0.5, &morph.name);
+                push_brow_fallback(42, m_idx, 0.5, &morph.name);
+            }
+        } else if lower.contains("sorrow") || lower.contains("sad") || lower.contains("worried") {
+            push_brow_fallback(43, m_idx, 1.0, &morph.name);
+        } else if lower.contains("surpris") || lower.contains("up") {
+            if has_l && !has_r {
+                push_brow_fallback(44, m_idx, 1.0, &morph.name);
+            } else if has_r && !has_l {
+                push_brow_fallback(45, m_idx, 1.0, &morph.name);
+            } else {
+                push_brow_fallback(44, m_idx, 0.5, &morph.name);
+                push_brow_fallback(45, m_idx, 0.5, &morph.name);
+            }
+        }
+    }
+
     out.sort_by_key(|b| (b.input_slot, b.morph_index, b.preset_index));
     out
 }

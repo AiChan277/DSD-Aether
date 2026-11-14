@@ -19,21 +19,6 @@ using animation::Vec3;
     return 1.0f / (1.0f + std::exp(-clamped));
 }
 
-[[nodiscard]] Quat quat_from_two_vecs(Vec3 from, Vec3 to) noexcept {
-    const Vec3 a = animation::normalize_safe(from);
-    const Vec3 b = animation::normalize_safe(to);
-    const float d = std::clamp(animation::dot(a, b), -1.0f, 1.0f);
-    if (d < -0.9995f) {
-        Vec3 ax = animation::cross({1.0f, 0.0f, 0.0f}, a);
-        if (animation::length_sq(ax) < 1e-4f) {
-            ax = animation::cross({0.0f, 0.0f, 1.0f}, a);
-        }
-        return animation::from_axis_angle(animation::normalize_safe(ax), animation::kPi);
-    }
-    const Vec3 c = animation::cross(a, b);
-    return animation::normalize(Quat{c.x, c.y, c.z, 1.0f + d});
-}
-
 [[nodiscard]] Quat mat3_to_quat(const float m[3][3]) noexcept {
     const float trace = m[0][0] + m[1][1] + m[2][2];
     Quat q{};
@@ -178,18 +163,6 @@ void kabsch_3x3(const float cov[3][3], float out_r[3][3]) noexcept {
     if (det < 0.0) {
         compute_r(-1.0);
     }
-}
-
-[[nodiscard]] Quat solve_finger_curl(const float* lm21_x3, int mcp_i, int pip_i, int dip_i, const Vec3& palm_dir,
-                                     const Vec3& palm_normal, float handed_sign) noexcept {
-    const Vec3 mcp{lm21_x3[mcp_i * 3 + 0], lm21_x3[mcp_i * 3 + 1], lm21_x3[mcp_i * 3 + 2]};
-    const Vec3 pip{lm21_x3[pip_i * 3 + 0], lm21_x3[pip_i * 3 + 1], lm21_x3[pip_i * 3 + 2]};
-    const Vec3 dip{lm21_x3[dip_i * 3 + 0], lm21_x3[dip_i * 3 + 1], lm21_x3[dip_i * 3 + 2]};
-    const Vec3 seg1 = animation::normalize_safe(pip - mcp, palm_dir);
-    const Vec3 seg2 = animation::normalize_safe(dip - pip, seg1);
-    const float cos_c = std::clamp(animation::dot(seg1, seg2), -1.0f, 1.0f);
-    const float angle = std::acos(cos_c) * ((animation::dot(seg2, palm_normal) < 0.0f) ? 1.0f : -0.3f);
-    return animation::from_euler_xyz(std::clamp(angle, -0.3f, 1.55f), 0.0f, handed_sign * 0.02f);
 }
 
 } // namespace
@@ -367,12 +340,6 @@ void map_m2_crop_to_cam_px(float u_m2, float v_m2, const RoiRectNorm& face_roi, 
     const float ry = (nx * s + ny * c) * face_roi.height;
     out_u = (face_roi.cx + rx) * static_cast<float>(cam_w);
     out_v = (face_roi.cy + ry) * static_cast<float>(cam_h);
-}
-
-[[nodiscard]] float dist2d_px(const float* lm, int a, int b) noexcept {
-    const float dx = lm[a * 3 + 0] - lm[b * 3 + 0];
-    const float dy = lm[a * 3 + 1] - lm[b * 3 + 1];
-    return std::sqrt(dx * dx + dy * dy);
 }
 
 } // namespace
@@ -730,8 +697,15 @@ void LandmarkPoseSolver::reset() noexcept {
     neutral_ear_l_ = 0.28f;
     neutral_ear_r_ = 0.28f;
     neutral_mar_open_ = 0.04f;
-    neutral_mouth_width_ratio_ = 0.52f;
+    neutral_mouth_height_ratio_ = 0.0616f;
+    neutral_mouth_width_ratio_ = 0.5525f;
     neutral_plane_pitch_ratio_ = 0.42f;
+    neutral_brow_l_ = {0.268f, 0.279f, 0.183f};
+    neutral_brow_r_ = {0.268f, 0.279f, 0.183f};
+    lm_filters_.fill(LandmarkFilter2D{});
+    filtered_lm_buf_.fill(0.0f);
+    last_lm_filter_ts_us_ = 0ULL;
+    lm_filter_primed_ = false;
     last_pnp_pose_ = HeadPose6D{};
     prev_raw_head_quat_[0] = 0.0f;
     prev_raw_head_quat_[1] = 0.0f;
@@ -857,8 +831,8 @@ RoiRectNorm LandmarkPoseSolver::estimate_face_roi_from_m1(const float* m1_body_l
 
 void LandmarkPoseSolver::populate_tracking_frame(
     const RoiRectNorm& face_roi, const float* m2_landmarks_478x3, float face_flag, const float* m3_blendshapes_52,
-    const float* m1_body_world_39x3, const float* m1_body_lm_39x5, float pose_flag, bool run_left_hand,
-    bool run_right_hand, const float* m1_hands_lm_2x63, const float* m1_hands_flag_2,
+    const float* m1_body_world_39x3, const float* m1_body_lm_39x5, float pose_flag, bool /*run_left_hand*/,
+    bool /*run_right_hand*/, const float* /*m1_hands_lm_2x63*/, const float* /*m1_hands_flag_2*/,
     const float* /*m1_hands_handed_2*/, uint64_t capture_timestamp_us, uint64_t inference_complete_us, EpTier active_ep,
     uint32_t frame_sequence, bool roi_reset_this_frame, AetherTrackingFrame& out_frame, uint32_t cam_w,
     uint32_t cam_h) noexcept {
@@ -878,18 +852,69 @@ void LandmarkPoseSolver::populate_tracking_frame(
         out_frame.joint_rotations_quat[b][3] = 1.0f;
     }
 
-    // 1. Classic Rigid Skull solvePnP + Auto-Neutral Calibration + Live2D EAR/MAR Geometric Ratios
+    // 1. Live2D 2-Stage Landmark Stabilization + Rigid Skull solvePnP + Head-Local Canonical Extraction
     if (m2_landmarks_478x3 != nullptr && face_flag >= 0.45f && face_roi.valid) {
         valid_flags |= 0x01U;
         overlay_.face_locked = true;
 
+        // Stage 1: Per-landmark 2D 1-Euro (fc_min = 1.5 Hz, beta = 0.04) + 3-frame median spike filter in face-ROI
+        // normalized [0..1] space BEFORE solvePnP or expression extraction (zero heap allocs).
+        float dt_s = (last_lm_filter_ts_us_ > 0ULL && capture_timestamp_us > last_lm_filter_ts_us_)
+                         ? static_cast<float>(capture_timestamp_us - last_lm_filter_ts_us_) * 1e-6f
+                         : (1.0f / 30.0f);
+        if (dt_s > 0.25f || dt_s < 1e-4f) {
+            dt_s = 1.0f / 30.0f;
+        }
+        last_lm_filter_ts_us_ = capture_timestamp_us;
+        auto alpha_1euro = [](float cutoff_hz, float dt) noexcept -> float {
+            const float r = 2.0f * animation::kPi * std::max(cutoff_hz, 0.01f) * dt;
+            return r / (r + 1.0f);
+        };
+        const float alpha_d = alpha_1euro(1.0f, dt_s);
+        const bool prime_now = !lm_filter_primed_ || roi_reset_this_frame;
+        for (uint32_t i = 0; i < 478U; ++i) {
+            const float raw_u = m2_landmarks_478x3[i * 3U + 0U] / 256.0f;
+            const float raw_v = m2_landmarks_478x3[i * 3U + 1U] / 256.0f;
+            auto& f = lm_filters_[i];
+            if (prime_now) {
+                f.win_u[0] = f.win_u[1] = f.win_u[2] = raw_u;
+                f.win_v[0] = f.win_v[1] = f.win_v[2] = raw_v;
+                f.x_u = raw_u;
+                f.dx_u = 0.0f;
+                f.x_v = raw_v;
+                f.dx_v = 0.0f;
+            } else {
+                f.win_u[0] = f.win_u[1];
+                f.win_u[1] = f.win_u[2];
+                f.win_u[2] = raw_u;
+                const float med_u = animation::median3(f.win_u[0], f.win_u[1], f.win_u[2]);
+                const float du = (med_u - f.x_u) / dt_s;
+                f.dx_u += alpha_d * (du - f.dx_u);
+                const float cut_u = 1.5f + 0.04f * std::abs(f.dx_u);
+                f.x_u += alpha_1euro(cut_u, dt_s) * (med_u - f.x_u);
+
+                f.win_v[0] = f.win_v[1];
+                f.win_v[1] = f.win_v[2];
+                f.win_v[2] = raw_v;
+                const float med_v = animation::median3(f.win_v[0], f.win_v[1], f.win_v[2]);
+                const float dv = (med_v - f.x_v) / dt_s;
+                f.dx_v += alpha_d * (dv - f.dx_v);
+                const float cut_v = 1.5f + 0.04f * std::abs(f.dx_v);
+                f.x_v += alpha_1euro(cut_v, dt_s) * (med_v - f.x_v);
+            }
+            filtered_lm_buf_[i * 3U + 0U] = f.x_u * 256.0f;
+            filtered_lm_buf_[i * 3U + 1U] = f.x_v * 256.0f;
+            filtered_lm_buf_[i * 3U + 2U] = m2_landmarks_478x3[i * 3U + 2U];
+        }
+        lm_filter_primed_ = true;
+        const float* const lm = filtered_lm_buf_.data();
+
         HeadPose6D hp =
-            solve_pnp_head_pose(m2_landmarks_478x3, face_roi, cam_w, cam_h, last_pnp_pose_.valid ? &last_pnp_pose_ : nullptr);
+            solve_pnp_head_pose(lm, face_roi, cam_w, cam_h, last_pnp_pose_.valid ? &last_pnp_pose_ : nullptr);
         // Kalidokit facial-plane solve (always computed: provides the calibrated pitch ratio and the fallback).
         const auto cam_pt = [&](uint32_t idx) noexcept -> FacePlanePoint2D {
             FacePlanePoint2D p{};
-            map_m2_crop_to_cam_px(m2_landmarks_478x3[idx * 3U + 0U], m2_landmarks_478x3[idx * 3U + 1U], face_roi,
-                                  cam_w, cam_h, p.x, p.y);
+            map_m2_crop_to_cam_px(lm[idx * 3U + 0U], lm[idx * 3U + 1U], face_roi, cam_w, cam_h, p.x, p.y);
             return p;
         };
         float plane_pitch_ratio = neutral_plane_pitch_ratio_;
@@ -915,7 +940,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
                                ? animation::normalize(
                                      {hp.rotation_xyzw[0], hp.rotation_xyzw[1], hp.rotation_xyzw[2], hp.rotation_xyzw[3]})
                                : Quat::identity();
-        const Vec3 t_raw = hp.valid ? Vec3{hp.position_m[0], hp.position_m[1], hp.position_m[2]} : Vec3{0.0f, 0.0f, -0.55f};
+        const Vec3 t_raw =
+            hp.valid ? Vec3{hp.position_m[0], hp.position_m[1], hp.position_m[2]} : Vec3{0.0f, 0.0f, -0.55f};
 
         // Check inter-frame stability for 15-frame auto-neutral lock
         if (hp.valid && !roi_reset_this_frame) {
@@ -942,14 +968,95 @@ void LandmarkPoseSolver::populate_tracking_frame(
             has_prev_raw_quat_ = false;
         }
 
-        // Compute geometric EAR & MAR normalized by 2D inter-ocular distance
-        const float iod = std::max(dist2d_px(m2_landmarks_478x3, 33, 263), 4.0f);
-        const float ear_l = 0.5f * (dist2d_px(m2_landmarks_478x3, 160, 144) + dist2d_px(m2_landmarks_478x3, 158, 153)) /
-                            std::max(dist2d_px(m2_landmarks_478x3, 33, 133), 2.0f);
-        const float ear_r = 0.5f * (dist2d_px(m2_landmarks_478x3, 385, 380) + dist2d_px(m2_landmarks_478x3, 387, 373)) /
-                            std::max(dist2d_px(m2_landmarks_478x3, 263, 362), 2.0f);
-        const float mar_open = dist2d_px(m2_landmarks_478x3, 13, 14) / std::max(dist2d_px(m2_landmarks_478x3, 78, 308), 2.0f);
-        const float mouth_width_ratio = dist2d_px(m2_landmarks_478x3, 61, 291) / iod;
+        // Stage 2: Rigid Head Unprojection into Head-Local Canonical Space (eliminates Pitch/Yaw/Roll expression bleed).
+        // Forward pinhole model is `P_cam = rotate(q_raw, P_local) + t_raw`, `d = -P_cam.z`, `ox = P_cam.x/d`.
+        // Solving ray-to-canonical-depth-plane intersection via `inverse(q_raw)` recovers exact `P_local`.
+        const Quat q_inv = animation::conjugate(q_raw);
+        const Vec3 origin_local = animation::rotate(q_inv, t_raw * -1.0f);
+        const float fx_cam = static_cast<float>(std::max(cam_w, 1U));
+        const float cx_cam = 0.5f * static_cast<float>(std::max(cam_w, 1U));
+        const float cy_cam = 0.5f * static_cast<float>(std::max(cam_h, 1U));
+        const auto unproject_local = [&](int idx) noexcept -> Vec3 {
+            float u_px = 0.0f;
+            float v_px = 0.0f;
+            map_m2_crop_to_cam_px(lm[idx * 3 + 0], lm[idx * 3 + 1], face_roi, cam_w, cam_h, u_px, v_px);
+            const float ox = (u_px - cx_cam) / fx_cam;
+            const float oy = (cy_cam - v_px) / fx_cam;
+            float z_ref = 0.045f;
+            if (idx >= 0 && static_cast<uint32_t>(idx) < kCanonicalFaceVertexCount) {
+                z_ref = kCanonicalFaceVerticesM[idx][2];
+            } else if (idx >= 468 && idx <= 472) {
+                z_ref = 0.5f * (kCanonicalFaceVerticesM[33][2] + kCanonicalFaceVerticesM[133][2]);
+            } else if (idx >= 473 && idx <= 477) {
+                z_ref = 0.5f * (kCanonicalFaceVerticesM[263][2] + kCanonicalFaceVerticesM[362][2]);
+            }
+            const Vec3 dir_local = animation::rotate(q_inv, {ox, oy, -1.0f});
+            float d = 0.55f;
+            if (dir_local.z < -0.15f) {
+                d = (z_ref - origin_local.z) / dir_local.z;
+            } else if (idx >= 0 && static_cast<uint32_t>(idx) < kCanonicalFaceVertexCount) {
+                const Vec3 canon{kCanonicalFaceVerticesM[idx][0], kCanonicalFaceVerticesM[idx][1],
+                                 kCanonicalFaceVerticesM[idx][2]};
+                d = -(animation::rotate(q_raw, canon).z + t_raw.z);
+            }
+            d = std::clamp(d, 0.12f, 3.0f);
+            return origin_local + dir_local * d;
+        };
+        const auto dist_xy = [](const Vec3& a, const Vec3& b) noexcept -> float {
+            return std::hypot(a.x - b.x, a.y - b.y);
+        };
+
+        const Vec3 p_33 = unproject_local(33);
+        const Vec3 p_133 = unproject_local(133);
+        const Vec3 p_263 = unproject_local(263);
+        const Vec3 p_362 = unproject_local(362);
+        const Vec3 eye_r_center = (p_33 + p_133) * 0.5f;
+        const Vec3 eye_l_center = (p_263 + p_362) * 0.5f;
+        const float iod_local = std::max(0.02f, animation::length(eye_l_center - eye_r_center));
+
+        // Eyelids in head-local canonical space (`33/133` = subject right / image-left, `263/362` = subject left)
+        const Vec3 p_160 = unproject_local(160);
+        const Vec3 p_144 = unproject_local(144);
+        const Vec3 p_158 = unproject_local(158);
+        const Vec3 p_153 = unproject_local(153);
+        const Vec3 p_159 = unproject_local(159);
+        const Vec3 p_145 = unproject_local(145);
+        const float ear_l =
+            0.5f * (dist_xy(p_160, p_144) + dist_xy(p_158, p_153)) / std::max(0.005f, dist_xy(p_33, p_133));
+
+        const Vec3 p_385 = unproject_local(385);
+        const Vec3 p_380 = unproject_local(380);
+        const Vec3 p_387 = unproject_local(387);
+        const Vec3 p_373 = unproject_local(373);
+        const Vec3 p_386 = unproject_local(386);
+        const Vec3 p_374 = unproject_local(374);
+        const float ear_r =
+            0.5f * (dist_xy(p_385, p_380) + dist_xy(p_387, p_373)) / std::max(0.005f, dist_xy(p_263, p_362));
+
+        // Lips in head-local canonical space
+        const Vec3 p_13 = unproject_local(13);
+        const Vec3 p_14 = unproject_local(14);
+        const Vec3 p_61 = unproject_local(61);
+        const Vec3 p_291 = unproject_local(291);
+        const Vec3 p_78 = unproject_local(78);
+        const Vec3 p_308 = unproject_local(308);
+        const float mouth_h_ratio = std::max(0.0f, p_13.y - p_14.y) / iod_local;
+        const float mar_open = dist_xy(p_13, p_14) / std::max(0.005f, dist_xy(p_78, p_308));
+        const float mouth_width_ratio = dist_xy(p_61, p_291) / iod_local;
+
+        // Eyebrow heights (inner, mid, outer) above rigid upper eye-corner baseline, normalized by iod_local
+        const float eye_r_base_y = 0.5f * (p_33.y + p_133.y); // subject right (image-left: 107 in, 105 mid, 70 out)
+        const float eye_l_base_y = 0.5f * (p_263.y + p_362.y); // subject left (image-right: 336 in, 334 mid, 300 out)
+        const std::array<float, 3> brow_r_cur{
+            (unproject_local(107).y - eye_r_base_y) / iod_local,
+            (unproject_local(105).y - eye_r_base_y) / iod_local,
+            (unproject_local(70).y - eye_r_base_y) / iod_local,
+        };
+        const std::array<float, 3> brow_l_cur{
+            (unproject_local(336).y - eye_l_base_y) / iod_local,
+            (unproject_local(334).y - eye_l_base_y) / iod_local,
+            (unproject_local(300).y - eye_l_base_y) / iod_local,
+        };
 
         if (calibrate_next_ || (!neutral_calibrated_ && stable_lock_frames_ >= kAutoNeutralStableFrames)) {
             neutral_head_quat_[0] = q_raw.x;
@@ -962,8 +1069,11 @@ void LandmarkPoseSolver::populate_tracking_frame(
             neutral_ear_l_ = std::clamp(ear_l, 0.18f, 0.42f);
             neutral_ear_r_ = std::clamp(ear_r, 0.18f, 0.42f);
             neutral_mar_open_ = std::clamp(mar_open, 0.0f, 0.18f);
+            neutral_mouth_height_ratio_ = std::clamp(mouth_h_ratio, 0.0f, 0.16f);
             neutral_mouth_width_ratio_ = std::clamp(mouth_width_ratio, 0.35f, 0.72f);
             neutral_plane_pitch_ratio_ = std::clamp(plane_pitch_ratio, 0.15f, 0.75f);
+            neutral_brow_l_ = brow_l_cur;
+            neutral_brow_r_ = brow_r_cur;
             neutral_calibrated_ = true;
             calibrate_next_ = false;
             last_emitted_head_quat_[0] = 0.0f;
@@ -993,8 +1103,9 @@ void LandmarkPoseSolver::populate_tracking_frame(
         roll_r = std::clamp(roll_r, -30.0f * animation::kDegToRad, 30.0f * animation::kDegToRad);
         q_head = euler_yxz_to_quat(pitch_r, yaw_r, roll_r);
 
-        // 0.15 deg angular deadband on R_delta so sitting still yields zero head tremor
-        constexpr float kDeadbandRad = 0.15f * animation::kDegToRad;
+        // Stage 3: Adaptive Asymmetric Hysteresis Lock (0.25 deg deadband + cubic Hermite [0, 0.45 deg] ramp)
+        constexpr float kDeadbandRad = 0.25f * animation::kDegToRad;
+        constexpr float kRampRad = 0.45f * animation::kDegToRad;
         if (has_emitted_head_quat_) {
             const Quat prev_e{last_emitted_head_quat_[0], last_emitted_head_quat_[1], last_emitted_head_quat_[2],
                               last_emitted_head_quat_[3]};
@@ -1003,7 +1114,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
             if (ang <= kDeadbandRad) {
                 q_head = prev_e;
             } else {
-                q_head = animation::slerp(prev_e, q_head, (ang - kDeadbandRad) / ang);
+                const float w = animation::smoothstep01(0.0f, kRampRad, ang - kDeadbandRad);
+                q_head = animation::slerp(prev_e, q_head, w);
             }
         }
         last_emitted_head_quat_[0] = q_head.x;
@@ -1028,22 +1140,28 @@ void LandmarkPoseSolver::populate_tracking_frame(
         out_frame.joint_positions_ws[AETHER_BONE_HEAD][3] = std::clamp(face_flag, 0.0f, 1.0f);
         out_frame.joint_positions_ws[AETHER_BONE_NECK][3] = std::clamp(face_flag, 0.0f, 1.0f);
 
-        // Iris landmarks: left iris center=468 (corners 33,133; lids 159,145); right center=473 (362,263; 386,374)
-        const auto compute_eye_quat = [&](int iris, int outer_c, int inner_c, int top_l, int bot_l) noexcept -> Quat {
-            const float cx = 0.5f * (m2_landmarks_478x3[outer_c * 3 + 0] + m2_landmarks_478x3[inner_c * 3 + 0]);
-            const float cy = 0.5f * (m2_landmarks_478x3[top_l * 3 + 1] + m2_landmarks_478x3[bot_l * 3 + 1]);
-            const float ew =
-                std::max(1.0f, std::abs(m2_landmarks_478x3[inner_c * 3 + 0] - m2_landmarks_478x3[outer_c * 3 + 0]));
-            const float eh =
-                std::max(1.0f, std::abs(m2_landmarks_478x3[bot_l * 3 + 1] - m2_landmarks_478x3[top_l * 3 + 1]));
-            const float yaw = std::clamp((m2_landmarks_478x3[iris * 3 + 0] - cx) / ew, -0.5f, 0.5f) * 0.55f;
-            const float pitch = std::clamp((m2_landmarks_478x3[iris * 3 + 1] - cy) / eh, -0.5f, 0.5f) * 0.35f;
-            return animation::from_euler_xyz(pitch, yaw, 0.0f);
+        // Iris landmarks in head-local canonical space (+X image-right, +Y up -> negate dy for image-down pitch)
+        const Vec3 p_468 = unproject_local(468);
+        const Vec3 p_473 = unproject_local(473);
+        const auto compute_eye_quat_local = [&](const Vec3& p_iris, const Vec3& p_out, const Vec3& p_in,
+                                                const Vec3& p_top, const Vec3& p_bot, float& out_gx,
+                                                float& out_gy) noexcept -> Quat {
+            const float cx = 0.5f * (p_out.x + p_in.x);
+            const float cy = 0.5f * (p_top.y + p_bot.y);
+            const float ew = std::max(0.004f, std::abs(p_in.x - p_out.x));
+            const float eh = std::max(0.002f, std::abs(p_top.y - p_bot.y));
+            const float rx = (p_iris.x - cx) / ew;
+            const float ry_down = -(p_iris.y - cy) / eh; // head-local +Y is up; +ry_down looks down
+            out_gx = std::clamp(rx / 0.28f, -1.0f, 1.0f);
+            out_gy = std::clamp(ry_down / 0.28f, -1.0f, 1.0f);
+            const float yaw_e = std::clamp(rx, -0.5f, 0.5f) * 0.55f;
+            const float pitch_e = std::clamp(ry_down, -0.5f, 0.5f) * 0.35f;
+            return animation::from_euler_xyz(pitch_e, yaw_e, 0.0f);
         };
-        // MediaPipe 33/133/468 = subject's RIGHT eye (image-left), 263/362/473 = subject's LEFT eye (image-right).
-        // Head yaw/roll reproduce the raw camera view, so each subject eye drives the same-named avatar eye.
-        const Quat qr_eye = compute_eye_quat(468, 33, 133, 159, 145);
-        const Quat ql_eye = compute_eye_quat(473, 263, 362, 386, 374);
+        float r_eye_gx = 0.0f, r_eye_gy = 0.0f;
+        float l_eye_gx = 0.0f, l_eye_gy = 0.0f;
+        const Quat qr_eye = compute_eye_quat_local(p_468, p_33, p_133, p_159, p_145, r_eye_gx, r_eye_gy);
+        const Quat ql_eye = compute_eye_quat_local(p_473, p_263, p_362, p_386, p_374, l_eye_gx, l_eye_gy);
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][0] = ql_eye.x;
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][1] = ql_eye.y;
         out_frame.joint_rotations_quat[AETHER_BONE_LEFT_EYE][2] = ql_eye.z;
@@ -1061,20 +1179,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
             }
         }
 
-        // Geometric iris gaze reinforcement for VRM blendshapes (`eyeLookDown/In/Out/Up`, indices 1..4 L, 8..11 R)
-        const auto blend_eye_gaze_bs = [&](int iris, int outer_c, int inner_c, int top_l, int bot_l, size_t bs_base,
-                                           bool is_left_screen) noexcept {
-            const float cx = 0.5f * (m2_landmarks_478x3[outer_c * 3 + 0] + m2_landmarks_478x3[inner_c * 3 + 0]);
-            const float cy = 0.5f * (m2_landmarks_478x3[top_l * 3 + 1] + m2_landmarks_478x3[bot_l * 3 + 1]);
-            const float ew =
-                std::max(1.0f, std::abs(m2_landmarks_478x3[inner_c * 3 + 0] - m2_landmarks_478x3[outer_c * 3 + 0]));
-            const float eh =
-                std::max(1.0f, std::abs(m2_landmarks_478x3[bot_l * 3 + 1] - m2_landmarks_478x3[top_l * 3 + 1]));
-            const float gx = std::clamp((m2_landmarks_478x3[iris * 3 + 0] - cx) / (0.28f * ew), -1.0f, 1.0f);
-            const float gy = std::clamp((m2_landmarks_478x3[iris * 3 + 1] - cy) / (0.28f * eh), -1.0f, 1.0f);
-            const float g_down = std::max(0.0f, gy);
-            const float g_up = std::max(0.0f, -gy);
-            // "In" = toward the nose: +x (image right) for the image-left eye, -x for the image-right eye.
+        // Geometric iris gaze reinforcement (`eyeLookDown/In/Out/Up`, indices 1..4 L, 8..11 R)
+        const auto blend_eye_gaze_bs = [&](float gx, float gy_down, size_t bs_base, bool is_left_screen) noexcept {
+            const float g_down = std::max(0.0f, gy_down);
+            const float g_up = std::max(0.0f, -gy_down);
             const float g_in = is_left_screen ? std::max(0.0f, gx) : std::max(0.0f, -gx);
             const float g_out = is_left_screen ? std::max(0.0f, -gx) : std::max(0.0f, gx);
             out_frame.arkit_blendshapes[bs_base + 0] =
@@ -1086,51 +1194,91 @@ void LandmarkPoseSolver::populate_tracking_frame(
             out_frame.arkit_blendshapes[bs_base + 3] =
                 std::clamp(0.70f * g_up + 0.30f * out_frame.arkit_blendshapes[bs_base + 3], 0.0f, 1.0f);
         };
-        // Appendix B: 1..4 = eyeLook{Down,In,Out,Up}Left (subject's left eye), 8..11 = ...Right.
-        blend_eye_gaze_bs(468, 33, 133, 159, 145, 8U, true);   // subject's right eye (image-left)
-        blend_eye_gaze_bs(473, 263, 362, 386, 374, 1U, false); // subject's left eye (image-right)
+        blend_eye_gaze_bs(r_eye_gx, r_eye_gy, 8U, true);   // subject's right eye (image-left)
+        blend_eye_gaze_bs(l_eye_gx, l_eye_gy, 1U, false);  // subject's left eye (image-right)
 
-        // Kalidokit calcEyes + stabilizeBlink. `ear_l` is measured on landmarks 33/133 (subject's RIGHT eye) and
-        // `ear_r` on 263/362 (subject's LEFT eye); ARKit slot 0 = eyeBlinkLeft (subject's left), 7 = eyeBlinkRight.
+        // Kalidokit calcEyes + stabilizeBlink (`ear_l` = 33/133 subject right, `ear_r` = 263/362 subject left)
         float blink_subj_left = 1.0f - animation::kalido_eye_openness(ear_r, neutral_ear_r_);
         float blink_subj_right = 1.0f - animation::kalido_eye_openness(ear_l, neutral_ear_l_);
-        // With the nose turned toward image-right (+yaw) the image-left eye (subject's right) faces the camera.
         animation::kalido_stabilize_blink(blink_subj_left, blink_subj_right, yaw_r, yaw_r > 0.0f);
         out_frame.arkit_blendshapes[0] =
             std::clamp(blink_subj_left * 0.80f + out_frame.arkit_blendshapes[0] * 0.20f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[7] =
             std::clamp(blink_subj_right * 0.80f + out_frame.arkit_blendshapes[7] * 0.20f, 0.0f, 1.0f);
 
-        // Kalidokit calcMouth A/I/U/E/O from inner-lip height and lip-corner width normalised by inter-ocular distance.
-        const float mouth_y = dist2d_px(m2_landmarks_478x3, 13, 14) / iod;
-        const animation::MouthVowels vow =
-            animation::kalido_calc_mouth(mouth_y, mouth_width_ratio, neutral_mouth_width_ratio_);
-        out_frame.webcam_visemes[0] = vow.a;
-        out_frame.webcam_visemes[1] = vow.i;
-        out_frame.webcam_visemes[2] = vow.u;
-        out_frame.webcam_visemes[3] = vow.e;
-        out_frame.webcam_visemes[4] = vow.o;
+        // Build Live2DParameters in head-local canonical space
+        animation::Live2DParameters live2d{};
+        live2d.param_angle_x = std::clamp(overlay_.head_euler_deg.yaw, -30.0f, 30.0f);
+        live2d.param_angle_y = std::clamp(overlay_.head_euler_deg.pitch, -30.0f, 30.0f);
+        live2d.param_angle_z = std::clamp(overlay_.head_euler_deg.roll, -30.0f, 30.0f);
+        live2d.param_body_angle_x = std::clamp(live2d.param_angle_x * 0.333f, -10.0f, 10.0f);
+        live2d.param_body_angle_y = std::clamp(live2d.param_angle_y * 0.333f, -10.0f, 10.0f);
+        live2d.param_body_angle_z = std::clamp(live2d.param_angle_z * 0.333f, -10.0f, 10.0f);
+        live2d.param_eye_l_open = std::clamp(1.0f - out_frame.arkit_blendshapes[0], 0.0f, 1.0f);
+        live2d.param_eye_r_open = std::clamp(1.0f - out_frame.arkit_blendshapes[7], 0.0f, 1.0f);
+        live2d.param_eye_ball_x = std::clamp(0.5f * (r_eye_gx + l_eye_gx), -1.0f, 1.0f);
+        live2d.param_eye_ball_y = std::clamp(-0.5f * (r_eye_gy + l_eye_gy), -1.0f, 1.0f);
+
+        // Task 4: Full 3-point Live2D Eyebrow tracking (`ParamBrowLY/RY`, `Angle`, `Form`) + ARKit slots `41..45`
+        const float d_l_in = brow_l_cur[0] - neutral_brow_l_[0];
+        const float d_l_mid = brow_l_cur[1] - neutral_brow_l_[1];
+        const float d_l_out = brow_l_cur[2] - neutral_brow_l_[2];
+        const float d_r_in = brow_r_cur[0] - neutral_brow_r_[0];
+        const float d_r_mid = brow_r_cur[1] - neutral_brow_r_[1];
+        const float d_r_out = brow_r_cur[2] - neutral_brow_r_[2];
+        live2d.param_brow_l_y = std::clamp((d_l_in + d_l_mid + d_l_out) / (3.0f * 0.085f), -1.0f, 1.0f);
+        live2d.param_brow_r_y = std::clamp((d_r_in + d_r_mid + d_r_out) / (3.0f * 0.085f), -1.0f, 1.0f);
+        live2d.param_brow_l_angle = std::clamp((d_l_in - d_l_out) / 0.070f, -1.0f, 1.0f);
+        live2d.param_brow_r_angle = std::clamp((d_r_in - d_r_out) / 0.070f, -1.0f, 1.0f);
+        const float brow_l_arch = (d_l_mid - 0.5f * (d_l_in + d_l_out)) / 0.045f;
+        const float brow_r_arch = (d_r_mid - 0.5f * (d_r_in + d_r_out)) / 0.045f;
+        live2d.param_brow_l_form = std::clamp(0.65f * live2d.param_brow_l_y + 0.35f * brow_l_arch, -1.0f, 1.0f);
+        live2d.param_brow_r_form = std::clamp(0.65f * live2d.param_brow_r_y + 0.35f * brow_r_arch, -1.0f, 1.0f);
+
+        const float brow_down_l_g = std::clamp(-live2d.param_brow_l_y, 0.0f, 1.0f);
+        const float brow_down_r_g = std::clamp(-live2d.param_brow_r_y, 0.0f, 1.0f);
+        const float brow_in_up_g = std::clamp(0.5f * (d_l_in + d_r_in) / 0.085f, 0.0f, 1.0f);
+        const float brow_out_l_g = std::clamp(d_l_out / 0.085f, 0.0f, 1.0f);
+        const float brow_out_r_g = std::clamp(d_r_out / 0.085f, 0.0f, 1.0f);
+        const float m3_w = (m3_blendshapes_52 != nullptr) ? 0.30f : 0.0f;
+        const float g_w = 1.0f - m3_w;
+        out_frame.arkit_blendshapes[41] = std::clamp(g_w * brow_down_l_g + m3_w * out_frame.arkit_blendshapes[41], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[42] = std::clamp(g_w * brow_down_r_g + m3_w * out_frame.arkit_blendshapes[42], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[43] = std::clamp(g_w * brow_in_up_g + m3_w * out_frame.arkit_blendshapes[43], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[44] = std::clamp(g_w * brow_out_l_g + m3_w * out_frame.arkit_blendshapes[44], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[45] = std::clamp(g_w * brow_out_r_g + m3_w * out_frame.arkit_blendshapes[45], 0.0f, 1.0f);
+
+        // Task 3: Live2D 2D Mouth Manifold (`ParamMouthOpenY` x `ParamMouthForm` -> continuous `A, I, U, E, O`)
+        const float raw_mouth_open = (mouth_h_ratio - neutral_mouth_height_ratio_) / 0.38f;
+        live2d.param_mouth_open_y = (raw_mouth_open < 0.06f) ? 0.0f : std::clamp(raw_mouth_open, 0.0f, 1.0f);
+        live2d.param_mouth_form = std::clamp(
+            (mouth_width_ratio - neutral_mouth_width_ratio_) / (0.18f * std::max(neutral_mouth_width_ratio_, 0.20f)),
+            -1.0f, 1.0f);
+        animation::solve_live2d_vowels(live2d.param_mouth_form, live2d.param_mouth_open_y, live2d.vowel_a,
+                                       live2d.vowel_i, live2d.vowel_u, live2d.vowel_e, live2d.vowel_o);
+        out_frame.webcam_visemes[0] = live2d.vowel_a;
+        out_frame.webcam_visemes[1] = live2d.vowel_i;
+        out_frame.webcam_visemes[2] = live2d.vowel_u;
+        out_frame.webcam_visemes[3] = live2d.vowel_e;
+        out_frame.webcam_visemes[4] = live2d.vowel_o;
 
         const float mar_delta = std::max(0.0f, mar_open - neutral_mar_open_ - 0.025f);
-        const float jaw_open_geom = std::clamp(mar_delta / 0.38f, 0.0f, 1.0f);
-        const float w_delta = mouth_width_ratio - neutral_mouth_width_ratio_;
-        const float smile_geom = std::clamp((w_delta - 0.020f) / 0.13f, 0.0f, 1.0f);
-        const float pucker_geom = std::clamp((-w_delta - 0.020f) / 0.11f, 0.0f, 1.0f);
-        const float narrow_ratio = std::clamp(
-            1.0f - ((mouth_width_ratio / std::max(neutral_mouth_width_ratio_, 0.25f)) - 0.75f) * 3.0f, 0.0f, 1.0f);
-        const float funnel_geom = std::clamp(jaw_open_geom * narrow_ratio, 0.0f, 1.0f);
-        const float stretch_geom =
-            std::clamp((w_delta - 0.012f) / 0.11f * (1.0f - funnel_geom * 0.6f), 0.0f, 1.0f);
+        const float jaw_open_geom = std::clamp(std::max(live2d.param_mouth_open_y, mar_delta / 0.38f), 0.0f, 1.0f);
+        const float smile_pos = std::clamp(std::max(0.0f, live2d.param_mouth_form) * 0.45f, 0.0f, 1.0f);
+        const float smile_geom = std::clamp(std::max(0.0f, live2d.param_mouth_form), 0.0f, 1.0f);
+        const float pucker_geom = std::clamp(std::max(0.0f, -live2d.param_mouth_form), 0.0f, 1.0f);
+        const float funnel_geom = std::clamp(jaw_open_geom * pucker_geom, 0.0f, 1.0f);
+        const float stretch_geom = std::clamp(smile_geom * (1.0f - funnel_geom * 0.6f), 0.0f, 1.0f);
         out_frame.arkit_blendshapes[17] =
             std::clamp(jaw_open_geom * 0.72f + out_frame.arkit_blendshapes[17] * 0.28f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[19] =
             std::clamp(funnel_geom * 0.68f + out_frame.arkit_blendshapes[19] * 0.32f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[20] =
             std::clamp(pucker_geom * 0.68f + out_frame.arkit_blendshapes[20] * 0.32f, 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[23] =
-            std::clamp(smile_geom * 0.65f + out_frame.arkit_blendshapes[23] * 0.35f, 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[24] =
-            std::clamp(smile_geom * 0.65f + out_frame.arkit_blendshapes[24] * 0.35f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[23] = std::clamp(
+            std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[23] * 0.35f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[24] = std::clamp(
+            std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[24] * 0.35f), 0.0f, 1.0f);
         out_frame.arkit_blendshapes[29] =
             std::clamp(stretch_geom * 0.60f + out_frame.arkit_blendshapes[29] * 0.40f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[30] =
@@ -1143,28 +1291,53 @@ void LandmarkPoseSolver::populate_tracking_frame(
             std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[39] * 0.70f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[40] =
             std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[40] * 0.70f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[47] = std::clamp(std::max(out_frame.arkit_blendshapes[47], smile_pos * 0.65f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[48] = std::clamp(std::max(out_frame.arkit_blendshapes[48], smile_pos * 0.65f), 0.0f, 1.0f);
 
-        // Export HUD overlay landmarks (normalized [0..1] camera space) & 3D head orientation triad
-        static constexpr uint16_t kHudKeyIndices[24] = {
-            33,  133, 159, 145, // L eye outer/inner/top/bot
-            263, 362, 386, 374, // R eye outer/inner/top/bot
-            468, 473,           // L/R iris centers
-            4,   6,   168, 10,  // Nose tip/bridge, glabella, forehead
-            61,  291, 13,  14,  // Mouth corners, inner upper/lower
-            152, 234, 454,      // Chin, L/R cheeks
-            70,  300, 197       // L/R outer brows, mid nose
+        overlay_.live2d = live2d;
+        animation::pack_live2d_into_tracking_frame(live2d, out_frame);
+
+        // Export 68-point Live2D canonical wireframe HUD overlay (normalized [0..1] camera space) + irises + triad
+        static constexpr std::array<uint16_t, 68U> kHud68Indices = {
+            // Jaw (0..16, 17 pts)
+            234, 132, 58, 172, 136, 150, 149, 176, 152, 400, 378, 379, 365, 397, 288, 361, 454,
+            // Image-left brow (17..21, 5 pts)
+            70, 63, 105, 66, 107,
+            // Image-right brow (22..26, 5 pts)
+            336, 296, 334, 293, 300,
+            // Nose (27..35, 9 pts)
+            168, 6, 197, 195, 5, 4, 64, 2, 294,
+            // Image-left eye ring (36..41, 6 pts)
+            33, 160, 158, 133, 153, 144,
+            // Image-right eye ring (42..47, 6 pts)
+            362, 385, 387, 263, 373, 380,
+            // Outer lips loop (48..59, 12 pts)
+            61, 40, 37, 0, 267, 270, 291, 321, 314, 17, 84, 91,
+            // Inner lips loop (60..67, 8 pts)
+            78, 81, 13, 311, 308, 402, 14, 178,
         };
         const float inv_w = 1.0f / static_cast<float>(std::max(cam_w, 1U));
         const float inv_h = 1.0f / static_cast<float>(std::max(cam_h, 1U));
-        overlay_.keypoint_count = 24U;
-        for (uint32_t k = 0; k < 24U; ++k) {
-            const uint16_t idx = kHudKeyIndices[k];
+        overlay_.keypoint_count = 68U;
+        for (uint32_t k = 0; k < 68U; ++k) {
+            const uint16_t idx = kHud68Indices[k];
             float u = 0.0f;
             float v = 0.0f;
-            map_m2_crop_to_cam_px(m2_landmarks_478x3[idx * 3U + 0U], m2_landmarks_478x3[idx * 3U + 1U], face_roi, cam_w,
-                                  cam_h, u, v);
+            map_m2_crop_to_cam_px(lm[idx * 3U + 0U], lm[idx * 3U + 1U], face_roi, cam_w, cam_h, u, v);
             overlay_.keypoints_norm[k * 2U + 0U] = std::clamp(u * inv_w, 0.0f, 1.0f);
             overlay_.keypoints_norm[k * 2U + 1U] = std::clamp(v * inv_h, 0.0f, 1.0f);
+        }
+        {
+            float ul = 0.0f, vl = 0.0f, ur = 0.0f, vr = 0.0f;
+            map_m2_crop_to_cam_px(lm[468U * 3U + 0U], lm[468U * 3U + 1U], face_roi, cam_w, cam_h, ul, vl);
+            map_m2_crop_to_cam_px(lm[473U * 3U + 0U], lm[473U * 3U + 1U], face_roi, cam_w, cam_h, ur, vr);
+            overlay_.iris_centers_norm = {
+                std::clamp(ul * inv_w, 0.0f, 1.0f),
+                std::clamp(vl * inv_h, 0.0f, 1.0f),
+                std::clamp(ur * inv_w, 0.0f, 1.0f),
+                std::clamp(vr * inv_h, 0.0f, 1.0f),
+            };
+            overlay_.iris_valid = true;
         }
         if (hp.valid) {
             const float fx = static_cast<float>(std::max(cam_w, 1U));
@@ -1198,98 +1371,28 @@ void LandmarkPoseSolver::populate_tracking_frame(
     } else {
         stable_lock_frames_ = 0U;
         has_prev_raw_quat_ = false;
+        lm_filter_primed_ = false;
+        last_lm_filter_ts_us_ = 0ULL;
     }
 
-    // 2. Upper-Body Pose (strictly gate arms on in-frame elbow+wrist visibility; never overwrite CHEST/HIPS from out-of-frame M1 hips)
+    // 2. Upper-Body Pose (TASK 1: hands/arms IK completely bypassed — arms stay in relaxed A-Pose)
     const float body_conf = std::clamp(pose_flag, 0.0f, 1.0f);
     out_frame.upper_body_confidence = body_conf;
     if (m1_body_world_39x3 != nullptr && m1_body_lm_39x5 != nullptr && body_conf >= 0.30f) {
         valid_flags |= 0x08U;
-        const Vec3 l_hip{m1_body_world_39x3[23 * 3 + 0], -m1_body_world_39x3[23 * 3 + 1],
-                         -m1_body_world_39x3[23 * 3 + 2]};
-        const Vec3 r_hip{m1_body_world_39x3[24 * 3 + 0], -m1_body_world_39x3[24 * 3 + 1],
-                         -m1_body_world_39x3[24 * 3 + 2]};
-        const Vec3 hip_mid = (l_hip + r_hip) * 0.5f;
-        const Vec3 l_w{m1_body_world_39x3[15 * 3 + 0], -m1_body_world_39x3[15 * 3 + 1],
-                       -m1_body_world_39x3[15 * 3 + 2]};
-        const Vec3 r_w{m1_body_world_39x3[16 * 3 + 0], -m1_body_world_39x3[16 * 3 + 1],
-                       -m1_body_world_39x3[16 * 3 + 2]};
-
         const Vec3 hips_ws{0.0f, 0.90f, 0.0f};
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][0] = hips_ws.x;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][1] = hips_ws.y;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][2] = hips_ws.z;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][3] = body_conf;
         out_frame.joint_positions_ws[AETHER_BONE_SPINE][3] = body_conf;
-
-        const RoiRectNorm lb_roi = make_letterbox_square_roi(cam_w, cam_h);
-        auto arm_in_frame_conf = [&](int elbow_idx, int wrist_idx) noexcept -> float {
-            const float e_vis = sigmoid(m1_body_lm_39x5[elbow_idx * 5 + 3]);
-            const float w_vis = sigmoid(m1_body_lm_39x5[wrist_idx * 5 + 3]);
-            const float w_pres = sigmoid(m1_body_lm_39x5[wrist_idx * 5 + 4]);
-            const float lu = m1_body_lm_39x5[wrist_idx * 5 + 0] / 256.0f;
-            const float lv = m1_body_lm_39x5[wrist_idx * 5 + 1] / 256.0f;
-            const float u = lb_roi.cx + (lu - 0.5f) * lb_roi.width;
-            const float v = lb_roi.cy + (lv - 0.5f) * lb_roi.height;
-            if (u < 0.05f || u > 0.95f || v < 0.05f || v > 0.88f) {
-                return 0.0f;
-            }
-            const float min_c = std::min(e_vis, std::min(w_vis, w_pres));
-            return (min_c >= 0.65f) ? min_c : 0.0f;
-        };
-
-        // Place wrist IK targets relative to hips in avatar world frame only when wrist+elbow are clearly visible in-frame
-        const Vec3 lw_ws = hips_ws + (l_w - hip_mid);
-        const Vec3 rw_ws = hips_ws + (r_w - hip_mid);
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = lw_ws.x;
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = lw_ws.y;
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = lw_ws.z;
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = arm_in_frame_conf(13, 15);
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = rw_ws.x;
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = rw_ws.y;
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = rw_ws.z;
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = arm_in_frame_conf(14, 16);
+        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.0f;
+        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.0f;
     }
 
-    // 3. Batched Hands (slots 0 = left, 1 = right; finger curl -> 30 finger bones)
-    const auto process_hand = [&](bool active, int batch_idx, uint32_t thumb_base, float handed_sign,
-                                  float& out_hand_conf, uint32_t flag_bit) {
-        if (!active || m1_hands_lm_2x63 == nullptr || m1_hands_flag_2 == nullptr) {
-            out_hand_conf = 0.0f;
-            return;
-        }
-        const float hconf = std::clamp(m1_hands_flag_2[batch_idx], 0.0f, 1.0f);
-        out_hand_conf = hconf;
-        if (hconf < 0.30f) {
-            return;
-        }
-        valid_flags |= flag_bit;
-        const float* lm = &m1_hands_lm_2x63[static_cast<ptrdiff_t>(batch_idx) * 63];
-        const Vec3 wrist{lm[0], lm[1], lm[2]};
-        const Vec3 mid_mcp{lm[9 * 3 + 0], lm[9 * 3 + 1], lm[9 * 3 + 2]};
-        const Vec3 idx_mcp{lm[5 * 3 + 0], lm[5 * 3 + 1], lm[5 * 3 + 2]};
-        const Vec3 pnk_mcp{lm[17 * 3 + 0], lm[17 * 3 + 1], lm[17 * 3 + 2]};
-        const Vec3 palm_dir = animation::normalize_safe(mid_mcp - wrist, {0.0f, -1.0f, 0.0f});
-        const Vec3 palm_norm =
-            animation::normalize_safe(animation::cross(idx_mcp - wrist, pnk_mcp - wrist), {0.0f, 0.0f, 1.0f});
-
-        static constexpr int kMcp[5] = {1, 5, 9, 13, 17};
-        for (int f = 0; f < 5; ++f) {
-            const int b0 = kMcp[f];
-            const Quat curl = solve_finger_curl(lm, b0, b0 + 1, b0 + 2, palm_dir, palm_norm, handed_sign);
-            for (int ph = 0; ph < 3; ++ph) {
-                const uint32_t bone = thumb_base + static_cast<uint32_t>(f * 3 + ph);
-                out_frame.joint_rotations_quat[bone][0] = curl.x;
-                out_frame.joint_rotations_quat[bone][1] = curl.y;
-                out_frame.joint_rotations_quat[bone][2] = curl.z;
-                out_frame.joint_rotations_quat[bone][3] = curl.w;
-                out_frame.joint_positions_ws[bone][3] = hconf;
-            }
-        }
-    };
-    process_hand(run_left_hand, 0, AETHER_BONE_LEFT_THUMB_PROXIMAL, 1.0f, out_frame.left_hand_confidence, 0x02U);
-    process_hand(run_right_hand, 1, AETHER_BONE_RIGHT_THUMB_PROXIMAL, -1.0f, out_frame.right_hand_confidence, 0x04U);
-
+    // 3. Hand tracking disabled (Task 1): lock hand confidences cleanly to zero
+    out_frame.left_hand_confidence = 0.0f;
+    out_frame.right_hand_confidence = 0.0f;
     out_frame.valid_flags = valid_flags;
 }
 

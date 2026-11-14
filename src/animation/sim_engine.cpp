@@ -225,9 +225,30 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
                                out_skinning.bone_matrices[b]);
     }
 
-    // 7. Blendshapes + 60 ms DSP mouth-ownership transition
+    // 7. Blendshapes + Live2D parameters + 60 ms DSP mouth-ownership transition
+    Live2DParameters raw_l2d{};
+    unpack_live2d_from_tracking_frame(stabilized_frame_, raw_l2d);
+    const Live2DParameters* const opt_raw_l2d = has_packed_live2d(stabilized_frame_) ? &raw_l2d : nullptr;
+    out_skinning.live2d = Live2DParameters{};
     expr_mixer_.update(predicted_state_.blendshapes.data(), dsp, graph_out, dt_s, out_skinning.morph_weights,
-                       out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data());
+                       out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data(),
+                       rm.has_split_brow_morphs, opt_raw_l2d, &out_skinning.live2d);
+
+    const auto world_delta_euler_deg = [&](uint32_t bone_id) noexcept -> Vec3 {
+        const Quat rw = rm.rest_world_rotations[bone_id];
+        const float rw2 = rw.w * rw.w + rw.x * rw.x + rw.y * rw.y + rw.z * rw.z;
+        const Quat rest_world = (rw2 > 1e-6f) ? normalize(rw) : Quat::identity();
+        const Quat q_delta = normalize(bone_rot_ws_[bone_id] * conjugate(rest_world));
+        return to_euler_xyz(q_delta) * kRadToDeg;
+    };
+    const Vec3 head_deg = world_delta_euler_deg(AETHER_BONE_HEAD);
+    const Vec3 chest_deg = world_delta_euler_deg(AETHER_BONE_CHEST);
+    out_skinning.live2d.param_angle_x = std::clamp(head_deg.y, -30.0f, 30.0f);
+    out_skinning.live2d.param_angle_y = std::clamp(head_deg.x, -30.0f, 30.0f);
+    out_skinning.live2d.param_angle_z = std::clamp(head_deg.z, -30.0f, 30.0f);
+    out_skinning.live2d.param_body_angle_x = std::clamp(chest_deg.y, -10.0f, 10.0f);
+    out_skinning.live2d.param_body_angle_y = std::clamp(chest_deg.x, -10.0f, 10.0f);
+    out_skinning.live2d.param_body_angle_z = std::clamp(chest_deg.z, -10.0f, 10.0f);
 
     // 8. Fill head anchor vectors (render face shadow/SDF light basis) & DevShell HUD telemetry view
     const Vec3 head_fwd = rotate_vec(bone_rot_ws_[AETHER_BONE_HEAD], {0.0f, 0.0f, 1.0f});

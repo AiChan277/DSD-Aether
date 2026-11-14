@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aether_ffi_contract.h"
+#include "animation/live2d_params.hpp"
 #include "core/hw_enum.hpp"
 #include "core/log.hpp"
 #include "core/paths.hpp"
@@ -102,10 +103,14 @@ struct DevShellTrackingView {
     bool live_preview_valid{false};
     bool live_preview_face_locked{false};
     std::array<float, 4> live_preview_face_roi{0.0f, 0.0f, 0.0f, 0.0f};
-    std::array<std::array<float, 2>, 24> live_preview_keypoints{};
-    std::array<uint8_t, 24> live_preview_keypoint_valid{};
+    std::array<std::array<float, 2>, 68> live_preview_keypoints{};
+    std::array<uint8_t, 68> live_preview_keypoint_valid{};
+    uint32_t live_preview_keypoint_count{0};
+    std::array<std::array<float, 2>, 2> live_preview_iris_centers{};
+    bool live_preview_iris_valid{false};
     bool live_preview_axes_valid{false};
     std::array<std::array<float, 2>, 4> live_preview_head_axes{};
+    animation::Live2DParameters live2d{};
 };
 
 struct DevShellRenderView {

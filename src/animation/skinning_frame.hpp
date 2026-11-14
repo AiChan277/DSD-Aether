@@ -1,5 +1,6 @@
 #pragma once
 
+#include "animation/live2d_params.hpp"
 #include "core/telemetry.hpp"
 
 #include <array>
@@ -41,6 +42,7 @@ struct alignas(64) SkinningFrame {
     uint32_t active_ep{3};
     uint32_t tracking_valid_flags{0};
     float arkit_preview[52]{};
+    Live2DParameters live2d{};
     float _reserved_tail[12]{};
 };
 

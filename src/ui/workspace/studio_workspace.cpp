@@ -939,7 +939,7 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
 
     if (ImGui::Begin(kPanelExpressions)) {
         track_hovered_zone(kPanelExpressions);
-        timeline_console_.draw_expressions_tab(expressions_, fonts_);
+        timeline_console_.draw_expressions_tab(expressions_, tracking, fonts_);
     }
     ImGui::End();
 
