@@ -99,6 +99,8 @@ struct GpuFrameGlobals {
     uint4 output_storage_ids;
     float4 avatar_pos_scale;  // xyz = AvatarRoot position, w = uniform scale
     float4 avatar_rot_sincos; // x = cos(yaw), y = sin(yaw), z = yaw_rad, w = 1
+    float4 npr_style_params;  // x=face_norm_flatten, y=cel_band_sharpness, z=shadow_warm_cool_shift, w=iro_tsuke_strength
+    float4 npr_style_params2; // x=crease_strength, y=hair_highlight_intensity, z=rim_step_strength, w=reserved
     GpuLight lights[8];
 };
 

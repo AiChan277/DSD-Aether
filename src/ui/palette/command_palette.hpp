@@ -45,6 +45,7 @@ enum class PaletteCommandTag : uint16_t {
     ResetLayout,
     OpenWizard,
     OpenPreferences,
+    OpenGraphicsSettings,
     OpenShortcuts,
     ReloadPlugins,
     ForceDeviceLost,

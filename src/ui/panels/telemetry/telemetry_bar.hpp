@@ -13,6 +13,7 @@ enum class TopMenuAction : uint8_t {
     OpenPalette,
     OpenWizard,
     OpenPreferences,
+    OpenGraphicsSettings,
     OpenShortcuts,
     NewProject,
     OpenProject,

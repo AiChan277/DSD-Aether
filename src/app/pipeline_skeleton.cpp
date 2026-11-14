@@ -265,6 +265,16 @@ TrackingHudSnapshot PipelineSkeleton::latest_tracking_hud() noexcept {
     return tracking_hud_buffer_.latest();
 }
 
+bool PipelineSkeleton::acquire_live_preview(tracking::LiveCameraPreviewFrame& out) noexcept {
+    (void)live_preview_buffer_.acquire();
+    const auto& latest = live_preview_buffer_.latest();
+    if (!latest.valid || latest.sequence == out.sequence) {
+        return false;
+    }
+    out = latest;
+    return true;
+}
+
 TelemetrySnapshot PipelineSkeleton::latest_telemetry() noexcept {
     (void)telemetry_hub_.acquire();
     return telemetry_hub_.latest();
@@ -353,6 +363,8 @@ void PipelineSkeleton::t1_entry() {
             hud.camera_height = st.camera_height;
             hud.camera_fps = st.camera_fps;
             hud.roi_locked = st.roi_locked;
+            hud.neutral_calibrated = st.neutral_calibrated;
+            hud.stable_lock_frames = st.stable_lock_frames;
             hud.active_ep = tracking::to_ffi_ep(st.active_ep);
             hud.frames_processed = st.frames_processed;
             hud.demotion_count = st.demotion_count;
@@ -363,9 +375,14 @@ void PipelineSkeleton::t1_entry() {
             hud.upper_body_confidence = st.upper_body_confidence;
             hud.left_hand_confidence = st.left_hand_confidence;
             hud.right_hand_confidence = st.right_hand_confidence;
+            std::memcpy(hud.head_euler_deg, st.head_euler_deg, sizeof(hud.head_euler_deg));
             std::snprintf(hud.active_ep_label, sizeof(hud.active_ep_label), "%s", st.active_ep_label.c_str());
             std::snprintf(hud.camera_label, sizeof(hud.camera_label), "%s", st.camera_label.c_str());
             std::snprintf(hud.camera_symlink, sizeof(hud.camera_symlink), "%s", st.camera_symlink.c_str());
+            auto& preview_staging = live_preview_buffer_.staging();
+            if (eng->copy_live_preview(preview_staging) && preview_staging.valid) {
+                live_preview_buffer_.publish();
+            }
         } else {
             hud.camera_active = false;
             hud.camera_width = 0;
@@ -373,6 +390,9 @@ void PipelineSkeleton::t1_entry() {
             hud.camera_fps = 0;
             hud.camera_symlink[0] = '\0';
             hud.roi_locked = false;
+            hud.neutral_calibrated = false;
+            hud.stable_lock_frames = 0;
+            std::memset(hud.head_euler_deg, 0, sizeof(hud.head_euler_deg));
             hud.active_ep = AETHER_EP_CPU;
             std::snprintf(hud.active_ep_label, sizeof(hud.active_ep_label), "%s",
                           fallback_msg != nullptr ? fallback_msg : "Tracking Unavailable");

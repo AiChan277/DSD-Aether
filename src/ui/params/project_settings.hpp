@@ -134,6 +134,8 @@ struct AppSettings {
     bool wizard_completed{false};
     uint64_t hw_inventory_hash{0};
     std::string preferred_camera_link{};
+    std::string preferred_gpu_luid{};
+    std::string preferred_gpu_name{};
     std::string active_project_path{};
     std::string ws_auth_token{"aether-local-dev-token"};
     std::vector<std::string> recent_projects{};

@@ -131,6 +131,44 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu(tr("Graphics"))) {
+            const auto& gpu = rhi.gpu_info();
+            ImGui::TextColored(t.text_tertiary, "GPU: %s",
+                               gpu.device_name.empty() ? tr("Unknown") : gpu.device_name.c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem(tr("Graphics Settings..."))) {
+                menu_act = TopMenuAction::OpenGraphicsSettings;
+            }
+            ImGui::Separator();
+            if (ImGui::BeginMenu(tr("Target FPS"))) {
+                const int cur_fps_mode = params.get_int(ParamId::RenderTargetFps);
+                static constexpr const char* kFpsLabels[4] = {"30 FPS", "60 FPS (Default)", "120 FPS", "Uncapped"};
+                for (int fi = 0; fi < 4; ++fi) {
+                    if (ImGui::MenuItem(kFpsLabels[fi], nullptr, cur_fps_mode == fi)) {
+                        (void)params.set(ParamId::RenderTargetFps, static_cast<double>(fi));
+                        settings_dirty = true;
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            const bool vsync = params.get_bool(ParamId::RenderVsync);
+            if (ImGui::MenuItem(tr("VSync"), nullptr, vsync)) {
+                (void)params.set(ParamId::RenderVsync, vsync ? 0.0 : 1.0);
+                settings_dirty = true;
+            }
+            const bool eco = params.get_bool(ParamId::RenderBackgroundEco);
+            if (ImGui::MenuItem(tr("Background Eco (30 FPS)"), nullptr, eco)) {
+                (void)params.set(ParamId::RenderBackgroundEco, eco ? 0.0 : 1.0);
+                settings_dirty = true;
+            }
+            const bool rt_on = params.get_bool(ParamId::RenderRtEnabled);
+            if (ImGui::MenuItem(tr("Ray Tracing"), nullptr, rt_on, rhi.rt_supported())) {
+                (void)params.set(ParamId::RenderRtEnabled, rt_on ? 0.0 : 1.0);
+                actions.viewport.lighting_dirty = true;
+                settings_dirty = true;
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu(tr("Diagnostics"))) {
             ImGui::Text("FFI ABI: %s", ffi_layout_ok ? "VERIFIED" : "FAILED");
             ImGui::Text("VK Validation: %s (errors: %llu)", rhi.validation_active() ? "ON" : "OFF",

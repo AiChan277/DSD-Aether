@@ -46,11 +46,13 @@ struct TrackingHudSnapshot {
     bool using_synthetic_camera{true};
     bool camera_active{false};
     bool roi_locked{false};
+    bool neutral_calibrated{false};
     uint32_t active_ep{AETHER_EP_CPU};
     int32_t selected_ep_override{-1};
     uint32_t camera_width{0};
     uint32_t camera_height{0};
     uint32_t camera_fps{0};
+    uint32_t stable_lock_frames{0};
     uint64_t frames_processed{0};
     uint64_t demotion_count{0};
     float preprocess_ms{0.0f};
@@ -60,6 +62,7 @@ struct TrackingHudSnapshot {
     float upper_body_confidence{0.0f};
     float left_hand_confidence{0.0f};
     float right_hand_confidence{0.0f};
+    float head_euler_deg[3]{0.0f, 0.0f, 0.0f};
     char active_ep_label[64]{"Initializing..."};
     char camera_label[128]{"Synthetic 60Hz"};
     char camera_symlink[256]{};
@@ -150,6 +153,7 @@ class PipelineSkeleton {
     void send_tracking_command(const TrackingControlCommand& cmd) noexcept;
 
     [[nodiscard]] TrackingHudSnapshot latest_tracking_hud() noexcept;
+    [[nodiscard]] bool acquire_live_preview(tracking::LiveCameraPreviewFrame& out) noexcept;
     [[nodiscard]] TelemetrySnapshot latest_telemetry() noexcept;
     [[nodiscard]] uint64_t total_t1_frames() const noexcept { return t1_frames_.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t total_t2_ticks() const noexcept { return t2_ticks_.load(std::memory_order_acquire); }
@@ -172,6 +176,7 @@ class PipelineSkeleton {
     LockFreeTripleBuffer<AetherTrackingFrame> pose_buffer_{};
     LockFreeTripleBuffer<SkinningSnapshot> skinning_buffer_{};
     LockFreeTripleBuffer<TrackingHudSnapshot> tracking_hud_buffer_{};
+    LockFreeTripleBuffer<tracking::LiveCameraPreviewFrame> live_preview_buffer_{};
     LockFreeTripleBuffer<aether::output::OutputRuntimeStatus> output_status_buffer_{};
     SpscRing<OutputWorkItem, 16> output_ring_{};
     SpscRing<aether::output::OutputRingSlot, 16> output_slot_ring_{};

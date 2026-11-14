@@ -59,10 +59,23 @@ float4 ps_main(HullVsOut i) : SV_Target0 {
     if (i.valid < 0.5) {
         discard;
     }
+    GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
     GpuMaterial mat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, i.material_id);
-    float alpha = saturate(g_SampledImages[mat.tex_slots.x].Sample(g_Samplers[kSamplerLinearClamp], i.uv).a * mat.lit_color.a);
+    float4 base_sample = g_SampledImages[mat.tex_slots.x].Sample(g_Samplers[kSamplerLinearClamp], i.uv);
+    float alpha = saturate(base_sample.a * mat.lit_color.a);
     if ((g_Pc.param1 & 32u) != 0u && alpha < max(mat.toon_params.w, 0.001)) {
         discard;
     }
-    return float4(mat.outline_color_width.rgb * alpha, alpha);
+
+    // Iro-Tsuke colored anime outlines: replace generic black/grey outlines with chroma-boosted diffuse * 0.35
+    float3 base_rgb = base_sample.rgb * mat.lit_color.rgb;
+    float3 boosted_ink = pow(max(base_rgb, float3(0.008, 0.008, 0.008)), float3(1.18, 1.24, 1.12)) * 0.35;
+    boosted_ink = clamp(boosted_ink, float3(0.02, 0.015, 0.03), float3(0.55, 0.48, 0.58));
+    float3 raw_out = mat.outline_color_width.rgb;
+    float out_chroma = max(raw_out.r, max(raw_out.g, raw_out.b)) - min(raw_out.r, min(raw_out.g, raw_out.b));
+    float iro_str = saturate(fg.npr_style_params.w);
+    float iro_w = ((out_chroma > 0.25 && (mat.extra_slots.z & 32u) != 0u) ? 0.0 : saturate(1.0 - out_chroma * 1.8)) *
+                  iro_str;
+    float3 final_out = lerp(raw_out, boosted_ink, iro_w);
+    return float4(final_out * alpha, alpha);
 }

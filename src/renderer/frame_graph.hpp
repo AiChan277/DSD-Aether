@@ -96,6 +96,10 @@ struct FrameRenderRequest {
     std::array<float, 3> non_alpha_bg_rgb{0.0f, 177.0f / 255.0f, 64.0f / 255.0f};
     bool need_straight_alpha{false};
     bool need_bottom_up{false};
+    bool encode_output_bgra{true};
+    bool encode_output_nv12{true};
+    bool throttle_rt_accel_struct{false};
+    uint8_t aa_mode{0}; // 0=Off, 1=FXAA, 2=TAA-Lite
     bool clear_swapchain{true};
     VkImageView swapchain_view{VK_NULL_HANDLE};
     VkExtent2D swapchain_extent{};
@@ -333,6 +337,9 @@ class FrameGraph {
     std::vector<uint32_t> transparent_draw_indices_{};
     std::array<GpuHeatmapBone, 4096> heatmap_scratch_{};
     std::array<int64_t, 27> shader_mtimes_{};
+    uint64_t last_rt_pose_hash_{0};
+    uint64_t last_rt_as_update_us_{0};
+    const GpuAvatar* last_rt_avatar_{nullptr};
     bool bgra8_supports_storage_{false};
     bool pipelines_ready_{false};
     bool wireframe_supported_{false};

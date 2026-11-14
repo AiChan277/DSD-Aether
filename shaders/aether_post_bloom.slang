@@ -126,6 +126,39 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
     }
 
     float4 hdr = g_SampledImages[g_Pc.param0].Load(int3(p, 0));
+    uint aa_mode = (fg.state_u32.w >> 8u) & 3u;
+    if (aa_mode != 0u && debug_view == 0u) {
+        int2 max_p = int2(int(g_Pc.param2) - 1, int(g_Pc.param3) - 1);
+        float4 c_n = g_SampledImages[g_Pc.param0].Load(int3(clamp(p + int2(0, -1), int2(0, 0), max_p), 0));
+        float4 c_s = g_SampledImages[g_Pc.param0].Load(int3(clamp(p + int2(0, 1), int2(0, 0), max_p), 0));
+        float4 c_w = g_SampledImages[g_Pc.param0].Load(int3(clamp(p + int2(-1, 0), int2(0, 0), max_p), 0));
+        float4 c_e = g_SampledImages[g_Pc.param0].Load(int3(clamp(p + int2(1, 0), int2(0, 0), max_p), 0));
+        float l_c = dot(hdr.rgb, float3(0.2126, 0.7152, 0.0722));
+        float l_n = dot(c_n.rgb, float3(0.2126, 0.7152, 0.0722));
+        float l_s = dot(c_s.rgb, float3(0.2126, 0.7152, 0.0722));
+        float l_w = dot(c_w.rgb, float3(0.2126, 0.7152, 0.0722));
+        float l_e = dot(c_e.rgb, float3(0.2126, 0.7152, 0.0722));
+        float l_min = min(l_c, min(min(l_n, l_s), min(l_w, l_e)));
+        float l_max = max(l_c, max(max(l_n, l_s), max(l_w, l_e)));
+        float a_min = min(hdr.a, min(min(c_n.a, c_s.a), min(c_w.a, c_e.a)));
+        float a_max = max(hdr.a, max(max(c_n.a, c_s.a), max(c_w.a, c_e.a)));
+        float contrast = max(l_max - l_min, a_max - a_min);
+        if (contrast > max(0.035, l_max * 0.10)) {
+            float dir_x = -((l_n + l_n) - (l_s + l_s)) + ((c_n.a - c_s.a) * 0.5);
+            float dir_y = ((l_w + l_w) - (l_e + l_e)) + ((c_e.a - c_w.a) * 0.5);
+            float dir_len = max(length(float2(dir_x, dir_y)), 1e-4);
+            float2 dir = float2(dir_x, dir_y) / dir_len;
+            float2 off = clamp(dir * (aa_mode >= 2u ? 0.75 : 0.5), float2(-1.0, -1.0), float2(1.0, 1.0));
+            int2 p1 = clamp(int2(round(float2(p) + off)), int2(0, 0), max_p);
+            int2 p2 = clamp(int2(round(float2(p) - off)), int2(0, 0), max_p);
+            float4 edge_avg = 0.5 * (g_SampledImages[g_Pc.param0].Load(int3(p1, 0)) +
+                                     g_SampledImages[g_Pc.param0].Load(int3(p2, 0)));
+            float4 box_avg = 0.25 * (c_n + c_s + c_w + c_e);
+            float aa_w = (aa_mode >= 2u) ? saturate(contrast * 1.35) * 0.65 : saturate(contrast * 1.15) * 0.50;
+            float4 target = (aa_mode >= 2u) ? lerp(edge_avg, box_avg, 0.35) : edge_avg;
+            hdr = lerp(hdr, target, aa_w);
+        }
+    }
     if (debug_view == 1u || debug_view == 13u) {
         float3 out_rgb = hdr.rgb + (1.0 - saturate(hdr.a)) * fg.bg_color_premul.rgb;
         float out_a = saturate(hdr.a + (1.0 - saturate(hdr.a)) * fg.bg_color_premul.a);
@@ -133,11 +166,17 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    // Apply interior crease lines gently over lit geometry (masked to foreground alpha)
+    // Apply Iro-Tsuke tinted interior crease ink lines over lit geometry (masked to foreground alpha)
     uint crease_slot = fg.gbuffer_ids[1].y;
-    if (crease_slot != 0xFFFFFFFFu && hdr.a > 0.01) {
-        float cr = g_SampledImages[crease_slot].Load(int3(p, 0)).x;
-        hdr.rgb *= saturate(1.0 - 0.65 * cr);
+    float crease_str = saturate(fg.npr_style_params2.x);
+    if (crease_slot != 0xFFFFFFFFu && hdr.a > 0.01 && crease_str > 0.001) {
+        float cr = g_SampledImages[crease_slot].Load(int3(p, 0)).x * crease_str;
+        float3 base_norm = max(hdr.rgb / max(hdr.a, 0.05), float3(0.01, 0.01, 0.01));
+        float3 iro_ink = clamp(pow(base_norm, float3(1.18, 1.24, 1.12)) * 0.28,
+                               float3(0.03, 0.025, 0.045), float3(0.40, 0.35, 0.48));
+        float3 ink_mul = lerp(float3(0.24, 0.22, 0.26), iro_ink / max(base_norm, float3(0.08, 0.08, 0.08)),
+                              saturate(fg.npr_style_params.w));
+        hdr.rgb *= lerp(float3(1.0, 1.0, 1.0), saturate(ink_mul), saturate(cr * 0.72));
     }
 
     float3 glow = float3(0.0, 0.0, 0.0);

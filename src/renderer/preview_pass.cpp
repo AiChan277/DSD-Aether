@@ -155,8 +155,8 @@ PreviewCamera fit_camera_to_avatar(const GpuAvatar& avatar) noexcept {
     cam.target_z = 0.5f * (min_z + max_z);
     cam.yaw_rad = 0.28f;
     cam.pitch_rad = 0.06f;
-    cam.fovy_rad = 0.62f;
-    cam.distance = std::clamp((span * 0.72f) / std::tan(cam.fovy_rad * 0.5f), 0.7f, 12.0f);
+    cam.fovy_rad = 0.2805f; // ~85mm portrait telephoto FOV for authentic 2D Live2D framing
+    cam.distance = std::clamp((span * 0.72f) / std::tan(cam.fovy_rad * 0.5f), 0.7f, 24.0f);
     return cam;
 }
 

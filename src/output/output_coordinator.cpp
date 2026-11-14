@@ -138,7 +138,8 @@ uint64_t OutputCoordinator::process_slot(const OutputRingSlot& slot, float obser
         (void)spout_.publish_frame(slot.bgra_image, slot.width, slot.height, 0u);
     }
 
-    if (cfg_.vcam_enabled && vcam_.is_open()) {
+    const bool filter_active = vcam_.is_filter_active();
+    if (cfg_.vcam_enabled && vcam_.is_open() && (!cfg_.vcam_skip_when_no_reader || filter_active)) {
         const VkImage vcam_bgra =
             (slot.has_bottom_up && slot.bottom_up_image != VK_NULL_HANDLE) ? slot.bottom_up_image : slot.bgra_image;
         (void)vcam_.publish_frame(vcam_bgra, slot.nv12_y_image, slot.nv12_uv_image, slot.width, slot.height, slot.fps,
@@ -202,6 +203,7 @@ uint64_t OutputCoordinator::process_slot(const OutputRingSlot& slot, float obser
     status_.vcam_active = vcam_.is_open();
     status_.vcam_using_ext_host_mem = vcam_.using_external_host_mem();
     status_.vcam_rgb_pin_connected = vcam_.is_rgb_pin_connected();
+    status_.vcam_filter_active = filter_active;
     status_.vcam_frames_published = vcam_.frames_published();
     status_.vcam_dma_ms = vcam_.last_dma_ms();
 

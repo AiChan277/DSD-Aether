@@ -35,4 +35,14 @@ void warp_frame_to_nchw(const CapturedFrameBuffer& src, const RoiRectNorm& roi, 
  */
 void extract_m3_subset_146x2(const float* m2_landmarks_478x3, float m2_norm_scale, float* dst_146x2) noexcept;
 
+[[nodiscard]] RoiRectNorm make_letterbox_square_roi(uint32_t src_w, uint32_t src_h) noexcept;
+[[nodiscard]] RoiRectNorm enforce_square_pixel_roi(RoiRectNorm roi, uint32_t src_w, uint32_t src_h,
+                                                   float min_size_frac = 0.12f,
+                                                   float max_size_frac = 0.95f) noexcept;
+void fill_letterbox_bands_nchw(float* dst_nchw, uint32_t dst_w, uint32_t dst_h, uint32_t src_w, uint32_t src_h,
+                               RoiNormRange range) noexcept;
+[[nodiscard]] RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept;
+void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, uint32_t dst_h,
+                                 uint8_t* dst_rgba) noexcept;
+
 } // namespace aether::tracking

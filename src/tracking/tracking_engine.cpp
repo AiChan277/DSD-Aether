@@ -105,32 +105,46 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
 
     const uint64_t t_prep_start = aether::now_us();
     bool roi_reset_this_frame = false;
+    const RoiRectNorm lb_roi = make_letterbox_square_roi(cam_frame->width, cam_frame->height);
 
     // 1. Acquire / verify face ROI (`M0_face_detector` runs ONLY on initialization or ROI loss `§8.3`)
     if (!face_roi_.valid) {
         roi_reset_this_frame = true;
-        const RoiRectNorm full_frame{0.5f, 0.5f, 1.0f, 1.0f, 0.0f, true};
-        warp_frame_to_nchw(*cam_frame, full_frame, 128, 128, RoiNormRange::NegOneToPosOne,
+        warp_frame_to_nchw(*cam_frame, lb_roi, 128, 128, RoiNormRange::NegOneToPosOne,
                            router_.buffers().m0_in.data(), false);
+        fill_letterbox_bands_nchw(router_.buffers().m0_in.data(), 128, 128, cam_frame->width, cam_frame->height,
+                                  RoiNormRange::NegOneToPosOne);
         const uint64_t t_m0_0 = aether::now_us();
         if (router_.run_m0_face_detector() == AETHER_OK) {
-            face_roi_ = decode_m0_best_face_roi(router_.buffers().m0_regressors.data(),
-                                                router_.buffers().m0_classif.data(), 0.50f);
+            RoiRectNorm m0_roi = decode_m0_best_face_roi(router_.buffers().m0_regressors.data(),
+                                                         router_.buffers().m0_classif.data(), 0.45f);
+            if (m0_roi.valid) {
+                m0_roi.cx = lb_roi.cx + (m0_roi.cx - 0.5f) * lb_roi.width;
+                m0_roi.cy = lb_roi.cy + (m0_roi.cy - 0.5f) * lb_roi.height;
+                m0_roi.width *= lb_roi.width;
+                m0_roi.height *= lb_roi.height;
+                m0_roi.rotation_rad = 0.0f;
+                face_roi_ = enforce_square_pixel_roi(m0_roi, cam_frame->width, cam_frame->height);
+            }
         }
         const uint64_t t_m0_1 = aether::now_us();
         (void)t_m0_0;
         (void)t_m0_1;
-        // If no real face in synthetic/empty pattern yet, fall back to centered nominal crop so M2/M1 keep pipeline
-        // alive cleanly
         if (!face_roi_.valid) {
-            face_roi_ = RoiRectNorm{0.5f, 0.40f, 0.45f, 0.55f, 0.0f, true};
+            face_roi_ = detect_skin_centroid_roi(*cam_frame);
+        }
+        // If no real face in synthetic/empty pattern yet, fall back to centered aspect-square nominal crop
+        if (!face_roi_.valid) {
+            face_roi_ = enforce_square_pixel_roi(RoiRectNorm{0.5f, 0.42f, 0.48f, 0.48f, 0.0f, true}, cam_frame->width,
+                                                 cam_frame->height);
         }
     }
 
-    // 2. Warp Body (256x256) and Face (256x256) NCHW crops (`<= 0.6 ms` AVX2)
-    const RoiRectNorm full_body_roi{0.5f, 0.5f, 1.0f, 1.0f, 0.0f, true};
-    warp_frame_to_nchw(*cam_frame, full_body_roi, 256, 256, RoiNormRange::ZeroToOne,
-                       router_.buffers().m1_body_in.data(), false);
+    // 2. Warp Body (256x256 letterboxed 1:1) and Face (256x256 square) NCHW crops (`<= 0.6 ms` AVX2)
+    warp_frame_to_nchw(*cam_frame, lb_roi, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m1_body_in.data(),
+                       false);
+    fill_letterbox_bands_nchw(router_.buffers().m1_body_in.data(), 256, 256, cam_frame->width, cam_frame->height,
+                              RoiNormRange::ZeroToOne);
     warp_frame_to_nchw(*cam_frame, face_roi_, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m2_face_in.data(),
                        false);
     const uint64_t t_prep_end = aether::now_us();
@@ -173,21 +187,41 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
 
     const uint64_t t_inf_end = aether::now_us();
 
-    // Update face ROI tracking state (if face lost, next frame re-triggers M0 cleanly!)
-    face_roi_ = solver_.compute_next_face_roi(router_.buffers().m2_face_lm.data(), face_roi_, face_flag);
+    // Update face ROI tracking state with 2.5% hysteresis deadband
+    const RoiRectNorm current_face_roi = face_roi_;
+    face_roi_ = solver_.compute_next_face_roi(router_.buffers().m2_face_lm.data(), current_face_roi, face_flag,
+                                              cam_frame->width, cam_frame->height);
     roi_locked_.store(face_roi_.valid, std::memory_order_release);
 
-    // 6. Solve Procrustes + Iris + Upper Body + Hands directly into AetherTrackingFrame triple buffer
+    // 6. Solve rigid skull solvePnP + EAR/MAR + Iris + Upper Body + Hands directly into triple buffer
     AetherTrackingFrame out_frame{};
     solver_.populate_tracking_frame(
-        face_roi_, router_.buffers().m2_face_lm.data(), face_flag, router_.buffers().m3_blendshapes.data(),
+        current_face_roi, router_.buffers().m2_face_lm.data(), face_flag, router_.buffers().m3_blendshapes.data(),
         router_.buffers().m1_body_world.data(), router_.buffers().m1_body_lm.data(), pose_flag, hand_rois.run_left,
         hand_rois.run_right, router_.buffers().m1_hands_lm.data(), router_.buffers().m1_hands_flag.data(),
         router_.buffers().m1_hands_handed.data(), cam_frame->capture_timestamp_us, t_inf_end, router_.active_ep(),
-        ++frame_seq_, roi_reset_this_frame, out_frame);
+        ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height);
 
     out_buffer.publish(out_frame);
     ++total_frames_;
+
+    const TrackingOverlaySnapshot& ov = solver_.overlay_snapshot();
+    neutral_calibrated_.store(ov.neutral_calibrated, std::memory_order_relaxed);
+    stable_lock_frames_.store(ov.stable_lock_frames, std::memory_order_relaxed);
+    last_head_pitch_deg_.store(ov.head_euler_deg.pitch, std::memory_order_relaxed);
+    last_head_yaw_deg_.store(ov.head_euler_deg.yaw, std::memory_order_relaxed);
+    last_head_roll_deg_.store(ov.head_euler_deg.roll, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lk(preview_mutex_);
+        preview_slot_.sequence = total_frames_;
+        preview_slot_.src_width = cam_frame->width;
+        preview_slot_.src_height = cam_frame->height;
+        preview_slot_.overlay = ov;
+        downscale_camera_to_rgba8(*cam_frame, LiveCameraPreviewFrame::kPreviewWidth,
+                                  LiveCameraPreviewFrame::kPreviewHeight, preview_slot_.rgba8.data());
+        preview_slot_.valid = true;
+    }
 
     const uint64_t prep_us = t_prep_end - t_prep_start;
     const uint64_t infer_us = t_inf_end - t_inf_start;
@@ -235,7 +269,22 @@ TrackingStatsSnapshot TrackingEngine::snapshot_stats() const {
     s.left_hand_confidence = last_lhand_conf_.load(std::memory_order_relaxed);
     s.right_hand_confidence = last_rhand_conf_.load(std::memory_order_relaxed);
     s.roi_locked = roi_locked_.load(std::memory_order_relaxed);
+    s.neutral_calibrated = neutral_calibrated_.load(std::memory_order_relaxed);
+    s.stable_lock_frames = stable_lock_frames_.load(std::memory_order_relaxed);
+    s.head_euler_deg[0] = last_head_pitch_deg_.load(std::memory_order_relaxed);
+    s.head_euler_deg[1] = last_head_yaw_deg_.load(std::memory_order_relaxed);
+    s.head_euler_deg[2] = last_head_roll_deg_.load(std::memory_order_relaxed);
     return s;
+}
+
+bool TrackingEngine::copy_live_preview(LiveCameraPreviewFrame& out_preview) const noexcept {
+    std::lock_guard<std::mutex> lk(preview_mutex_);
+    if (!preview_slot_.valid) {
+        out_preview.valid = false;
+        return false;
+    }
+    out_preview = preview_slot_;
+    return true;
 }
 
 } // namespace aether::tracking

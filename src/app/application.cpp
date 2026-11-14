@@ -783,6 +783,36 @@ bool ends_with_icase(std::string_view hay, std::string_view suffix) noexcept {
     return true;
 }
 
+bool parse_luid_hex(std::string_view hex, std::array<uint8_t, 8>& out_luid) noexcept {
+    if (hex.size() != 16U) {
+        return false;
+    }
+    auto hex_nibble = [](char ch, uint8_t& v) noexcept -> bool {
+        if (ch >= '0' && ch <= '9') {
+            v = static_cast<uint8_t>(ch - '0');
+            return true;
+        }
+        if (ch >= 'a' && ch <= 'f') {
+            v = static_cast<uint8_t>(10 + (ch - 'a'));
+            return true;
+        }
+        if (ch >= 'A' && ch <= 'F') {
+            v = static_cast<uint8_t>(10 + (ch - 'A'));
+            return true;
+        }
+        return false;
+    };
+    for (size_t i = 0; i < 8U; ++i) {
+        uint8_t hi = 0;
+        uint8_t lo = 0;
+        if (!hex_nibble(hex[i * 2U], hi) || !hex_nibble(hex[i * 2U + 1U], lo)) {
+            return false;
+        }
+        out_luid[i] = static_cast<uint8_t>((hi << 4U) | lo);
+    }
+    return true;
+}
+
 } // namespace
 
 int run_application(const AppLaunchOptions& opts) {
@@ -861,6 +891,14 @@ int run_application(const AppLaunchOptions& opts) {
     ::ShowWindow(hwnd, SW_SHOW);
     ::UpdateWindow(hwnd);
 
+    ui::AppSettings boot_settings{};
+    ui::ParamStore boot_params{};
+    if (opts.smoke_frames == 0) {
+        const std::filesystem::path cfg_dir =
+            paths.app_data_dir.empty() ? ui::default_config_dir() : std::filesystem::path(paths.app_data_dir);
+        (void)ui::load_app_settings_toml(cfg_dir / "settings.toml", boot_settings, boot_params);
+    }
+
     rhi::RhiDeviceConfig rhi_cfg{};
 #if defined(AETHER_ENABLE_VULKAN_VALIDATION) && AETHER_ENABLE_VULKAN_VALIDATION
     rhi_cfg.enable_validation = true;
@@ -874,6 +912,32 @@ int run_application(const AppLaunchOptions& opts) {
 #endif
     rhi_cfg.headless = false;
     rhi_cfg.inventory = &hw;
+    rhi_cfg.pipeline_cache_dir = std::filesystem::path(paths.cache_dir) / "vk_pipeline_cache";
+
+    std::vector<rhi::GpuAdapterDescriptor> gpu_adapters{};
+    if (auto enum_res = rhi::RhiDevice::enumerate_vulkan_devices(rhi_cfg); enum_res) {
+        gpu_adapters = std::move(enum_res.value());
+    }
+    if (opts.smoke_frames == 0) {
+        std::array<uint8_t, 8> parsed_luid{};
+        if (parse_luid_hex(boot_settings.preferred_gpu_luid, parsed_luid)) {
+            rhi_cfg.preferred_luid = parsed_luid;
+            rhi_cfg.use_preferred_luid = true;
+        } else if (!boot_settings.preferred_gpu_name.empty()) {
+            for (const auto& ad : gpu_adapters) {
+                if (ad.device_name == boot_settings.preferred_gpu_name) {
+                    if (ad.luid_valid) {
+                        rhi_cfg.preferred_luid = ad.luid;
+                        rhi_cfg.use_preferred_luid = true;
+                    } else {
+                        rhi_cfg.preferred_vendor_id = ad.vendor_id;
+                        rhi_cfg.preferred_device_id = ad.device_id;
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     auto rhi_res = rhi::RhiDevice::create(rhi_cfg);
     if (!rhi_res) {
@@ -894,16 +958,9 @@ int run_application(const AppLaunchOptions& opts) {
     init_out_cfg.premul_alpha = true;
     init_out_cfg.spout_enabled = true;
     init_out_cfg.vcam_enabled = true;
+    init_out_cfg.vcam_skip_when_no_reader = true;
     init_out_cfg.ndi_enabled = false;
     init_out_cfg.osc_enabled = true;
-
-    ui::AppSettings boot_settings{};
-    ui::ParamStore boot_params{};
-    if (opts.smoke_frames == 0) {
-        const std::filesystem::path cfg_dir =
-            paths.app_data_dir.empty() ? ui::default_config_dir() : std::filesystem::path(paths.app_data_dir);
-        (void)ui::load_app_settings_toml(cfg_dir / "settings.toml", boot_settings, boot_params);
-    }
 
     auto pipeline = std::make_unique<PipelineSkeleton>();
     PipelineConfig pipe_cfg{};
@@ -977,6 +1034,9 @@ int run_application(const AppLaunchOptions& opts) {
             shared.quit_requested.store(true, std::memory_order_release);
             render_exit_code.store(7, std::memory_order_release);
             return;
+        }
+        if (opts.smoke_frames == 0 && boot_params.get_bool(ui::ParamId::RenderVsync)) {
+            (void)swapchain.set_vsync(true);
         }
 
         ui::ImGuiArenaAllocator imgui_arena;
@@ -1096,6 +1156,57 @@ int run_application(const AppLaunchOptions& opts) {
 
         VkDescriptorSet vp_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet orb_tex_set = VK_NULL_HANDLE;
+        VkDescriptorSet preview_tex_set = VK_NULL_HANDLE;
+        rhi::RhiImage preview_img{};
+        std::array<rhi::RhiBuffer, rhi::RhiSwapchain::kFramesInFlight> preview_staging{};
+        bool preview_img_initialized = false;
+        uint64_t preview_uploaded_seq = 0ULL;
+        auto preview_cache = std::make_unique<tracking::LiveCameraPreviewFrame>();
+
+        auto create_preview_resources = [&]() {
+            preview_img_initialized = false;
+            preview_uploaded_seq = 0ULL;
+            if (vp_sampler == VK_NULL_HANDLE || rhi->device() == VK_NULL_HANDLE) {
+                return;
+            }
+            constexpr uint32_t pw = tracking::LiveCameraPreviewFrame::kPreviewWidth;
+            constexpr uint32_t ph = tracking::LiveCameraPreviewFrame::kPreviewHeight;
+            constexpr VkDeviceSize pbytes = static_cast<VkDeviceSize>(pw) * ph * 4ULL;
+            if (auto img_res = rhi->create_image_2d(pw, ph, VK_FORMAT_R8G8B8A8_UNORM,
+                                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                                    VK_IMAGE_ASPECT_COLOR_BIT, false);
+                img_res) {
+                preview_img = img_res.value();
+                preview_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, preview_img.view,
+                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            } else {
+                AETHER_LOG_WARN("renderer", "Failed to create live camera preview image: %s", img_res.error().c_str());
+            }
+            for (auto& sb : preview_staging) {
+                if (auto buf_res = rhi->create_buffer(pbytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
+                                                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                                          VMA_ALLOCATION_CREATE_MAPPED_BIT);
+                    buf_res) {
+                    sb = buf_res.value();
+                } else {
+                    AETHER_LOG_WARN("renderer", "Failed to create live preview staging buffer: %s",
+                                    buf_res.error().c_str());
+                }
+            }
+        };
+        auto destroy_preview_resources = [&](bool remove_imgui_descriptor) {
+            if (remove_imgui_descriptor && preview_tex_set != VK_NULL_HANDLE) {
+                ImGui_ImplVulkan_RemoveTexture(preview_tex_set);
+            }
+            preview_tex_set = VK_NULL_HANDLE;
+            rhi->destroy_image(preview_img);
+            for (auto& sb : preview_staging) {
+                rhi->destroy_buffer(sb);
+            }
+            preview_img_initialized = false;
+            preview_uploaded_seq = 0ULL;
+        };
+
         auto refresh_vp_descriptors = [&]() {
             rhi->wait_idle();
             if (vp_tex_set != VK_NULL_HANDLE) {
@@ -1119,6 +1230,7 @@ int run_application(const AppLaunchOptions& opts) {
             }
         };
         refresh_vp_descriptors();
+        create_preview_resources();
 
         const auto& tok = ui::tokens();
         const float clear_rgba[4] = {tok.bg_app.x, tok.bg_app.y, tok.bg_app.z, 1.0f};
@@ -1177,11 +1289,35 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.live2d_flatness = npr_renderer.lighting().global_live2d_flatness;
         vp_actions.bloom_intensity = npr_renderer.lighting().bloom_intensity;
         vp_actions.outline_scale = npr_renderer.lighting().outline_width_scale;
+        vp_actions.face_normal_flatten = npr_renderer.lighting().face_normal_flatten;
+        vp_actions.cel_band_sharpness = npr_renderer.lighting().cel_band_sharpness;
+        vp_actions.shadow_warm_cool_shift = npr_renderer.lighting().shadow_warm_cool_shift;
+        vp_actions.iro_tsuke_strength = npr_renderer.lighting().iro_tsuke_strength;
+        vp_actions.crease_strength = npr_renderer.lighting().crease_strength;
+        vp_actions.hair_highlight_intensity = npr_renderer.lighting().hair_highlight_intensity;
+        vp_actions.rim_step_strength = npr_renderer.lighting().rim_step_strength;
+        if (opts.smoke_frames == 0) {
+            vp_actions.target_fps_mode = static_cast<uint8_t>(boot_params.get_int(ui::ParamId::RenderTargetFps));
+            vp_actions.vsync_enabled = boot_params.get_bool(ui::ParamId::RenderVsync);
+            vp_actions.background_eco_mode = boot_params.get_bool(ui::ParamId::RenderBackgroundEco);
+            vp_actions.render_resolution_scale =
+                std::clamp(static_cast<float>(boot_params.get_int(ui::ParamId::RenderResolutionScalePct)) * 0.01f,
+                           0.50f, 2.00f);
+            vp_actions.aa_mode = static_cast<uint8_t>(boot_params.get_int(ui::ParamId::RenderAaMode));
+        } else {
+            vp_actions.target_fps_mode = 3U; // Uncapped during smoke tests
+        }
 
         ui::DevShellInputEcho input_echo{};
         uint64_t rendered_frames = 0;
         uint64_t last_late_latch_us = 0;
         uint64_t graph_frame_idx = 1ULL;
+        uint64_t last_out_submit_us = 0ULL;
+        uint64_t last_present_stamp_us = 0ULL;
+        uint64_t next_pace_us = 0ULL;
+        float present_fps_ema = 0.0f;
+        uint64_t vram_usage_mb_cached = 0ULL;
+        uint64_t vram_budget_mb_cached = 0ULL;
         std::array<bool, rhi::RhiSwapchain::kFramesInFlight> slot_submitted{};
         std::array<uint64_t, rhi::RhiSwapchain::kFramesInFlight> slot_last_graph_idx{};
         bool baked_face_sdf_applied = false;
@@ -1227,11 +1363,27 @@ int run_application(const AppLaunchOptions& opts) {
             }
         };
 
-        auto attempt_device_recovery = [&]() -> bool {
-            AETHER_LOG_WARN("rhi", "Attempting automatic VK_ERROR_DEVICE_LOST recovery...");
+        auto recreate_vulkan_stack = [&](bool is_device_lost, const char* toast_title, const char* toast_msg) -> bool {
+            if (!is_device_lost) {
+                pipe_cfg.use_synthetic_camera = track_hud.using_synthetic_camera;
+                pipe_cfg.camera_active = track_hud.camera_active;
+                if (track_hud.camera_fps > 0U) {
+                    pipe_cfg.camera_fps = track_hud.camera_fps;
+                }
+                if (track_hud.camera_symlink[0] != '\0') {
+                    pipe_cfg.preferred_camera_link = track_hud.camera_symlink;
+                }
+                pipe_cfg.preferred_ep = track_hud.selected_ep_override;
+                pipe_cfg.output_cfg = active_out_cfg;
+                (void)pipeline->wait_output_slots_drained(250u);
+                rhi->wait_idle();
+            } else {
+                AETHER_LOG_WARN("rhi", "Attempting automatic VK_ERROR_DEVICE_LOST recovery...");
+            }
             pipeline->stop();
             vp_tex_set = VK_NULL_HANDLE;
             orb_tex_set = VK_NULL_HANDLE;
+            destroy_preview_resources(false);
             asset_job.reset();
             dx11_bridge.release();
             current_avatar.reset();
@@ -1240,15 +1392,38 @@ int run_application(const AppLaunchOptions& opts) {
             ImGui_ImplVulkan_Shutdown();
             swapchain.destroy();
 
-            const auto rec = npr_renderer.recover_from_device_lost(*rhi, rhi_cfg, render_cfg, nullptr, paths.crash_dir);
-            if (!rec.recovered) {
-                AETHER_LOG_FATAL("rhi", "Device recovery failed: %s", rec.error_message.c_str());
-                return false;
+            double recovery_ms = 0.0;
+            if (is_device_lost) {
+                const auto rec = npr_renderer.recover_from_device_lost(*rhi, rhi_cfg, render_cfg, nullptr, paths.crash_dir);
+                if (!rec.recovered) {
+                    AETHER_LOG_FATAL("rhi", "Device recovery failed: %s", rec.error_message.c_str());
+                    return false;
+                }
+                recovery_ms = rec.recovery_ms;
+            } else {
+                const uint64_t t0_us = now_us();
+                npr_renderer.destroy();
+                if (auto dev_res = rhi->recreate_after_device_lost(rhi_cfg); !dev_res) {
+                    AETHER_LOG_ERROR("rhi", "GPU switch failed during RhiDevice recreate: %s",
+                                     dev_res.error().c_str());
+                    return false;
+                }
+                render_cfg.enable_rt = rhi->rt_supported();
+                if (auto init_res = npr_renderer.init(*rhi, render_cfg); !init_res) {
+                    AETHER_LOG_FATAL("renderer", "NprRenderer re-init after GPU switch failed: %s",
+                                     init_res.error().c_str());
+                    return false;
+                }
+                recovery_ms = static_cast<double>(now_us() - t0_us) * 0.001;
             }
+            if (auto enum_res = rhi::RhiDevice::enumerate_vulkan_devices(rhi_cfg); enum_res) {
+                gpu_adapters = std::move(enum_res.value());
+            }
+
             pipeline->set_plugin_host(plugin_host);
             pipeline->set_tracking_paused(tracking_paused);
             if (!pipeline->start(hw, pipe_cfg)) {
-                AETHER_LOG_FATAL("rhi", "Pipeline restart after device recovery failed");
+                AETHER_LOG_FATAL("rhi", "Pipeline restart after GPU recreate failed");
                 return false;
             }
             RECT cr{};
@@ -1259,22 +1434,42 @@ int run_application(const AppLaunchOptions& opts) {
                 AETHER_LOG_FATAL("rhi", "Swapchain recreate failed: %s", sw_r.error().c_str());
                 return false;
             }
+            if (vp_actions.vsync_enabled) {
+                (void)swapchain.set_vsync(true);
+            }
             init_imgui_vulkan();
             if (!create_vp_sampler()) {
                 return false;
             }
             refresh_vp_descriptors();
+            create_preview_resources();
             slot_submitted.fill(false);
             slot_last_graph_idx.fill(0ULL);
             baked_face_sdf_applied = false;
-            ++device_recovery_count;
-            std::snprintf(last_recovery_msg.data(), last_recovery_msg.size(), "Recovered in %.1f ms", rec.recovery_ms);
-            shell.workspace().push_toast(ui::ToastSeverity::Success, "GPU Device Recovered", last_recovery_msg.data(),
-                                         static_cast<double>(now_us()) * 1e-6);
+            vp_actions.lighting_dirty = true;
+            vp_actions.output_config_dirty = true;
+            requested_backend_ui = 0xFFU;
+            next_pace_us = 0ULL;
+            vram_usage_mb_cached = 0ULL;
+            vram_budget_mb_cached = 0ULL;
+            if (is_device_lost) {
+                ++device_recovery_count;
+                std::snprintf(last_recovery_msg.data(), last_recovery_msg.size(), "Recovered in %.1f ms", recovery_ms);
+            } else {
+                AETHER_LOG_INFO("rhi", "Switched Vulkan adapter to %s in %.1f ms", rhi->gpu_info().device_name.c_str(),
+                                recovery_ms);
+            }
+            shell.workspace().push_toast(
+                ui::ToastSeverity::Success, toast_title,
+                toast_msg != nullptr ? toast_msg : last_recovery_msg.data(), static_cast<double>(now_us()) * 1e-6);
             if (!last_loaded_avatar_path.empty()) {
                 asset_job.start_load(*rhi, last_loaded_avatar_path);
             }
             return true;
+        };
+
+        auto attempt_device_recovery = [&]() -> bool {
+            return recreate_vulkan_stack(true, "GPU Device Recovered", nullptr);
         };
 
         const bool wait_smoke_avatar = (opts.smoke_frames > 0 && !opts.avatar_path.empty());
@@ -1288,7 +1483,8 @@ int run_application(const AppLaunchOptions& opts) {
         }
 
         while (!shared.quit_requested.load(std::memory_order_acquire)) {
-            const double frame_now_s = static_cast<double>(now_us()) * 1e-6;
+            const uint64_t loop_begin_us = now_us();
+            const double frame_now_s = static_cast<double>(loop_begin_us) * 1e-6;
 
             // Rebuild fonts/style cleanly BETWEEN frames when DPI or UI Scale changed (`WM_DPICHANGED` / Preferences).
             if (shared.dpi_changed_pending.exchange(false, std::memory_order_acq_rel) ||
@@ -1511,6 +1707,32 @@ int run_application(const AppLaunchOptions& opts) {
                 }
                 continue;
             }
+            if (studio_actions.request_switch_gpu) {
+                studio_actions.request_switch_gpu = false;
+                if (on_air) {
+                    shell.workspace().push_toast(ui::ToastSeverity::Warning, "Blocked While ON AIR",
+                                                 "Cannot switch rendering GPU while live.", frame_now_s);
+                } else {
+                    const rhi::RhiDeviceConfig prev_rhi_cfg = rhi_cfg;
+                    rhi_cfg.preferred_luid = studio_actions.target_gpu_luid;
+                    rhi_cfg.use_preferred_luid = studio_actions.target_gpu_luid_valid;
+                    rhi_cfg.preferred_vendor_id = studio_actions.target_gpu_vendor_id;
+                    rhi_cfg.preferred_device_id = studio_actions.target_gpu_device_id;
+                    rhi_cfg.prefer_integrated = false;
+                    const char* target_label = studio_actions.target_gpu_name[0] != '\0'
+                                                   ? studio_actions.target_gpu_name.data()
+                                                   : "Selected GPU";
+                    if (!recreate_vulkan_stack(false, "Active GPU Switched", target_label)) {
+                        rhi_cfg = prev_rhi_cfg;
+                        if (!recreate_vulkan_stack(false, "GPU Switch Reverted",
+                                                   "Reverted to previous Vulkan adapter")) {
+                            render_exit_code.store(9, std::memory_order_release);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
             if (studio_actions.request_new_project) {
                 studio_actions.request_new_project = false;
                 project_path.clear();
@@ -1685,6 +1907,13 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.global_live2d_flatness = vp_actions.live2d_flatness;
                 rig.bloom_intensity = vp_actions.bloom_intensity;
                 rig.outline_width_scale = vp_actions.outline_scale;
+                rig.face_normal_flatten = vp_actions.face_normal_flatten;
+                rig.cel_band_sharpness = vp_actions.cel_band_sharpness;
+                rig.shadow_warm_cool_shift = vp_actions.shadow_warm_cool_shift;
+                rig.iro_tsuke_strength = vp_actions.iro_tsuke_strength;
+                rig.crease_strength = vp_actions.crease_strength;
+                rig.hair_highlight_intensity = vp_actions.hair_highlight_intensity;
+                rig.rim_step_strength = vp_actions.rim_step_strength;
                 vp_actions.lighting_dirty = false;
             }
             if (vp_actions.request_bake_face_sdf) {
@@ -1748,6 +1977,11 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
+            if (vp_actions.vsync_enabled != swapchain.vsync_enabled()) {
+                (void)swapchain.set_vsync(vp_actions.vsync_enabled);
+                next_pace_us = 0ULL;
+            }
+
             if (vp_actions.output_config_dirty) {
                 vp_actions.output_config_dirty = false;
                 active_out_cfg.resolution =
@@ -1765,6 +1999,7 @@ int run_application(const AppLaunchOptions& opts) {
                 active_out_cfg.spout_mode = vp_actions.spout_cpu_fallback ? output::SpoutSharingMode::CpuCompatibility
                                                                           : output::SpoutSharingMode::GpuDefault;
                 active_out_cfg.vcam_enabled = vp_actions.vcam_enabled;
+                active_out_cfg.vcam_skip_when_no_reader = true;
                 active_out_cfg.ndi_enabled = vp_actions.ndi_enabled;
                 active_out_cfg.ndi_format = (vp_actions.ndi_format == 1) ? output::NdiVideoFormat::UyvaStraight
                                                                          : output::NdiVideoFormat::BgraStraight;
@@ -1774,8 +2009,13 @@ int run_application(const AppLaunchOptions& opts) {
             }
 
             if (vp_actions.desired_vp_w >= 64U && vp_actions.desired_vp_h >= 64U) {
-                const uint32_t clamped_w = std::clamp(vp_actions.desired_vp_w, 64U, 4096U);
-                const uint32_t clamped_h = std::clamp(vp_actions.desired_vp_h, 64U, 4096U);
+                const float res_scale = std::clamp(vp_actions.render_resolution_scale, 0.50f, 2.00f);
+                const uint32_t clamped_w = std::clamp(
+                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_w) * res_scale)),
+                    64U, 4096U);
+                const uint32_t clamped_h = std::clamp(
+                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_h) * res_scale)),
+                    64U, 4096U);
                 const uint32_t target_out_w = active_out_cfg.width;
                 const uint32_t target_out_h = active_out_cfg.height;
                 const auto cur_out = npr_renderer.graph().outputs();
@@ -1846,6 +2086,38 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
+            if (preview_cache != nullptr && preview_tex_set != VK_NULL_HANDLE &&
+                preview_img.handle != VK_NULL_HANDLE) {
+                (void)pipeline->acquire_live_preview(*preview_cache);
+                const auto& sb = preview_staging[frame.frame_slot];
+                if (preview_cache->valid && preview_cache->sequence != preview_uploaded_seq &&
+                    sb.handle != VK_NULL_HANDLE && sb.info.pMappedData != nullptr) {
+                    std::memcpy(sb.info.pMappedData, preview_cache->rgba8.data(), preview_cache->rgba8.size());
+                    (void)vmaFlushAllocation(rhi->allocator(), sb.allocation, 0, preview_cache->rgba8.size());
+                    rhi::RhiDevice::cmd_transition_image(
+                        frame.cmd, preview_img.handle,
+                        preview_img_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        preview_img_initialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                                : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                        preview_img_initialized ? VK_ACCESS_2_SHADER_READ_BIT : 0ULL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                    VkBufferImageCopy reg{};
+                    reg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    reg.imageExtent = {tracking::LiveCameraPreviewFrame::kPreviewWidth,
+                                       tracking::LiveCameraPreviewFrame::kPreviewHeight, 1};
+                    vkCmdCopyBufferToImage(frame.cmd, sb.handle, preview_img.handle,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
+                    rhi::RhiDevice::cmd_transition_image(
+                        frame.cmd, preview_img.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_READ_BIT);
+                    preview_img_initialized = true;
+                    preview_uploaded_seq = preview_cache->sequence;
+                }
+            }
+
             const auto out_status = pipeline->latest_output_status();
             const SkinningSnapshot& skin_snap = pipeline->acquire_skinning_ref();
             last_late_latch_us = 0;
@@ -1910,6 +2182,16 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
+            const uint64_t out_now_us = now_us();
+            const uint32_t out_target_fps = std::clamp(active_out_cfg.fps, 1U, 60U);
+            const uint64_t out_period_us = 1000000ULL / static_cast<uint64_t>(out_target_fps);
+            const bool out_due = (last_out_submit_us == 0ULL) || ((out_now_us - last_out_submit_us) >= out_period_us);
+            const bool vcam_consumer_active =
+                active_out_cfg.vcam_enabled && (out_status.vcam_filter_active || out_status.vcam_rgb_pin_connected);
+            const bool spout_needed = active_out_cfg.spout_enabled;
+            const bool ndi_needed = active_out_cfg.ndi_enabled && out_status.ndi_runtime_available;
+            const bool any_gpu_output_needed = spout_needed || ndi_needed || vcam_consumer_active;
+
             renderer::FrameRenderRequest render_req{};
             render_req.avatar = current_avatar.get();
             render_req.rig = &npr_renderer.lighting();
@@ -1925,9 +2207,12 @@ int run_application(const AppLaunchOptions& opts) {
                 static_cast<renderer::ShadingDebugView>(std::min<uint8_t>(vp_actions.debug_view, 13));
             render_req.rt_enabled = vp_actions.rt_enabled && rhi->rt_supported();
             render_req.premul_alpha = active_out_cfg.premul_alpha;
-            render_req.need_straight_alpha =
-                (active_out_cfg.ndi_enabled && out_status.ndi_runtime_available) || !active_out_cfg.premul_alpha;
-            render_req.need_bottom_up = active_out_cfg.vcam_enabled && out_status.vcam_rgb_pin_connected;
+            render_req.need_straight_alpha = ndi_needed || !active_out_cfg.premul_alpha;
+            render_req.need_bottom_up = vcam_consumer_active && out_status.vcam_rgb_pin_connected;
+            render_req.encode_output_bgra = any_gpu_output_needed && out_due;
+            render_req.encode_output_nv12 = vcam_consumer_active && out_due;
+            render_req.throttle_rt_accel_struct = true;
+            render_req.aa_mode = vp_actions.aa_mode;
             if (active_out_cfg.non_alpha_bg == output::NonAlphaBgPreset::Black) {
                 render_req.non_alpha_bg_rgb = {0.0f, 0.0f, 0.0f};
             } else if (active_out_cfg.non_alpha_bg == output::NonAlphaBgPreset::Custom) {
@@ -2092,6 +2377,15 @@ int run_application(const AppLaunchOptions& opts) {
                 render_view.encode_gpu_ms = gp_latest.pass_ms[static_cast<size_t>(rhi::GpuPassId::OutputEncode)];
                 render_view.device_recovery_count = device_recovery_count;
                 render_view.last_recovery_msg = last_recovery_msg.data();
+                if (vram_budget_mb_cached == 0ULL || (rendered_frames % 30ULL) == 0ULL) {
+                    const rhi::VramBudgetInfo vb = rhi->query_vram_budget();
+                    vram_usage_mb_cached = vb.usage_bytes / (1024ULL * 1024ULL);
+                    vram_budget_mb_cached = vb.budget_bytes / (1024ULL * 1024ULL);
+                }
+                render_view.present_fps = present_fps_ema;
+                render_view.vram_usage_mb = vram_usage_mb_cached;
+                render_view.vram_budget_mb = vram_budget_mb_cached;
+                render_view.gpu_adapters = &gpu_adapters;
             }
 
             uint64_t t3_start = 0;
@@ -2149,6 +2443,39 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.active_ep_label = track_hud.active_ep_label;
                     tracking_view.camera_label = track_hud.camera_label;
                     tracking_view.camera_symlink = track_hud.camera_symlink;
+                    tracking_view.neutral_calibrated = track_hud.neutral_calibrated;
+                    tracking_view.stable_lock_frames = track_hud.stable_lock_frames;
+                    tracking_view.head_euler_deg = {track_hud.head_euler_deg[0], track_hud.head_euler_deg[1],
+                                                    track_hud.head_euler_deg[2]};
+                    if (track_hud.camera_active && !track_hud.using_synthetic_camera && preview_img_initialized &&
+                        preview_cache != nullptr && preview_cache->valid && preview_tex_set != VK_NULL_HANDLE) {
+                        tracking_view.live_preview_texture_id =
+                            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(preview_tex_set));
+                        tracking_view.live_preview_width = tracking::LiveCameraPreviewFrame::kPreviewWidth;
+                        tracking_view.live_preview_height = tracking::LiveCameraPreviewFrame::kPreviewHeight;
+                        tracking_view.live_preview_valid = true;
+                        const auto& ov = preview_cache->overlay;
+                        tracking_view.live_preview_face_locked = ov.face_locked;
+                        tracking_view.live_preview_face_roi = {ov.face_roi.cx, ov.face_roi.cy, ov.face_roi.width,
+                                                               ov.face_roi.height};
+                        const uint32_t kp_count = std::min<uint32_t>(ov.keypoint_count, 24U);
+                        for (uint32_t k = 0; k < kp_count; ++k) {
+                            tracking_view.live_preview_keypoints[k] = {ov.keypoints_norm[k * 2U + 0U],
+                                                                       ov.keypoints_norm[k * 2U + 1U]};
+                            tracking_view.live_preview_keypoint_valid[k] = 1U;
+                        }
+                        tracking_view.live_preview_axes_valid = ov.head_axes_valid;
+                        if (ov.head_axes_valid) {
+                            for (size_t a = 0; a < 4U; ++a) {
+                                tracking_view.live_preview_head_axes[a] = {ov.head_axes_norm[a * 2U + 0U],
+                                                                           ov.head_axes_norm[a * 2U + 1U]};
+                            }
+                        }
+                        tracking_view.neutral_calibrated = ov.neutral_calibrated;
+                        tracking_view.stable_lock_frames = ov.stable_lock_frames;
+                        tracking_view.head_euler_deg = {ov.head_euler_deg.pitch, ov.head_euler_deg.yaw,
+                                                        ov.head_euler_deg.roll};
+                    }
 
                     ui::DevShellOutputView output_view{};
                     output_view.width = active_out_cfg.width;
@@ -2224,21 +2551,27 @@ int run_application(const AppLaunchOptions& opts) {
                                                   (skin_snap.frame_sequence != 0ULL) &&
                                                   (skin_snap.t1_capture_us != 0ULL) &&
                                                   ((skin_snap.frame.tracking_valid_flags & 0x07u) != 0u);
-            if (has_avatar_ready && tl_val > 0ULL) {
+            if (has_avatar_ready && tl_val > 0ULL && (out_due || opts.smoke_frames > 0U)) {
+                last_out_submit_us = out_now_us;
                 const auto gout = npr_renderer.graph().outputs();
                 output::OutputRingSlot out_slot{};
                 out_slot.frame_sequence = skin_snap.frame_sequence;
-                out_slot.frame_timeline_value = tl_val;
+                out_slot.frame_timeline_value =
+                    (render_req.encode_output_bgra || render_req.encode_output_nv12) ? tl_val : 0ULL;
                 out_slot.output_slot = gout.output_slot;
                 out_slot.width = gout.output_width;
                 out_slot.height = gout.output_height;
                 out_slot.fps = active_out_cfg.fps;
-                out_slot.bgra_image = gout.bgra8_image;
-                out_slot.bgra_straight_image = gout.bgra8_straight_image;
-                out_slot.bottom_up_image = gout.bottom_up_bgra8_image;
-                out_slot.nv12_y_image = gout.nv12_y_image;
-                out_slot.nv12_uv_image = gout.nv12_uv_image;
-                out_slot.has_bottom_up = render_req.need_bottom_up;
+                out_slot.bgra_image = render_req.encode_output_bgra ? gout.bgra8_image : VK_NULL_HANDLE;
+                out_slot.bgra_straight_image =
+                    (render_req.encode_output_bgra && render_req.need_straight_alpha) ? gout.bgra8_straight_image
+                                                                                      : VK_NULL_HANDLE;
+                out_slot.bottom_up_image =
+                    (render_req.encode_output_bgra && render_req.need_bottom_up) ? gout.bottom_up_bgra8_image
+                                                                                 : VK_NULL_HANDLE;
+                out_slot.nv12_y_image = render_req.encode_output_nv12 ? gout.nv12_y_image : VK_NULL_HANDLE;
+                out_slot.nv12_uv_image = render_req.encode_output_nv12 ? gout.nv12_uv_image : VK_NULL_HANDLE;
+                out_slot.has_bottom_up = render_req.encode_output_bgra && render_req.need_bottom_up;
                 out_slot.tracking_active = has_valid_tracking_frame;
                 out_slot.t1_capture_us = has_valid_tracking_frame ? skin_snap.t1_capture_us : 0ULL;
                 out_slot.t2_start_us = skin_snap.t2_start_us;
@@ -2269,6 +2602,45 @@ int run_application(const AppLaunchOptions& opts) {
                 ::PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 break;
             }
+
+            if (opts.smoke_frames == 0U) {
+                uint32_t cap_fps = 60U;
+                switch (vp_actions.target_fps_mode) {
+                case 0:
+                    cap_fps = 30U;
+                    break;
+                case 1:
+                    cap_fps = 60U;
+                    break;
+                case 2:
+                    cap_fps = 120U;
+                    break;
+                default:
+                    cap_fps = 0U;
+                    break;
+                }
+                if (vp_actions.background_eco_mode && !on_air && ::GetForegroundWindow() != hwnd) {
+                    cap_fps = (cap_fps == 0U) ? 30U : std::min(cap_fps, 30U);
+                }
+                if (cap_fps > 0U) {
+                    const uint64_t period_us = 1000000ULL / static_cast<uint64_t>(cap_fps);
+                    next_pace_us = (next_pace_us == 0ULL) ? (loop_begin_us + period_us) : (next_pace_us + period_us);
+                    const uint64_t now_after = now_us();
+                    if (now_after > next_pace_us + period_us) {
+                        next_pace_us = now_after + period_us;
+                    }
+                    phase_timer.wait_until_us(next_pace_us, phase_timer.is_high_res() ? 250ULL : 1200ULL);
+                } else {
+                    next_pace_us = 0ULL;
+                }
+            }
+            const uint64_t present_done_us = now_us();
+            if (last_present_stamp_us > 0ULL && present_done_us > last_present_stamp_us) {
+                const float inst_fps = 1000000.0f / static_cast<float>(present_done_us - last_present_stamp_us);
+                present_fps_ema =
+                    (present_fps_ema <= 0.1f) ? inst_fps : (present_fps_ema * 0.90f + inst_fps * 0.10f);
+            }
+            last_present_stamp_us = present_done_us;
         }
 
         // Stop T1/T2/T4 before rhi->wait_idle() & resource destruction so T4 transfer_queue never races shutdown.
@@ -2313,6 +2685,7 @@ int run_application(const AppLaunchOptions& opts) {
         }
 
         asset_job.reset();
+        destroy_preview_resources(true);
         if (vp_tex_set != VK_NULL_HANDLE) {
             ImGui_ImplVulkan_RemoveTexture(vp_tex_set);
             vp_tex_set = VK_NULL_HANDLE;

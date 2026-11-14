@@ -57,6 +57,8 @@ class RhiSwapchain {
     [[nodiscard]] VkPresentModeKHR present_mode() const noexcept { return present_mode_; }
     [[nodiscard]] const char* present_mode_name() const noexcept;
     [[nodiscard]] uint32_t image_count() const noexcept { return static_cast<uint32_t>(images_.size()); }
+    [[nodiscard]] bool vsync_enabled() const noexcept { return vsync_enabled_; }
+    [[nodiscard]] Expected<void> set_vsync(bool enabled);
 
   private:
     struct FrameSync {
@@ -76,6 +78,7 @@ class RhiSwapchain {
     VkFormat format_{VK_FORMAT_B8G8R8A8_UNORM};
     VkColorSpaceKHR color_space_{VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     VkPresentModeKHR present_mode_{VK_PRESENT_MODE_FIFO_KHR};
+    bool vsync_enabled_{false};
     VkExtent2D extent_{};
 
     std::vector<VkImage> images_;

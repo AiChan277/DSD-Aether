@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/modals/graphics_settings_modal.hpp"
 #include "ui/palette/command_palette.hpp"
 #include "ui/panels/inspector/inspector_panel.hpp"
 #include "ui/panels/nodegraph/node_canvas.hpp"
@@ -140,6 +141,7 @@ class StudioWorkspace {
 
     CommandPalette command_palette_{};
     PreferencesModal prefs_modal_{};
+    GraphicsSettingsModal graphics_modal_{};
     ShortcutOverlayModal shortcut_overlay_{};
     HardwareOptimizerWizard wizard_{};
     ToastStack toasts_{};

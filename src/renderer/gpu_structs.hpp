@@ -117,6 +117,8 @@ struct alignas(16) GpuFrameGlobals {
     uint32_t output_storage_ids[4]{};
     float avatar_pos_scale[4]{0.0f, 0.0f, 0.0f, 1.0f};
     float avatar_rot_sincos[4]{1.0f, 0.0f, 0.0f, 1.0f};
+    float npr_style_params[4]{0.85f, 0.025f, 0.75f, 0.85f};
+    float npr_style_params2[4]{0.75f, 0.85f, 0.65f, 0.0f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

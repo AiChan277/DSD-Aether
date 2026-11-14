@@ -131,10 +131,11 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
 
     void set_active(bool active) noexcept { active_.store(active, std::memory_order_release); }
 
-    void update_format(uint32_t w, uint32_t h, CameraPixelFormat fmt) noexcept {
+    void update_format(uint32_t w, uint32_t h, CameraPixelFormat fmt, bool bottom_up = false) noexcept {
         width_ = w;
         height_ = h;
         format_ = fmt;
+        bottom_up_ = bottom_up;
     }
 
     // IUnknown
@@ -200,8 +201,13 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
                     DWORD max_len = 0;
                     DWORD cur_len = 0;
                     if (SUCCEEDED(buf->Lock(&raw, &max_len, &cur_len))) {
-                        const LONG default_pitch = static_cast<LONG>(row_bytes_for_format(format_, dst.width));
-                        copy_locked_planes(raw, raw, default_pitch, cur_len, dst);
+                        const LONG abs_pitch = static_cast<LONG>(row_bytes_for_format(format_, dst.width));
+                        if (bottom_up_ && format_ == CameraPixelFormat::BGRA32 && dst.height > 0U) {
+                            const BYTE* scan0 = raw + static_cast<size_t>(dst.height - 1U) * static_cast<size_t>(abs_pitch);
+                            copy_locked_planes(scan0, raw, -abs_pitch, cur_len, dst);
+                        } else {
+                            copy_locked_planes(raw, raw, abs_pitch, cur_len, dst);
+                        }
                         buf->Unlock();
                         copied = true;
                     }
@@ -270,6 +276,7 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
     uint32_t width_{1280};
     uint32_t height_{720};
     CameraPixelFormat format_{CameraPixelFormat::NV12};
+    bool bottom_up_{false};
     uint64_t seq_{0};
 };
 
@@ -322,7 +329,7 @@ struct NativeCameraMode {
 
 [[nodiscard]] bool negotiate_stream_format(IMFSourceReader* reader, uint32_t req_width, uint32_t req_height,
                                            uint32_t req_fps, uint32_t& out_width, uint32_t& out_height,
-                                           uint32_t& out_fps, CameraPixelFormat& out_fmt) {
+                                           uint32_t& out_fps, CameraPixelFormat& out_fmt, bool& out_bottom_up) {
     if (reader == nullptr) {
         return false;
     }
@@ -489,6 +496,12 @@ struct NativeCameraMode {
     } else {
         out_fps = req_fps;
     }
+    out_bottom_up = false;
+    UINT32 raw_stride = 0U;
+    if (SUCCEEDED(final_type->GetUINT32(MF_MT_DEFAULT_STRIDE, &raw_stride))) {
+        const auto signed_stride = static_cast<INT32>(raw_stride);
+        out_bottom_up = (signed_stride < 0);
+    }
     return true;
 }
 
@@ -614,8 +627,9 @@ class MfCameraSource final : public ICameraSource {
             uint32_t neg_h = req_height_;
             uint32_t neg_fps = req_fps_;
             CameraPixelFormat neg_fmt = CameraPixelFormat::NV12;
+            bool neg_bottom_up = false;
             if (!negotiate_stream_format(reader_.Get(), req_width_, req_height_, req_fps_, neg_w, neg_h, neg_fps,
-                                         neg_fmt)) {
+                                         neg_fmt, neg_bottom_up)) {
                 AETHER_LOG_WARN("Tracking", "Skipping camera '%s' (format negotiation failed)",
                                 dc.friendly_name.c_str());
                 close();
@@ -628,7 +642,7 @@ class MfCameraSource final : public ICameraSource {
             resolved_symlink_ = dc.symbolic_link;
             friendly_name_ = dc.friendly_name;
 
-            callback_->update_format(width_, height_, neg_fmt);
+            callback_->update_format(width_, height_, neg_fmt, neg_bottom_up);
             callback_->set_reader(reader_.Get());
             callback_->set_active(true);
 

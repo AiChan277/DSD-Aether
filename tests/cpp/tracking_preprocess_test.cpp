@@ -211,3 +211,102 @@ TEST_CASE("Procrustes weighted Kabsch head pose solver recovers exact 3D rotatio
     CHECK(std::abs(pose.position_m[1] - true_t[1]) < 0.002f);
     CHECK(std::abs(pose.position_m[2] - true_t[2]) < 0.002f);
 }
+
+TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neutral lock, and EAR/MAR work",
+          "[tracking][pnp][live2d]") {
+    constexpr uint32_t kCamW = 1280U;
+    constexpr uint32_t kCamH = 720U;
+    const RoiRectNorm roi = enforce_square_pixel_roi({0.5f, 0.45f, 0.35f, 0.35f, 0.0f, true}, kCamW, kCamH);
+
+    auto project_canonical_into_m2 = [&](const RoiRectNorm& crop_roi, float yaw, float pitch, float roll,
+                                         const float t[3], float out_lm[478 * 3]) {
+        const float fx = static_cast<float>(kCamW);
+        const float fy = static_cast<float>(kCamW);
+        const float cx = 0.5f * static_cast<float>(kCamW);
+        const float cy = 0.5f * static_cast<float>(kCamH);
+        for (uint32_t i = 0; i < kCanonicalFaceVertexCount; ++i) {
+            float rot[3]{};
+            rotate_point_euler(yaw, pitch, roll, kCanonicalFaceVerticesM[i], rot);
+            const float px = rot[0] + t[0];
+            const float py = rot[1] + t[1];
+            const float pz = rot[2] + t[2];
+            const float d = std::max(-pz, 0.05f);
+            const float u_cam = cx + fx * (px / d);
+            const float v_cam = cy - fy * (py / d);
+            const float u_m2 = (((u_cam / static_cast<float>(kCamW)) - crop_roi.cx) / crop_roi.width + 0.5f) * 256.0f;
+            const float v_m2 = (((v_cam / static_cast<float>(kCamH)) - crop_roi.cy) / crop_roi.height + 0.5f) * 256.0f;
+            out_lm[i * 3 + 0] = u_m2;
+            out_lm[i * 3 + 1] = v_m2;
+            out_lm[i * 3 + 2] = 0.0f; // intentionally zero M2 pseudo-Z to prove PnP ignores it!
+        }
+        // Place iris centers (468, 473) midway between eye corners
+        out_lm[468 * 3 + 0] = 0.5f * (out_lm[33 * 3 + 0] + out_lm[133 * 3 + 0]);
+        out_lm[468 * 3 + 1] = 0.5f * (out_lm[159 * 3 + 1] + out_lm[145 * 3 + 1]);
+        out_lm[473 * 3 + 0] = 0.5f * (out_lm[263 * 3 + 0] + out_lm[362 * 3 + 0]);
+        out_lm[473 * 3 + 1] = 0.5f * (out_lm[386 * 3 + 1] + out_lm[374 * 3 + 1]);
+    };
+
+    std::array<float, 478 * 3> lm{};
+    const float t_tilted[3]{0.02f, -0.04f, -0.58f};
+    const float base_yaw = 0.14f;
+    const float base_pitch = -0.30f; // e.g., laptop webcam tilted upward from below
+    const float base_roll = -0.06f;
+    project_canonical_into_m2(roi, base_yaw, base_pitch, base_roll, t_tilted, lm.data());
+
+    const HeadPose6D pnp = solve_pnp_head_pose(lm.data(), roi, kCamW, kCamH);
+    REQUIRE(pnp.valid);
+    CHECK(pnp.reproj_rms_px < 1.5f);
+
+    // Check recovered 3D basis vector against true euler rotation
+    const float basis_z[3]{0.0f, 0.0f, 1.0f};
+    float exp_z[3]{};
+    rotate_point_euler(base_yaw, base_pitch, base_roll, basis_z, exp_z);
+    const float qx = pnp.rotation_xyzw[0], qy = pnp.rotation_xyzw[1], qz = pnp.rotation_xyzw[2],
+                qw = pnp.rotation_xyzw[3];
+    const float got_z[3]{
+        2.0f * (qx * qz + qy * qw),
+        2.0f * (qy * qz - qx * qw),
+        1.0f - 2.0f * (qx * qx + qy * qy),
+    };
+    const float dot_z = std::clamp(exp_z[0] * got_z[0] + exp_z[1] * got_z[1] + exp_z[2] * got_z[2], -1.0f, 1.0f);
+    CHECK(std::acos(dot_z) * (180.0f / 3.14159265f) < 0.5f);
+
+    // 2.5% ROI hysteresis deadband freezes ROI on small jitter
+    LandmarkPoseSolver solver;
+    solver.reset();
+    const RoiRectNorm roi0 = solver.compute_next_face_roi(lm.data(), roi, 0.95f, kCamW, kCamH);
+    REQUIRE(roi0.valid);
+    project_canonical_into_m2(roi0, base_yaw, base_pitch, base_roll, t_tilted, lm.data());
+    for (uint32_t i = 0; i < 468U; ++i) {
+        lm[i * 3 + 0] += 0.35f; // tiny pixel micro-swim < 2.5%
+        lm[i * 3 + 1] -= 0.25f;
+    }
+    const RoiRectNorm roi1 = solver.compute_next_face_roi(lm.data(), roi0, 0.95f, kCamW, kCamH);
+    CHECK(roi1.cx == roi0.cx);
+    CHECK(roi1.cy == roi0.cy);
+    CHECK(roi1.width == roi0.width);
+
+    // Auto-neutral lock after 15 consecutive stable frames zeroes out initial camera tilt
+    project_canonical_into_m2(roi, base_yaw, base_pitch, base_roll, t_tilted, lm.data());
+    AetherTrackingFrame tf{};
+    for (uint32_t f = 0; f < 16U; ++f) {
+        solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, (f + 1ULL) * 33333ULL, (f + 1ULL) * 33333ULL + 2000ULL,
+                                       EpTier::NpuOpenVino, f + 1U, f == 0U, tf, kCamW, kCamH);
+    }
+    CHECK(solver.neutral_calibrated());
+    CHECK(std::abs(solver.last_head_euler_deg().pitch) < 0.25f);
+    CHECK(std::abs(solver.last_head_euler_deg().yaw) < 0.25f);
+    CHECK(std::abs(solver.last_head_euler_deg().roll) < 0.25f);
+
+    // Apply EAR close & MAR open and verify geometric blendshapes drive blink + jawOpen cleanly
+    lm[160 * 3 + 1] = lm[144 * 3 + 1];
+    lm[158 * 3 + 1] = lm[153 * 3 + 1];
+    lm[13 * 3 + 1] -= 4.0f;
+    lm[14 * 3 + 1] += 18.0f;
+    solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                   nullptr, nullptr, 600000ULL, 602000ULL, EpTier::NpuOpenVino, 17U, false, tf,
+                                   kCamW, kCamH);
+    CHECK(tf.arkit_blendshapes[0] > 0.65f);  // eyeBlinkLeft
+    CHECK(tf.arkit_blendshapes[17] > 0.40f); // jawOpen
+}

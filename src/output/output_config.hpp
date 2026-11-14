@@ -80,6 +80,7 @@ struct OutputConfig {
     char spout_sender_name[64]{"Aether2.5D"};
 
     bool vcam_enabled{true};
+    bool vcam_skip_when_no_reader{false};
     bool ndi_enabled{false};
     NdiVideoFormat ndi_format{NdiVideoFormat::BgraStraight};
     bool ndi_clock_video{false};
@@ -102,6 +103,7 @@ struct OutputRuntimeStatus {
     bool vcam_active{false};
     bool vcam_using_ext_host_mem{false};
     bool vcam_rgb_pin_connected{false};
+    bool vcam_filter_active{false};
     uint64_t vcam_frames_published{0};
     double vcam_dma_ms{0.0};
 

@@ -190,6 +190,13 @@ struct StudioActions {
     int32_t reset_native_slot{-1};
 
     bool request_force_device_lost{false};
+    bool request_switch_gpu{false};
+    uint32_t target_gpu_vendor_id{0};
+    uint32_t target_gpu_device_id{0};
+    std::array<uint8_t, 8> target_gpu_luid{};
+    bool target_gpu_luid_valid{false};
+    std::array<char, 128> target_gpu_name{};
+    bool request_open_graphics_settings{false};
     bool request_reapply_theme_or_dpi{false};
     bool request_wizard_apply{false};
     int32_t wizard_ep_override{-1};

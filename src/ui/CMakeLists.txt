@@ -1,6 +1,8 @@
 add_library(aether_ui STATIC
     dev_shell.cpp
     dev_shell.hpp
+    modals/graphics_settings_modal.cpp
+    modals/graphics_settings_modal.hpp
     palette/command_palette.cpp
     palette/command_palette.hpp
     panels/inspector/inspector_panel.cpp

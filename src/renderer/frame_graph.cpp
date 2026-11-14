@@ -2,6 +2,7 @@
 
 #include "animation/spring_bone.hpp"
 
+#include "core/clock.hpp"
 #include "core/log.hpp"
 #include "generated/phase4_shaders_spv.hpp"
 #include "renderer/sdf_generator.hpp"
@@ -414,6 +415,9 @@ void FrameGraph::destroy() noexcept {
     avatar_face_sdf_slot_ = UINT32_MAX;
     bound_avatar_ = nullptr;
     have_prev_view_proj_ = false;
+    last_rt_avatar_ = nullptr;
+    last_rt_pose_hash_ = 0;
+    last_rt_as_update_us_ = 0;
 
     denoiser_.destroy();
     accel_.destroy();
@@ -1621,13 +1625,21 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         fg.bg_color_premul[c] = rig.bg_rgba[c] * rig.bg_rgba[3];
     }
     fg.bg_color_premul[3] = rig.bg_rgba[3];
+    fg.npr_style_params[0] = std::clamp(rig.face_normal_flatten, 0.0f, 1.0f);
+    fg.npr_style_params[1] = std::clamp(rig.cel_band_sharpness, 0.008f, 0.35f);
+    fg.npr_style_params[2] = std::clamp(rig.shadow_warm_cool_shift, 0.0f, 1.0f);
+    fg.npr_style_params[3] = std::clamp(rig.iro_tsuke_strength, 0.0f, 1.0f);
+    fg.npr_style_params2[0] = std::clamp(rig.crease_strength, 0.0f, 1.0f);
+    fg.npr_style_params2[1] = std::clamp(rig.hair_highlight_intensity, 0.0f, 2.0f);
+    fg.npr_style_params2[2] = std::clamp(rig.rim_step_strength, 0.0f, 2.0f);
+    fg.npr_style_params2[3] = 0.0f;
 
     const bool use_rt =
         req.rt_enabled && device_->rt_supported() && accel_.is_ready() && pso_ray_effects_ != VK_NULL_HANDLE;
     fg.state_u32[0] = static_cast<uint32_t>(req.frame_index & 0xFFFFFFFFull);
     fg.state_u32[1] = std::min<uint32_t>(rig.active_count, LightingRig::kMaxLights);
     fg.state_u32[2] = static_cast<uint32_t>(req.debug_view);
-    fg.state_u32[3] = use_rt ? 1u : 0u;
+    fg.state_u32[3] = (use_rt ? 1u : 0u) | ((static_cast<uint32_t>(req.aa_mode) & 3u) << 8u);
 
     for (uint32_t li = 0; li < LightingRig::kMaxLights; ++li) {
         const auto& sl = rig.lights[li];
@@ -1777,8 +1789,48 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
 
         // === PASS 2: BLAS refit (or 300-frame rebuild) + TLAS rebuild ===
         if (use_rt) {
-            accel_.record_update(cmd, *req.avatar, skinned_vertices_buf_.device_address, req.frame_slot,
-                                 req.frame_index, bindless_, false);
+            bool run_as_update = true;
+            if (req.throttle_rt_accel_struct) {
+                uint64_t pose_hash = 14695981039346656037ULL;
+                auto hash_u32 = [&](uint32_t v) noexcept {
+                    pose_hash ^= static_cast<uint64_t>(v);
+                    pose_hash *= 1099511628211ULL;
+                };
+                auto hash_f32 = [&](float f) noexcept {
+                    uint32_t bits = 0;
+                    std::memcpy(&bits, &f, sizeof(bits));
+                    hash_u32(bits);
+                };
+                hash_u32(req.avatar->requirements.vertex_count);
+                hash_f32(req.avatar_pos[0]);
+                hash_f32(req.avatar_pos[1]);
+                hash_f32(req.avatar_pos[2]);
+                hash_f32(req.avatar_rot_y_deg);
+                hash_f32(req.avatar_scale);
+                if (req.bone_matrices != nullptr && req.bone_count > 0u) {
+                    const uint32_t b_cnt = std::min<uint32_t>(req.bone_count, req.avatar->requirements.joint_count);
+                    for (uint32_t bi = 0; bi < b_cnt; ++bi) {
+                        for (uint32_t k = 0; k < 12u; ++k) {
+                            hash_f32(req.bone_matrices[bi][k]);
+                        }
+                    }
+                }
+                const uint64_t t_now_us = now_us();
+                const bool must_build =
+                    (!accel_.is_ready() || req.avatar != last_rt_avatar_ || last_rt_as_update_us_ == 0ULL);
+                const bool pose_changed_at_60hz =
+                    (pose_hash != last_rt_pose_hash_) && ((t_now_us - last_rt_as_update_us_) >= 16667ULL);
+                run_as_update = must_build || pose_changed_at_60hz;
+                if (run_as_update) {
+                    last_rt_avatar_ = req.avatar;
+                    last_rt_pose_hash_ = pose_hash;
+                    last_rt_as_update_us_ = t_now_us;
+                }
+            }
+            if (run_as_update) {
+                accel_.record_update(cmd, *req.avatar, skinned_vertices_buf_.device_address, req.frame_slot,
+                                     req.frame_index, bindless_, false);
+            }
         }
 
         // === PASS 3: G-Buffer + D32_S8 Depth/Stencil Prepass ===
@@ -2256,32 +2308,36 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         }
     };
 
-    encode_bgra_target(os.bgra8, !req.premul_alpha, false);
-    if (req.need_straight_alpha) {
-        encode_bgra_target(os.bgra8_straight, true, false);
-    }
-    if (req.need_bottom_up) {
-        encode_bgra_target(os.bottom_up_bgra8, !req.premul_alpha, true);
+    if (req.encode_output_bgra) {
+        encode_bgra_target(os.bgra8, !req.premul_alpha, false);
+        if (req.need_straight_alpha) {
+            encode_bgra_target(os.bgra8_straight, true, false);
+        }
+        if (req.need_bottom_up) {
+            encode_bgra_target(os.bottom_up_bgra8, !req.premul_alpha, true);
+        }
     }
 
-    trans(os.nv12_y, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
-          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
-    trans(os.nv12_uv, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
-          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
-    {
-        GpuPushConstants pc{};
-        pc.frame_globals_bda = fg_alloc.device_address;
-        pc.param0 = out_rgba16f_.sampled_slot;
-        pc.param1 = os.nv12_y.storage_slot;
-        pc.param2 = w;
-        pc.param3 = h;
-        pc.fparam0 = srgb_to_linear_ch(req.non_alpha_bg_rgb[0]);
-        pc.fparam1 = srgb_to_linear_ch(req.non_alpha_bg_rgb[1]);
-        pc.fparam2 = srgb_to_linear_ch(req.non_alpha_bg_rgb[2]);
-        bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pso_encode_nv12_, "encode_nv12");
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
-        vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, gx, gy, 1);
+    if (req.encode_output_nv12) {
+        trans(os.nv12_y, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+        trans(os.nv12_uv, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+        {
+            GpuPushConstants pc{};
+            pc.frame_globals_bda = fg_alloc.device_address;
+            pc.param0 = out_rgba16f_.sampled_slot;
+            pc.param1 = os.nv12_y.storage_slot;
+            pc.param2 = w;
+            pc.param3 = h;
+            pc.fparam0 = srgb_to_linear_ch(req.non_alpha_bg_rgb[0]);
+            pc.fparam1 = srgb_to_linear_ch(req.non_alpha_bg_rgb[1]);
+            pc.fparam2 = srgb_to_linear_ch(req.non_alpha_bg_rgb[2]);
+            bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pso_encode_nv12_, "encode_nv12");
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
+            vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, gx, gy, 1);
+        }
     }
 
     cmd_buffer_barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT,

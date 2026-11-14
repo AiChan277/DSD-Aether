@@ -17,8 +17,8 @@ struct PreviewCamera {
     float target_z{0.0f};
     float yaw_rad{0.35f};
     float pitch_rad{0.10f};
-    float distance{2.1f};
-    float fovy_rad{0.62f};
+    float distance{4.70f};
+    float fovy_rad{0.2805f}; // ~85mm portrait telephoto FOV (minimizes 3D perspective distortion)
 };
 
 struct PreviewRenderOptions {

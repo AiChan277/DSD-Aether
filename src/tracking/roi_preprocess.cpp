@@ -383,4 +383,190 @@ void extract_m3_subset_146x2(const float* m2_landmarks_478x3, float m2_norm_scal
     }
 }
 
+RoiRectNorm make_letterbox_square_roi(uint32_t src_w, uint32_t src_h) noexcept {
+    const float w = static_cast<float>(src_w > 0U ? src_w : 1U);
+    const float h = static_cast<float>(src_h > 0U ? src_h : 1U);
+    const float aspect = w / h;
+    if (aspect >= 1.0f) {
+        return {0.5f, 0.5f, 1.0f, aspect, 0.0f, true};
+    }
+    return {0.5f, 0.5f, 1.0f / aspect, 1.0f, 0.0f, true};
+}
+
+RoiRectNorm enforce_square_pixel_roi(RoiRectNorm roi, uint32_t src_w, uint32_t src_h, float min_size_frac,
+                                     float max_size_frac) noexcept {
+    if (!roi.valid || src_w == 0U || src_h == 0U) {
+        return roi;
+    }
+    const float w_f = static_cast<float>(src_w);
+    const float h_f = static_cast<float>(src_h);
+    const float px_w = roi.width * w_f;
+    const float px_h = roi.height * h_f;
+    const float min_dim = std::min(w_f, h_f);
+    const float min_px = min_dim * min_size_frac;
+    const float max_px = min_dim * max_size_frac;
+    const float side_px = std::clamp(std::max(px_w, px_h), min_px, std::max(min_px, max_px));
+    roi.width = side_px / w_f;
+    roi.height = side_px / h_f;
+    roi.cx = std::clamp(roi.cx, 0.10f, 0.90f);
+    roi.cy = std::clamp(roi.cy, 0.10f, 0.90f);
+    return roi;
+}
+
+void fill_letterbox_bands_nchw(float* dst_nchw, uint32_t dst_w, uint32_t dst_h, uint32_t src_w, uint32_t src_h,
+                               RoiNormRange range) noexcept {
+    if (dst_nchw == nullptr || dst_w == 0U || dst_h == 0U || src_w == 0U || src_h == 0U) {
+        return;
+    }
+    const float pad_val = (range == RoiNormRange::NegOneToPosOne) ? -1.0f : 0.0f;
+    const float aspect = static_cast<float>(src_w) / static_cast<float>(src_h);
+    const size_t plane = static_cast<size_t>(dst_w) * dst_h;
+    if (aspect > 1.01f) {
+        const uint32_t valid_h = std::max(1U, static_cast<uint32_t>(std::lround(static_cast<float>(dst_h) / aspect)));
+        const uint32_t top = (dst_h - std::min(dst_h, valid_h)) / 2U;
+        const uint32_t bot = std::min(dst_h, top + valid_h);
+        for (uint32_t c = 0; c < 3U; ++c) {
+            float* ch = dst_nchw + static_cast<size_t>(c) * plane;
+            std::fill_n(ch, static_cast<size_t>(top) * dst_w, pad_val);
+            if (bot < dst_h) {
+                std::fill_n(ch + static_cast<size_t>(bot) * dst_w, static_cast<size_t>(dst_h - bot) * dst_w, pad_val);
+            }
+        }
+    } else if (aspect < 0.99f) {
+        const uint32_t valid_w = std::max(1U, static_cast<uint32_t>(std::lround(static_cast<float>(dst_w) * aspect)));
+        const uint32_t left = (dst_w - std::min(dst_w, valid_w)) / 2U;
+        const uint32_t right = std::min(dst_w, left + valid_w);
+        for (uint32_t c = 0; c < 3U; ++c) {
+            float* ch = dst_nchw + static_cast<size_t>(c) * plane;
+            for (uint32_t y = 0; y < dst_h; ++y) {
+                float* row = ch + static_cast<size_t>(y) * dst_w;
+                std::fill_n(row, left, pad_val);
+                if (right < dst_w) {
+                    std::fill_n(row + right, dst_w - right, pad_val);
+                }
+            }
+        }
+    }
+}
+
+RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
+    if (src.width < 32U || src.height < 32U) {
+        return {};
+    }
+    constexpr uint32_t kStep = 8U;
+    double sum_x = 0.0;
+    double sum_y = 0.0;
+    double sum_x2 = 0.0;
+    double sum_y2 = 0.0;
+    uint32_t count = 0U;
+
+    const uint8_t* px = src.bytes.data();
+    for (uint32_t y = src.height / 12U; y < (src.height * 11U) / 12U; y += kStep) {
+        for (uint32_t x = src.width / 10U; x < (src.width * 9U) / 10U; x += kStep) {
+            uint8_t yv = 0;
+            uint8_t cb = 128;
+            uint8_t cr = 128;
+            if (src.format == CameraPixelFormat::NV12) {
+                const uint8_t* y_plane = px;
+                const uint8_t* uv_plane = px + static_cast<size_t>(src.stride_y) * src.height;
+                yv = y_plane[static_cast<size_t>(y) * src.stride_y + x];
+                const size_t uv_off =
+                    static_cast<size_t>(y >> 1U) * src.stride_uv + static_cast<size_t>(x & ~1U);
+                cb = uv_plane[uv_off + 0U];
+                cr = uv_plane[uv_off + 1U];
+            } else if (src.format == CameraPixelFormat::YUY2) {
+                const size_t pair_off = static_cast<size_t>(y) * src.stride_y + static_cast<size_t>(x & ~1U) * 2U;
+                yv = px[pair_off + ((x & 1U) != 0U ? 2U : 0U)];
+                cb = px[pair_off + 1U];
+                cr = px[pair_off + 3U];
+            } else {
+                const size_t off = static_cast<size_t>(y) * src.stride_y + static_cast<size_t>(x) * 4U;
+                const float b = static_cast<float>(px[off + 0U]);
+                const float g = static_cast<float>(px[off + 1U]);
+                const float r = static_cast<float>(px[off + 2U]);
+                yv = static_cast<uint8_t>(std::clamp(0.299f * r + 0.587f * g + 0.114f * b, 0.0f, 255.0f));
+                cb = static_cast<uint8_t>(std::clamp(128.0f - 0.168736f * r - 0.331264f * g + 0.5f * b, 0.0f, 255.0f));
+                cr = static_cast<uint8_t>(std::clamp(128.0f + 0.5f * r - 0.418688f * g - 0.081312f * b, 0.0f, 255.0f));
+            }
+            if (yv >= 50U && yv <= 240U && cb >= 77U && cb <= 127U && cr >= 133U && cr <= 173U) {
+                const float nx = static_cast<float>(x) / static_cast<float>(src.width);
+                const float ny = static_cast<float>(y) / static_cast<float>(src.height);
+                sum_x += nx;
+                sum_y += ny;
+                sum_x2 += static_cast<double>(nx) * nx;
+                sum_y2 += static_cast<double>(ny) * ny;
+                ++count;
+            }
+        }
+    }
+
+    if (count < 16U) {
+        return {};
+    }
+    const float mean_x = static_cast<float>(sum_x / count);
+    const float mean_y = static_cast<float>(sum_y / count);
+    const float var_x = std::max(0.0f, static_cast<float>(sum_x2 / count) - mean_x * mean_x);
+    const float var_y = std::max(0.0f, static_cast<float>(sum_y2 / count) - mean_y * mean_y);
+    const float span = std::max(std::sqrt(var_x) * 3.8f, std::sqrt(var_y) * 3.8f);
+    RoiRectNorm roi{};
+    roi.cx = mean_x;
+    roi.cy = mean_y;
+    roi.width = std::clamp(span, 0.22f, 0.72f);
+    roi.height = roi.width;
+    roi.rotation_rad = 0.0f;
+    roi.valid = true;
+    return enforce_square_pixel_roi(roi, src.width, src.height, 0.22f, 0.85f);
+}
+
+void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, uint32_t dst_h,
+                                 uint8_t* dst_rgba) noexcept {
+    if (dst_rgba == nullptr || src.width == 0U || src.height == 0U || dst_w == 0U || dst_h == 0U) {
+        return;
+    }
+    const uint8_t* px = src.bytes.data();
+    const uint32_t max_uv_y = std::max(1U, src.height >> 1U) - 1U;
+    for (uint32_t dy = 0; dy < dst_h; ++dy) {
+        const uint32_t sy = std::min(src.height - 1U, (dy * src.height + (dst_h >> 1U)) / dst_h);
+        for (uint32_t dx = 0; dx < dst_w; ++dx) {
+            const uint32_t sx = std::min(src.width - 1U, (dx * src.width + (dst_w >> 1U)) / dst_w);
+            uint8_t r = 0;
+            uint8_t g = 0;
+            uint8_t b = 0;
+            if (src.format == CameraPixelFormat::NV12) {
+                const uint8_t* y_plane = px;
+                const uint8_t* uv_plane = px + static_cast<size_t>(src.stride_y) * src.height;
+                const float luma = static_cast<float>(y_plane[static_cast<size_t>(sy) * src.stride_y + sx]);
+                const uint32_t uvy = std::min(sy >> 1U, max_uv_y);
+                const size_t uv_off =
+                    static_cast<size_t>(uvy) * src.stride_uv + static_cast<size_t>(sx & ~1U);
+                const float u = static_cast<float>(uv_plane[uv_off + 0U]) - 128.0f;
+                const float v = static_cast<float>(uv_plane[uv_off + 1U]) - 128.0f;
+                const float c = std::max(luma - 16.0f, 0.0f) * 1.1643835f;
+                r = static_cast<uint8_t>(std::clamp(c + 1.5960268f * v, 0.0f, 255.0f));
+                g = static_cast<uint8_t>(std::clamp(c - 0.3917623f * u - 0.8129676f * v, 0.0f, 255.0f));
+                b = static_cast<uint8_t>(std::clamp(c + 2.0172321f * u, 0.0f, 255.0f));
+            } else if (src.format == CameraPixelFormat::YUY2) {
+                const size_t pair_off = static_cast<size_t>(sy) * src.stride_y + static_cast<size_t>(sx & ~1U) * 2U;
+                const float luma = static_cast<float>(px[pair_off + ((sx & 1U) != 0U ? 2U : 0U)]);
+                const float u = static_cast<float>(px[pair_off + 1U]) - 128.0f;
+                const float v = static_cast<float>(px[pair_off + 3U]) - 128.0f;
+                const float c = std::max(luma - 16.0f, 0.0f) * 1.1643835f;
+                r = static_cast<uint8_t>(std::clamp(c + 1.5960268f * v, 0.0f, 255.0f));
+                g = static_cast<uint8_t>(std::clamp(c - 0.3917623f * u - 0.8129676f * v, 0.0f, 255.0f));
+                b = static_cast<uint8_t>(std::clamp(c + 2.0172321f * u, 0.0f, 255.0f));
+            } else {
+                const size_t off = static_cast<size_t>(sy) * src.stride_y + static_cast<size_t>(sx) * 4U;
+                b = px[off + 0U];
+                g = px[off + 1U];
+                r = px[off + 2U];
+            }
+            const size_t d_off = (static_cast<size_t>(dy) * dst_w + dx) * 4U;
+            dst_rgba[d_off + 0U] = r;
+            dst_rgba[d_off + 1U] = g;
+            dst_rgba[d_off + 2U] = b;
+            dst_rgba[d_off + 3U] = 255U;
+        }
+    }
+}
+
 } // namespace aether::tracking

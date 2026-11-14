@@ -1,5 +1,6 @@
 #include "ui/panels/inspector/inspector_panel.hpp"
 
+#include "ui/modals/graphics_settings_modal.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/theme/tr.hpp"
@@ -132,6 +133,16 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             (selection.kind == SelectionKind::LightKey || selection.kind == SelectionKind::LightFill ||
              selection.kind == SelectionKind::LightRim || selection.kind == SelectionKind::Avatar);
         if (section_header(tr("Lighting & NPR"), expand_render, false)) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(t.text_secondary, "%s", tr("Active GPU"));
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x));
+            GraphicsSettingsModal::draw_gpu_selector_combo("##InspGpuCombo", on_air, rhi, render_view, settings, actions,
+                                                           settings_dirty);
+            if (ImGui::Button(tr("Graphics Settings..."), ImVec2(full_w, 0.0f))) {
+                actions.request_open_graphics_settings = true;
+            }
+            ImGui::Spacing();
             if (begin_property_table("##lighting")) {
                 if (draw_property_row(ParamId::RenderBackend, params, undo, fonts, row_actions, false, on_air)) {
                     actions.viewport.render_backend = static_cast<uint8_t>(params.get_int(ParamId::RenderBackend));
@@ -163,6 +174,24 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 }
                 if (draw_property_row(ParamId::RenderDebugView, params, undo, fonts, row_actions)) {
                     actions.viewport.debug_view = static_cast<uint8_t>(params.get_int(ParamId::RenderDebugView));
+                }
+                static constexpr ParamId kLive2dExtraRows[] = {
+                    ParamId::RenderTargetFps,
+                    ParamId::RenderAaMode,
+                    ParamId::RenderFaceNormalFlatten,
+                    ParamId::RenderCelBandSharpness,
+                    ParamId::RenderShadowWarmCool,
+                    ParamId::RenderIroTsukeStrength,
+                    ParamId::RenderCreaseStrength,
+                    ParamId::RenderHairHighlight,
+                    ParamId::RenderRimStepStrength,
+                };
+                bool style_changed = false;
+                for (const ParamId pid : kLive2dExtraRows) {
+                    style_changed |= draw_property_row(pid, params, undo, fonts, row_actions);
+                }
+                if (style_changed) {
+                    actions.viewport.lighting_dirty = true;
                 }
                 end_property_table();
             }

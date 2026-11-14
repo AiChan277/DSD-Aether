@@ -7,12 +7,26 @@
 #include "tracking/landmark_solver.hpp"
 #include "tracking/ort_router.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace aether::tracking {
+
+struct LiveCameraPreviewFrame {
+    static constexpr uint32_t kPreviewWidth = 160U;
+    static constexpr uint32_t kPreviewHeight = 90U;
+
+    uint64_t sequence{0};
+    uint32_t src_width{0};
+    uint32_t src_height{0};
+    bool valid{false};
+    TrackingOverlaySnapshot overlay{};
+    std::array<uint8_t, kPreviewWidth * kPreviewHeight * 4U> rgba8{};
+};
 
 struct TrackingStatsSnapshot {
     uint64_t frames_processed{0};
@@ -35,6 +49,9 @@ struct TrackingStatsSnapshot {
     float left_hand_confidence{0.0f};
     float right_hand_confidence{0.0f};
     bool roi_locked{false};
+    bool neutral_calibrated{false};
+    uint32_t stable_lock_frames{0};
+    float head_euler_deg[3]{0.0f, 0.0f, 0.0f};
 };
 
 /**
@@ -63,6 +80,7 @@ class TrackingEngine {
     [[nodiscard]] AetherStatus switch_camera_source(std::unique_ptr<ICameraSource> next_source) noexcept;
 
     [[nodiscard]] TrackingStatsSnapshot snapshot_stats() const;
+    [[nodiscard]] bool copy_live_preview(LiveCameraPreviewFrame& out_preview) const noexcept;
     [[nodiscard]] AetherTrackingRouter& router() noexcept { return router_; }
     [[nodiscard]] bool initialized() const noexcept { return initialized_; }
 
@@ -86,6 +104,13 @@ class TrackingEngine {
     std::atomic<float> last_lhand_conf_{0.0f};
     std::atomic<float> last_rhand_conf_{0.0f};
     std::atomic<bool> roi_locked_{false};
+    std::atomic<bool> neutral_calibrated_{false};
+    std::atomic<uint32_t> stable_lock_frames_{0};
+    std::atomic<float> last_head_pitch_deg_{0.0f};
+    std::atomic<float> last_head_yaw_deg_{0.0f};
+    std::atomic<float> last_head_roll_deg_{0.0f};
+    mutable std::mutex preview_mutex_{};
+    LiveCameraPreviewFrame preview_slot_{};
     bool initialized_{false};
 };
 

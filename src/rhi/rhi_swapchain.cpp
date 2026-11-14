@@ -13,7 +13,10 @@ namespace aether::rhi {
 
 namespace {
 
-VkPresentModeKHR choose_present_mode(const std::vector<VkPresentModeKHR>& modes) noexcept {
+VkPresentModeKHR choose_present_mode(const std::vector<VkPresentModeKHR>& modes, bool vsync_enabled) noexcept {
+    if (vsync_enabled) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
     // REQ-CORE-014 priority: MAILBOX -> IMMEDIATE -> FIFO.
     for (const auto m : modes) {
         if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
@@ -185,7 +188,7 @@ Expected<void> RhiSwapchain::recreate_swapchain_only(uint32_t width, uint32_t he
     const VkSurfaceFormatKHR chosen_fmt = choose_surface_format(formats);
     format_ = chosen_fmt.format;
     color_space_ = chosen_fmt.colorSpace;
-    present_mode_ = choose_present_mode(modes);
+    present_mode_ = choose_present_mode(modes, vsync_enabled_);
 
 #if defined(_WIN32)
     if (hwnd_ != nullptr) {
@@ -277,6 +280,17 @@ Expected<void> RhiSwapchain::resize(uint32_t width, uint32_t height) {
     desired_w_ = width;
     desired_h_ = height;
     return recreate_swapchain_only(width, height);
+}
+
+Expected<void> RhiSwapchain::set_vsync(bool enabled) {
+    if (vsync_enabled_ == enabled) {
+        return Expected<void>{};
+    }
+    vsync_enabled_ = enabled;
+    if (device_ == nullptr || swapchain_ == VK_NULL_HANDLE) {
+        return Expected<void>{};
+    }
+    return recreate_swapchain_only(desired_w_, desired_h_);
 }
 
 Expected<AcquiredFrame> RhiSwapchain::acquire_and_begin_commands() {

@@ -444,10 +444,39 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     const float btn_row_w = ImGui::CalcTextSize(cam_btn_lbl).x + cam_combo_w +
                             ImGui::CalcTextSize(icons::kPause).x + ImGui::CalcTextSize(tr("Calibrate")).x +
                             st.FramePadding.x * 8.0f + st.ItemSpacing.x * 4.0f;
-    const float w = std::max({l1_w, l2_w, btn_row_w}) + pad * 2.0f;
+
+    const bool has_preview =
+        tracking.camera_active && tracking.live_preview_valid && (tracking.live_preview_texture_id != 0ULL);
+    char pose_line[128]{};
+    if (has_preview) {
+        if (tracking.live_preview_face_locked) {
+            if (tracking.neutral_calibrated) {
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKED · P%+.1f Y%+.1f R%+.1f",
+                              static_cast<double>(tracking.head_euler_deg[0]),
+                              static_cast<double>(tracking.head_euler_deg[1]),
+                              static_cast<double>(tracking.head_euler_deg[2]));
+            } else {
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKING %u/15 · P%+.1f Y%+.1f R%+.1f",
+                              tracking.stable_lock_frames, static_cast<double>(tracking.head_euler_deg[0]),
+                              static_cast<double>(tracking.head_euler_deg[1]),
+                              static_cast<double>(tracking.head_euler_deg[2]));
+            }
+        } else {
+            std::snprintf(pose_line, sizeof(pose_line), "%s", tr("SEARCHING FACE · Look at camera"));
+        }
+    }
+
+    const float content_w = std::max({l1_w, l2_w, btn_row_w});
+    const float thumb_w = has_preview ? std::max(content_w, 208.0f * scale) : 0.0f;
+    const float thumb_h = has_preview ? std::round(thumb_w * 9.0f / 16.0f) : 0.0f;
+    const float pose_w = has_preview ? ImGui::CalcTextSize(pose_line).x : 0.0f;
+    const float inner_w = std::max({content_w, thumb_w, pose_w});
+    const float w = inner_w + pad * 2.0f;
     const float line_h = ImGui::GetTextLineHeight();
     const float ctrl_h = ImGui::GetFrameHeight();
-    const float h = pad * 2.0f + line_h * 2.0f + ctrl_h + st.ItemSpacing.y * 2.0f;
+    const float extra_preview_h =
+        has_preview ? (thumb_h + st.ItemSpacing.y * 0.5f + line_h) : 0.0f;
+    const float h = pad * 2.0f + line_h * 2.0f + ctrl_h + st.ItemSpacing.y * 2.0f + extra_preview_h;
     const ImVec2 p0(top_right.x - w, std::max(top_right.y, min_y));
     const ImVec2 p1(top_right.x, p0.y + h);
     dl->AddRectFilled(p0, p1, t.col32_hud_bg, 8.0f * scale);
@@ -514,6 +543,58 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
                           tr("Capture neutral rest pose + face zero-offset from the current frame (Ctrl+Shift+K)"));
     }
     ImGui::PopStyleColor();
+
+    if (has_preview) {
+        const float preview_y = p0.y + pad + line_h * 2.0f + st.ItemSpacing.y * 2.0f + ctrl_h;
+        const ImVec2 img_p0(p0.x + pad + (inner_w - thumb_w) * 0.5f, preview_y);
+        const ImVec2 img_p1(img_p0.x + thumb_w, img_p0.y + thumb_h);
+        dl->AddImage(static_cast<ImTextureID>(tracking.live_preview_texture_id), img_p0, img_p1, ImVec2(0.0f, 0.0f),
+                     ImVec2(1.0f, 1.0f), IM_COL32_WHITE);
+        dl->PushClipRect(img_p0, img_p1, true);
+
+        const auto& roi = tracking.live_preview_face_roi;
+        if (roi[2] > 0.01f && roi[3] > 0.01f) {
+            const ImVec2 r0(img_p0.x + (roi[0] - roi[2] * 0.5f) * thumb_w,
+                            img_p0.y + (roi[1] - roi[3] * 0.5f) * thumb_h);
+            const ImVec2 r1(img_p0.x + (roi[0] + roi[2] * 0.5f) * thumb_w,
+                            img_p0.y + (roi[1] + roi[3] * 0.5f) * thumb_h);
+            const ImU32 roi_col = tracking.live_preview_face_locked
+                                      ? (tracking.neutral_calibrated ? IM_COL32(68, 224, 128, 235)
+                                                                     : IM_COL32(180, 224, 72, 230))
+                                      : IM_COL32(235, 168, 60, 200);
+            dl->AddRect(r0, r1, roi_col, 3.0f * scale, 0, 1.6f * scale);
+        }
+
+        for (size_t k = 0; k < tracking.live_preview_keypoints.size(); ++k) {
+            if (tracking.live_preview_keypoint_valid[k] == 0U) {
+                continue;
+            }
+            const ImVec2 kp(img_p0.x + tracking.live_preview_keypoints[k][0] * thumb_w,
+                            img_p0.y + tracking.live_preview_keypoints[k][1] * thumb_h);
+            dl->AddCircleFilled(kp, 1.8f * scale, IM_COL32(92, 236, 255, 225), 8);
+        }
+
+        if (tracking.live_preview_axes_valid) {
+            const ImVec2 origin(img_p0.x + tracking.live_preview_head_axes[0][0] * thumb_w,
+                                img_p0.y + tracking.live_preview_head_axes[0][1] * thumb_h);
+            const ImVec2 ax_x(img_p0.x + tracking.live_preview_head_axes[1][0] * thumb_w,
+                              img_p0.y + tracking.live_preview_head_axes[1][1] * thumb_h);
+            const ImVec2 ax_y(img_p0.x + tracking.live_preview_head_axes[2][0] * thumb_w,
+                              img_p0.y + tracking.live_preview_head_axes[2][1] * thumb_h);
+            const ImVec2 ax_z(img_p0.x + tracking.live_preview_head_axes[3][0] * thumb_w,
+                              img_p0.y + tracking.live_preview_head_axes[3][1] * thumb_h);
+            dl->AddLine(origin, ax_x, IM_COL32(255, 82, 82, 240), 1.8f * scale);
+            dl->AddLine(origin, ax_y, IM_COL32(82, 235, 112, 240), 1.8f * scale);
+            dl->AddLine(origin, ax_z, IM_COL32(82, 168, 255, 240), 1.8f * scale);
+        }
+
+        dl->PopClipRect();
+        dl->AddRect(img_p0, img_p1, t.col32_hud_border, 2.0f * scale, 0, 1.0f);
+
+        const ImU32 pose_col = tracking.live_preview_face_locked ? t.col32_status_ok : t.col32_status_warn;
+        dl->AddText(ImVec2(p0.x + pad, preview_y + thumb_h + st.ItemSpacing.y * 0.5f), pose_col, pose_line);
+    }
+
     if (fonts.mono != nullptr) {
         ImGui::PopFont();
     }

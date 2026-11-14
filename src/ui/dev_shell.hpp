@@ -92,6 +92,20 @@ struct DevShellTrackingView {
     const char* active_ep_label{"Initializing..."};
     const char* camera_label{"Synthetic 60Hz"};
     const char* camera_symlink{""};
+
+    bool neutral_calibrated{false};
+    uint32_t stable_lock_frames{0};
+    std::array<float, 3> head_euler_deg{0.0f, 0.0f, 0.0f};
+    uint64_t live_preview_texture_id{0};
+    uint32_t live_preview_width{0};
+    uint32_t live_preview_height{0};
+    bool live_preview_valid{false};
+    bool live_preview_face_locked{false};
+    std::array<float, 4> live_preview_face_roi{0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<std::array<float, 2>, 24> live_preview_keypoints{};
+    std::array<uint8_t, 24> live_preview_keypoint_valid{};
+    bool live_preview_axes_valid{false};
+    std::array<std::array<float, 2>, 4> live_preview_head_axes{};
 };
 
 struct DevShellRenderView {
@@ -132,6 +146,11 @@ struct DevShellRenderView {
     uint64_t gc_retired_pending{0};
     uint64_t gc_reclaimed_total{0};
     uint64_t gc_bytes_reclaimed{0};
+
+    float present_fps{0.0f};
+    uint64_t vram_usage_mb{0};
+    uint64_t vram_budget_mb{0};
+    const std::vector<rhi::GpuAdapterDescriptor>* gpu_adapters{nullptr};
 };
 
 struct DevShellOutputView {
@@ -211,6 +230,18 @@ struct DevShellViewportActions {
     float live2d_flatness{0.75f};
     float bloom_intensity{0.06f};
     float outline_scale{1.0f};
+    float face_normal_flatten{0.85f};
+    float cel_band_sharpness{0.025f};
+    float shadow_warm_cool_shift{0.75f};
+    float iro_tsuke_strength{0.85f};
+    float crease_strength{0.75f};
+    float hair_highlight_intensity{0.85f};
+    float rim_step_strength{0.65f};
+    uint8_t target_fps_mode{1};
+    bool vsync_enabled{false};
+    bool background_eco_mode{true};
+    float render_resolution_scale{1.0f};
+    uint8_t aa_mode{1};
     std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
     float avatar_rot_y_deg{0.0f};
     float avatar_scale{1.0f};

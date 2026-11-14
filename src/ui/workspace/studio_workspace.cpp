@@ -389,6 +389,19 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.rim_intensity = params_.get_float(ParamId::RenderRimIntensity);
     v.outline_scale = params_.get_float(ParamId::RenderOutlineScale);
     v.bloom_intensity = params_.get_float(ParamId::RenderBloomIntensity);
+    v.face_normal_flatten = params_.get_float(ParamId::RenderFaceNormalFlatten);
+    v.cel_band_sharpness = params_.get_float(ParamId::RenderCelBandSharpness);
+    v.shadow_warm_cool_shift = params_.get_float(ParamId::RenderShadowWarmCool);
+    v.iro_tsuke_strength = params_.get_float(ParamId::RenderIroTsukeStrength);
+    v.crease_strength = params_.get_float(ParamId::RenderCreaseStrength);
+    v.hair_highlight_intensity = params_.get_float(ParamId::RenderHairHighlight);
+    v.rim_step_strength = params_.get_float(ParamId::RenderRimStepStrength);
+    v.target_fps_mode = static_cast<uint8_t>(params_.get_int(ParamId::RenderTargetFps));
+    v.vsync_enabled = params_.get_bool(ParamId::RenderVsync);
+    v.background_eco_mode = params_.get_bool(ParamId::RenderBackgroundEco);
+    v.render_resolution_scale =
+        std::clamp(static_cast<float>(params_.get_int(ParamId::RenderResolutionScalePct)) * 0.01f, 0.50f, 2.00f);
+    v.aa_mode = static_cast<uint8_t>(params_.get_int(ParamId::RenderAaMode));
     v.rt_enabled = params_.get_bool(ParamId::RenderRtEnabled);
     v.debug_view = static_cast<uint8_t>(params_.get_int(ParamId::RenderDebugView));
     v.denoiser_kind = static_cast<uint8_t>(params_.get_int(ParamId::RenderDenoiser));
@@ -544,6 +557,9 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
     case PaletteCommandTag::OpenPreferences:
         prefs_modal_.open(0);
         break;
+    case PaletteCommandTag::OpenGraphicsSettings:
+        graphics_modal_.open(0);
+        break;
     case PaletteCommandTag::OpenShortcuts:
         shortcut_overlay_.open();
         break;
@@ -576,7 +592,8 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, StudioActions& actio
         return;
     }
 
-    if (command_palette_.is_open() || prefs_modal_.is_open() || wizard_.is_open() || consent_prompt_.open) {
+    if (command_palette_.is_open() || prefs_modal_.is_open() || graphics_modal_.is_open() || wizard_.is_open() ||
+        consent_prompt_.open) {
         return;
     }
 
@@ -775,6 +792,9 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     case TopMenuAction::OpenPreferences:
         prefs_modal_.open(0);
         break;
+    case TopMenuAction::OpenGraphicsSettings:
+        graphics_modal_.open(0);
+        break;
     case TopMenuAction::OpenShortcuts:
         shortcut_overlay_.open();
         break;
@@ -937,6 +957,14 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     PropertyRowActions pref_row_actions{};
     prefs_modal_.draw(host_status_.on_air, params_, undo_, keymap_, settings_, fonts_, scale, pref_row_actions, actions,
                       settings_dirty_);
+
+    if (actions.request_open_graphics_settings) {
+        actions.request_open_graphics_settings = false;
+        graphics_modal_.open(0);
+    }
+    PropertyRowActions gfx_row_actions{};
+    graphics_modal_.draw(host_status_.on_air, rhi, render_view, params_, undo_, settings_, fonts_, scale,
+                         gfx_row_actions, actions, settings_dirty_);
 
     shortcut_overlay_.draw(keymap_, fonts_, scale);
 

@@ -260,6 +260,8 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
         "Open Hardware Optimizer Wizard...", "");
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenPreferences, "panel.prefs",
         "Open Studio Preferences & Keymap...", keymap.chord(ActionId::Preferences).c_str());
+    add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenGraphicsSettings, "panel.graphics",
+        "Open Graphics, GPU & Live2D Settings...", "");
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenShortcuts, "panel.keys", "Show Keyboard Shortcuts",
         keymap.chord(ActionId::ShortcutOverlay).c_str());
 

@@ -73,9 +73,22 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         return float4(hdr_rgb, alpha);
     }
 
+    float face_norm_flatten = saturate(fg.npr_style_params.x);
+    float cel_feather = max(fg.npr_style_params.y, 0.008);
+    float shadow_shift = saturate(fg.npr_style_params.z);
+    float hair_hl_intensity = max(fg.npr_style_params2.y, 0.0);
+    float rim_step_strength = max(fg.npr_style_params2.z, 0.0);
+
+    bool is_face = ((mat_flags & 2u) != 0u) || ((i.submesh_flags & 1u) != 0u);
+    bool is_skin = is_face || ((mat_flags & 8u) != 0u);
+    bool is_hair = ((mat_flags & 4u) != 0u) || ((i.submesh_flags & 6u) != 0u);
+
     float3 true_n = normalize_safe(i.true_normal, float3(0.0, 0.0, 1.0));
     float3 proxy_n = normalize_safe(i.proxy_normal, true_n);
     float3 view_v = normalize_safe(fg.camera_pos_world.xyz - i.world_pos, float3(0.0, 0.0, 1.0));
+    // Flatten face/skin lighting normals strongly toward camera so 3D nose/neck triangles never shadow harshly
+    float norm_flat_k = is_skin ? face_norm_flatten : (face_norm_flatten * 0.22);
+    float3 n_lit = normalize_safe(lerp(proxy_n, view_v, norm_flat_k), proxy_n);
 
     float3 tex_shade_mul = g_SampledImages[mat.tex_slots.y].Sample(g_Samplers[kSamplerLinearClamp], i.uv).rgb;
     float3 shade_col = mat.shade_color.rgb * tex_shade_mul;
@@ -102,7 +115,7 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         }
     }
 
-    // Key light & MToon cel ramp / 0-360° SDF face shadow (§10.5)
+    // Key light & quantized 2D Live2D/MToon cel ramp + 0-360° SDF face shadow (§10.5)
     uint light_count = fg.state_u32.y;
     GpuLight key_l = fg.lights[0];
     float3 key_dir = float3(0.0, 0.0, 1.0);
@@ -114,6 +127,7 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     }
 
     float cel_lit = 1.0;
+    float deep_shadow = 0.0;
     bool use_sdf_face = ((mat_flags & 2u) != 0u) && (mat.tex_slots.z != 0xFFFFFFFFu);
     if (use_sdf_face) {
         float2 head_fwd_xz = normalize_safe(float3(fg.head_fwd_world.x, 0.0, fg.head_fwd_world.z),
@@ -129,16 +143,19 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         float2 mir_uv = (lx >= 0.0) ? i.uv : float2(1.0 - i.uv.x, i.uv.y);
         float sdf_val = g_SampledImages[mat.tex_slots.z].Sample(g_Samplers[kSamplerLinearClamp], mir_uv).r;
         float thresh = acos(lz) / kPi;
-        float feather = max(mat.toon_params.z, fg.light_params.x);
+        float feather = clamp(min(max(mat.toon_params.z, cel_feather * 2.0), fg.light_params.x), 0.015, 0.12);
         cel_lit = smoothstep(thresh - feather, thresh + feather, sdf_val);
     } else {
-        float ndl = dot(proxy_n, key_dir);
+        float ndl = dot(n_lit, key_dir);
         float shift = mat.emission_and_shift.w;
-        float half_soft = max(1.0 - mat.toon_params.x, 0.04) * 0.5;
-        cel_lit = smoothstep(shift - half_soft, shift + half_soft, ndl) * rt_shadow;
+        float half_soft = clamp(cel_feather * max(1.35 - mat.toon_params.x * 0.55, 0.45), 0.008, 0.12);
+        float band1 = smoothstep(shift - half_soft, shift + half_soft, ndl) * rt_shadow;
+        float band2 = smoothstep(shift - 0.34 - half_soft, shift - 0.34 + half_soft, ndl);
+        cel_lit = band1;
+        deep_shadow = (1.0 - band2) * (1.0 - band1);
     }
 
-    // Read-only D32_S8 stencil hair drop shadow (§10.4, §10.5)
+    // Razor-crisp D32_S8 stencil forehead bang drop shadow (§10.4, §10.5)
     bool recv_hair_shadow = ((mat_flags & 8u) != 0u) && ((mat_flags & 4u) == 0u);
     uint stencil_slot = fg.gbuffer_extra_ids[0].y;
     if (recv_hair_shadow && !is_transparent && stencil_slot != 0xFFFFFFFFu && fg.head_fwd_world.w > 0.0) {
@@ -151,47 +168,58 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         caster_p = clamp(caster_p, int2(0, 0), int2(int(fg.viewport_size.x) - 1, int(fg.viewport_size.y) - 1));
         uint caster_stencil = g_UintSampledImages[stencil_slot].Load(int3(caster_p, 0)).x;
         if ((caster_stencil & 2u) != 0u) {
-            cel_lit *= saturate(1.0 - fg.head_right_world.w);
+            cel_lit = min(cel_lit, saturate(1.0 - fg.head_right_world.w * 1.15));
         }
     }
 
-    // Energy-conserving Fill, bounce & Live2D/MToon cel-shading (§10.5):
-    // Keep lit surfaces faithful to the artist's base texture without washing out highlights above 1.0.
+    // Energy-conserving Fill, bounce & Live2D/MToon chromatic cel-shading (§10.5):
     float3 indirect = float3(0.08, 0.08, 0.11);
     if (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u) {
         float3 fill_dir = normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(0.0, 1.0, 0.0));
-        float fill_w = saturate(dot(proxy_n, fill_dir) * 0.5 + 0.5);
-        indirect += fg.lights[1].color_intensity.rgb * (fill_w * 0.35);
+        float fill_w = saturate(dot(n_lit, fill_dir) * 0.5 + 0.5);
+        indirect += fg.lights[1].color_intensity.rgb * (fill_w * 0.30);
     }
-    indirect += bounce_rgb * (mat.hair_specular_params.w * 0.40);
+    indirect += bounce_rgb * (mat.hair_specular_params.w * 0.35);
 
-    // If a VRM material leaves _ShadeColor = white (= base albedo), synthesize a soft chromatic shadow tint
-    // so shadowed cel bands retain warm/cool richness instead of flat grey washout.
+    // Chromatic Anime Shadow Tinting (never flat muddy gray):
+    // Skin -> warm coral/peach-pink; bright/white clothes -> cool periwinkle/lavender; colored cloth/hair -> rich cool shift
     float lit_luma = max(luminance(lit_rgba.rgb), 1e-4);
     float sh_luma = luminance(shade_col);
-    float3 eff_shade = shade_col;
-    if (sh_luma > lit_luma * 0.90) {
-        // Auto-synthesize a warm-preserving anime cel shadow (higher saturation + subtle rose shift, avoiding muddy grey)
-        float3 rich_tint = pow(max(lit_rgba.rgb, float3(1e-4, 1e-4, 1e-4)), float3(1.14, 1.18, 1.18)) *
-                           float3(0.95, 0.84, 0.82);
-        eff_shade = min(shade_col, rich_tint);
-    }
+    bool warm_skin_hue = is_skin || (lit_rgba.r > lit_rgba.b * 1.12 && lit_rgba.r > 0.22);
+    bool bright_neutral = (lit_luma > 0.34) && ((lit_rgba.r - lit_rgba.b) < 0.14);
+    float3 skin_sh = lit_rgba.rgb * float3(0.95, 0.72, 0.68);
+    float3 cool_sh = lit_rgba.rgb * float3(0.76, 0.78, 0.94);
+    float3 deep_sh = pow(max(lit_rgba.rgb, float3(1e-4, 1e-4, 1e-4)), float3(1.16, 1.22, 1.10)) *
+                     float3(0.84, 0.80, 0.94);
+    float3 chroma_tint = warm_skin_hue ? skin_sh : (bright_neutral ? cool_sh : deep_sh);
 
-    float3 raw_lit = key_col + indirect * 0.25;
+    float3 eff_shade = shade_col;
+    if (sh_luma > lit_luma * 0.82) {
+        eff_shade = lerp(shade_col, chroma_tint, shadow_shift);
+    } else {
+        eff_shade = lerp(shade_col, min(shade_col * float3(0.98, 0.96, 1.02), chroma_tint), shadow_shift * 0.45);
+    }
+    eff_shade *= lerp(1.0, 0.86, deep_shadow);
+
+    float3 raw_lit = key_col + indirect * 0.22;
     float lit_peak = max(raw_lit.r, max(raw_lit.g, raw_lit.b));
     float over = max(lit_peak - 0.95, 0.0);
-    float capped_peak = min(lit_peak, 0.95) + 0.20 * (over / (0.40 + over));
+    float capped_peak = min(lit_peak, 0.95) + 0.18 * (over / (0.40 + over));
     float3 lit_irradiance = raw_lit * (capped_peak / max(lit_peak, 1e-5));
-    float3 shade_irradiance = min(indirect * 0.65 + key_col * 0.34, float3(0.88, 0.88, 0.88));
+    float3 shade_irradiance = min(indirect * 0.62 + key_col * 0.36, float3(0.90, 0.90, 0.92));
 
     float3 direct_term = lerp(eff_shade * shade_irradiance, lit_rgba.rgb * lit_irradiance, cel_lit);
 
-    // Occluded Fresnel parametric rim
+    // 2D Stepped Rim Light (sharp graphic anime edge along light direction + subtle base rim)
     float ndv = saturate(dot(true_n, view_v));
-    float fresnel = pow(1.0 - ndv, max(mat.rim_color_power.w, 1.0));
-    float3 rim_term = mat.rim_color_power.rgb * (fresnel * rim_occ);
+    float fresnel_soft = pow(1.0 - ndv, max(mat.rim_color_power.w, 1.0));
+    float rim_step = smoothstep(0.68, 0.72, 1.0 - ndv);
+    float rim_light_dir = saturate(dot(n_lit, key_dir) * 0.5 + 0.55) * lerp(0.35, 1.0, rt_shadow);
+    float3 rim_col_base = max(mat.rim_color_power.rgb, key_col * 0.28);
+    float3 rim_term = (rim_col_base * (rim_step * rim_occ * rim_light_dir * rim_step_strength)) +
+                      (mat.rim_color_power.rgb * (fresnel_soft * rim_occ * 0.25));
 
-    // Matcap & Hair Angel-Ring specular
+    // Matcap & Stylized 2D Stepped Hair Angel-Ring highlight (glides smoothly with head tilt)
     float3 matcap_term = float3(0.0, 0.0, 0.0);
     if (mat.toon_params.y > 0.001 && mat.tex_slots.w != 0xFFFFFFFFu) {
         float3 vn = normalize_safe(mul_col3(fg.view, true_n), float3(0.0, 0.0, 1.0));
@@ -200,12 +228,19 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     }
 
     float3 angel_term = float3(0.0, 0.0, 0.0);
-    if ((i.submesh_flags & 6u) != 0u && light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u) {
-        float3 hdir = normalize_safe(normalize_safe(fg.lights[3].pos_or_dir.xyz, float3(0.0, 1.0, 0.0)) + view_v,
-                                     float3(0.0, 1.0, 0.0));
-        float ndh = saturate(dot(true_n, hdir));
-        float ring = smoothstep(0.92, 0.985, ndh);
-        angel_term = fg.lights[3].color_intensity.rgb * (ring * 0.22 * lerp(0.35, 1.0, cel_lit));
+    if (is_hair && light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u && hair_hl_intensity > 0.001) {
+        float3 vn = normalize_safe(mul_col3(fg.view, true_n), float3(0.0, 0.0, 1.0));
+        float3 l3v = normalize_safe(mul_col3(fg.view, normalize_safe(fg.lights[3].pos_or_dir.xyz, float3(0.0, 1.0, 0.0))),
+                                    float3(0.0, 1.0, 0.0));
+        float tilt_x = vn.x - fg.head_fwd_world.x * 0.30;
+        float arc_y = vn.y + 0.045 * cos(tilt_x * 16.0);
+        float3 band_n = normalize_safe(float3(vn.x * 0.28, arc_y, vn.z), vn);
+        float3 band_l = normalize_safe(float3(l3v.x * 0.25, l3v.y + 0.18, max(l3v.z, 0.75)), float3(0.0, 0.45, 0.89));
+        float ring_sig = saturate(dot(band_n, band_l));
+        float ring_step = smoothstep(0.935, 0.945, ring_sig);
+        float3 hl_tint = lerp(float3(1.0, 1.0, 1.0), lit_rgba.rgb * 1.45 + 0.25, 0.35);
+        angel_term = fg.lights[3].color_intensity.rgb * hl_tint *
+                     (ring_step * 0.32 * hair_hl_intensity * lerp(0.45, 1.0, cel_lit));
     }
 
     float3 hdr = direct_term + rim_term + matcap_term + angel_term + emissive_term;

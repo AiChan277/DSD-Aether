@@ -129,7 +129,7 @@ OneEuroParams OneEuroPoseBank::params_for_blendshape(size_t slot) noexcept {
 
 OneEuroParams OneEuroPoseBank::params_for_bone(size_t bone_idx) noexcept {
     if (bone_idx == AETHER_BONE_HEAD || bone_idx == AETHER_BONE_NECK) {
-        return {0.25f, 6.5f, 0.65f, 0.0022f};
+        return {0.25f, 6.5f, 0.65f, 0.15f * kDegToRad};
     }
     if (bone_idx == AETHER_BONE_LEFT_EYE || bone_idx == AETHER_BONE_RIGHT_EYE) {
         return {3.0f, 1.00f, 1.0f, 0.0035f};

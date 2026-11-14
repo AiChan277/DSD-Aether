@@ -39,8 +39,15 @@ struct LightingRig {
     std::array<SceneLight, kMaxLights> lights{};
     uint32_t active_count{4};
 
-    // Spec §10 & Appendix C default live studio look parameters
+    // Spec §10 & 2D Hand-Drawn Live2D Illustration look parameters
     float global_live2d_flatness{0.75f};
+    float face_normal_flatten{0.85f};
+    float cel_band_sharpness{0.025f};
+    float shadow_warm_cool_shift{0.75f};
+    float iro_tsuke_strength{0.85f};
+    float crease_strength{0.75f};
+    float hair_highlight_intensity{0.85f};
+    float rim_step_strength{0.65f};
     float sdf_feather{0.08f};
     float hair_shadow_offset_px{6.0f};
     float hair_shadow_strength{0.60f};
