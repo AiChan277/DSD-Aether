@@ -1,0 +1,12 @@
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  concurrency-*,
+  cppcoreguidelines-pro-type-member-init,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-branch-clone,
+  -performance-avoid-endl
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(src|include)/.*'
+FormatStyle: file

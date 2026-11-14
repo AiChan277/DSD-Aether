@@ -1,0 +1,217 @@
+schema_version = 1
+
+[[shader]]
+id = "skin_morph"
+file = "aether_skin_morph.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "prepass_vs"
+file = "aether_prepass.slang"
+entry = "vs_main"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "prepass_fs"
+file = "aether_prepass.slang"
+entry = "ps_main"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "ray_effects"
+file = "aether_ray_effects.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = true
+max_push_constants = 128
+
+[[shader]]
+id = "csm_shadow_vs"
+file = "aether_csm_fallback.slang"
+entry = "vs_shadow"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "csm_shadow_fs"
+file = "aether_csm_fallback.slang"
+entry = "ps_shadow"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "csm_fallback_cs"
+file = "aether_csm_fallback.slang"
+entry = "cs_fallback"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "denoise_svgf"
+file = "aether_denoise_svgf.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "denoise_sigma"
+file = "aether_denoise_sigma.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "denoise_ffx"
+file = "aether_denoise_ffx.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "live2d_npr_vs"
+file = "aether_live2d_npr.slang"
+entry = "vs_main"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "live2d_npr_fs"
+file = "aether_live2d_npr.slang"
+entry = "ps_main"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "orbit_orb_vs"
+file = "aether_live2d_npr.slang"
+entry = "vs_orb"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "orbit_orb_fs"
+file = "aether_live2d_npr.slang"
+entry = "ps_orb"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "outline_hull_vs"
+file = "aether_outline_hull.slang"
+entry = "vs_main"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "outline_hull_fs"
+file = "aether_outline_hull.slang"
+entry = "ps_main"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "crease_lines"
+file = "aether_crease_lines.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "bloom_down"
+file = "aether_post_bloom.slang"
+entry = "cs_bloom_down"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "bloom_up"
+file = "aether_post_bloom.slang"
+entry = "cs_bloom_up"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "tone_composite"
+file = "aether_post_bloom.slang"
+entry = "cs_composite"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "encode_bgra"
+file = "aether_post_bloom.slang"
+entry = "cs_encode_bgra"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "encode_nv12"
+file = "aether_post_bloom.slang"
+entry = "cs_encode_nv12"
+stage = "compute"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "viewport_compose_vs"
+file = "aether_viewport_compose.slang"
+entry = "vs_fullscreen"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "viewport_compose_fs"
+file = "aether_viewport_compose.slang"
+entry = "ps_compose"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "heatmap_vs"
+file = "aether_viewport_compose.slang"
+entry = "vs_heatmap"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "heatmap_fs"
+file = "aether_viewport_compose.slang"
+entry = "ps_heatmap"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "sdf_bake"
+file = "aether_sdf_bake.slang"
+entry = "cs_main"
+stage = "compute"
+ray_query = false
+max_push_constants = 128

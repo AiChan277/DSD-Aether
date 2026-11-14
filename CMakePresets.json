@@ -1,0 +1,126 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base-windows",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_HOST_TRIPLET": "x64-windows"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Windows x64 Debug (Validation + Hot-Path Guard)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
+        "AETHER_ENABLE_HOT_PATH_GUARD": "ON",
+        "AETHER_ENABLE_TEST_HOOKS": "ON",
+        "AETHER_WITH_TRACY": "OFF",
+        "AETHER_ENABLE_ASAN": "OFF",
+        "AETHER_ENABLE_GPU_VALIDATION": "OFF"
+      }
+    },
+    {
+      "name": "windows-relwithdebinfo",
+      "displayName": "Windows x64 RelWithDebInfo (Dev Default + Tracy)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "BUILD_TESTING": "ON",
+        "AETHER_ENABLE_HOT_PATH_GUARD": "OFF",
+        "AETHER_ENABLE_TEST_HOOKS": "ON",
+        "AETHER_WITH_TRACY": "ON",
+        "AETHER_ENABLE_ASAN": "OFF",
+        "AETHER_ENABLE_GPU_VALIDATION": "OFF"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows x64 Release (LTO, No Tracy, PDBs)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "OFF",
+        "AETHER_ENABLE_HOT_PATH_GUARD": "OFF",
+        "AETHER_ENABLE_TEST_HOOKS": "OFF",
+        "AETHER_WITH_TRACY": "OFF",
+        "AETHER_ENABLE_ASAN": "OFF",
+        "AETHER_ENABLE_GPU_VALIDATION": "OFF",
+        "AETHER_ENABLE_LTO": "ON"
+      }
+    },
+    {
+      "name": "ci-validation",
+      "displayName": "Windows x64 CI Validation (Debug + ASan + GPU-Assisted Validation)",
+      "inherits": "base-windows",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
+        "AETHER_ENABLE_HOT_PATH_GUARD": "ON",
+        "AETHER_ENABLE_TEST_HOOKS": "ON",
+        "AETHER_WITH_TRACY": "OFF",
+        "AETHER_ENABLE_ASAN": "ON",
+        "AETHER_ENABLE_GPU_VALIDATION": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug"
+    },
+    {
+      "name": "windows-relwithdebinfo",
+      "configurePreset": "windows-relwithdebinfo"
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release"
+    },
+    {
+      "name": "ci-validation",
+      "configurePreset": "ci-validation"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-relwithdebinfo",
+      "configurePreset": "windows-relwithdebinfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci-validation",
+      "configurePreset": "ci-validation",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

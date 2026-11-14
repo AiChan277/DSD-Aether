@@ -1,0 +1,57 @@
+[package]
+name = "aether-asset-loader-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+aether-asset-loader = { path = "../crates/aether-asset-loader" }
+aether-plugin-host = { path = "../crates/aether-plugin-host" }
+
+[[bin]]
+name = "fuzz_glb"
+path = "fuzz_targets/fuzz_glb.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vrm_json"
+path = "fuzz_targets/fuzz_vrm_json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fbx"
+path = "fuzz_targets/fuzz_fbx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_pmx"
+path = "fuzz_targets/fuzz_pmx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_project_toml"
+path = "fuzz_targets/fuzz_project_toml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_graph_json"
+path = "fuzz_targets/fuzz_graph_json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_osc"
+path = "fuzz_targets/fuzz_osc.rs"
+test = false
+doc = false

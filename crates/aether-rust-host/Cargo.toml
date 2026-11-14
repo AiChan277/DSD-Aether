@@ -1,0 +1,27 @@
+[package]
+name = "aether-rust-host"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+test-hooks = ["aether-asset-loader/test-hooks", "aether-plugin-host/test-hooks"]
+
+[dependencies]
+aether-asset-loader = { path = "../aether-asset-loader" }
+aether-ffi = { path = "../aether-ffi" }
+aether-plugin-host = { path = "../aether-plugin-host" }
+bytemuck.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

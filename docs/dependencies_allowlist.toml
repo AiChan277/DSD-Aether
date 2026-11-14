@@ -1,0 +1,60 @@
+# Machine-readable dependency allow-list checked by tools/check_gates.py (HR-10)
+# Every entry here must have an approved ADR (see docs/adr/0001-toolchain.md, 0004-*, 0006-*, 0007-*, 0008-*).
+
+[vcpkg]
+allowed = [
+    "vulkan-headers",
+    "vulkan-loader",
+    "vulkan-memory-allocator",
+    "vulkan-validationlayers",
+    "freetype",
+    "imgui",
+    "tracy",
+    "catch2",
+    "nlohmann-json",
+    "implot",
+    "imguizmo",
+]
+
+[cargo]
+allowed = [
+    "bytemuck",
+    "thiserror",
+    "tracing",
+    "gltf",
+    "ufbx",
+    "rayon",
+    "glam",
+    "serde",
+    "serde_json",
+    "zune-png",
+    "zune-jpeg",
+    "memmap2",
+    "unicode-normalization",
+    "encoding_rs",
+    "ahash",
+    "proptest",
+    "wasmtime",
+    "tokio",
+    "rosc",
+    "tokio-tungstenite",
+    "futures-util",
+    "toml",
+    "sha2",
+]
+
+[toolchains]
+# Prebuilt standalone tools/SDKs pinned in ADRs (installed into %LOCALAPPDATA%\Aether\toolchains\)
+allowed = [
+    "slang-2026.22",                        # ADR-0006: Apache-2.0 WITH LLVM-Exception (build-time shader compiler)
+    "microsoft.ml.onnxruntime.directml-1.24.1", # ADR-0007: MIT
+    "intel.ml.onnxruntime.openvino-1.24.1",     # ADR-0007: MIT (ORT EP) + Apache-2.0 (OpenVINO 2025.4.1 / oneTBB)
+]
+
+[models]
+allowed = [
+    "mediapipe-blaze-face-short-range",     # ADR-0008: Apache-2.0 (M0)
+    "mediapipe-pose-landmarker-lite",       # ADR-0008: Apache-2.0 (M1 body)
+    "mediapipe-hand-landmarker",            # ADR-0008: Apache-2.0 (M1 hands)
+    "mediapipe-face-landmarker",            # ADR-0008: Apache-2.0 (M2 face mesh + M3 blendshapes)
+]

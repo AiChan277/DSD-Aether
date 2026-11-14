@@ -1,0 +1,31 @@
+[package]
+name = "aether-plugin-host"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+test-hooks = []
+
+[dependencies]
+aether-ffi = { path = "../aether-ffi" }
+ahash.workspace = true
+futures-util.workspace = true
+rosc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+toml.workspace = true
+tracing.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

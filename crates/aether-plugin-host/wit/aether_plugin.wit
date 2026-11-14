@@ -1,0 +1,53 @@
+package aether:plugin@1.0.0;
+
+interface types {
+    enum value-type {
+        event,
+        boolean,
+        float,
+        vec3,
+        quat,
+        transform,
+        pose,
+        expr-set,
+        viseme-set,
+        color,
+    }
+
+    enum direction {
+        input,
+        output,
+    }
+
+    record port-desc {
+        name: string,
+        ty: value-type,
+        direction: direction,
+    }
+
+    record node-desc {
+        type-id: string,
+        display-name: string,
+        category: string,
+        ports: list<port-desc>,
+        stateful: bool,
+    }
+}
+
+interface node {
+    use types.{node-desc};
+
+    describe: func() -> list<node-desc>;
+
+    /// Registers an instance; returns the linear-memory offset of its fixed-size I/O block
+    /// (zero per-call allocation).
+    init: func(type-id: string, instance: u32, input-bytes: u32, output-bytes: u32) -> result<u32, string>;
+
+    process: func(instance: u32, dt: f32) -> result<_, string>;
+}
+
+world aether-plugin {
+    import host-log: func(level: u8, msg: string);
+    import host-time-us: func() -> u64;
+    export node;
+}

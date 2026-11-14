@@ -1,0 +1,120 @@
+# AETHER-2.5D Tracking Model Manifest (§8.3, ADR-0008)
+# Generated deterministically by tools/models/build_models.py — Apache-2.0 Google MediaPipe models.
+
+manifest_version = 1
+licence = "Apache-2.0"
+
+[models.M0_face_detector]
+role = "face_detector"
+cadence = "roi_reset_only"
+opset = 17
+input_name = "image_nchw"
+input_shape = [1, 3, 128, 128]
+output_names = ['regressors', 'classificators']
+output_shapes = [[1, 896, 16], [1, 896, 1]]
+norm_mode = "neg1_to_pos1"
+norm_mean = [0.5, 0.5, 0.5]
+norm_std = [0.5, 0.5, 0.5]
+file_fp32 = "M0_face_detector_fp32.onnx"
+sha256_fp32 = "7B46BE33ADDFD6595957D7ED24A774F0E0229BEE6D7277D89AD60F57CB0B1518"
+file_fp16 = "M0_face_detector_fp16.onnx"
+sha256_fp16 = "B723DF9FA877E9B0260B1CE3F529D1E790DED41A554042B7E41FDFB4A2231687"
+file_int8 = "M0_face_detector_int8.onnx"
+sha256_int8 = "AF00ACF33EBA7016CDCF63093388A39536FE2BDEA74040C7CA0B5F1D69347DF8"
+int8_accepted = true
+int8_nme_delta_pct = 1.8507
+tier1_variant = "int8"
+tier2_variant = "fp16"
+tier3_variant = "int8"
+
+[models.M1_body_landmarks]
+role = "upper_body_pose"
+cadence = "every_frame_le60hz"
+opset = 17
+input_name = "image_nchw"
+input_shape = [1, 3, 256, 256]
+output_names = ['landmarks', 'poseflag', 'segmentation', 'heatmap', 'world_landmarks']
+output_shapes = [[1, 195], [1, 1], [1, 256, 256, 1], [1, 64, 64, 39], [1, 117]]
+norm_mode = "0_to_1"
+norm_mean = [0.0, 0.0, 0.0]
+norm_std = [1.0, 1.0, 1.0]
+file_fp32 = "M1_body_landmarks_fp32.onnx"
+sha256_fp32 = "9A298C0F60379C17ADAAA2390128FB733F8ABB3F165085B319EF075ABF3A1821"
+file_fp16 = "M1_body_landmarks_fp16.onnx"
+sha256_fp16 = "5E2C5FB127A4C2831DB99B69D6D780A7D391E352DC5AD8E56E710B9CD4D2506B"
+file_int8 = "M1_body_landmarks_fp16.onnx"
+sha256_int8 = "5E2C5FB127A4C2831DB99B69D6D780A7D391E352DC5AD8E56E710B9CD4D2506B"
+int8_accepted = false
+int8_nme_delta_pct = 5.6193
+tier1_variant = "fp16"
+tier2_variant = "fp16"
+tier3_variant = "fp16"
+
+[models.M1_hands_landmarks]
+role = "batched_hands"
+cadence = "wrist_gated_batch2"
+opset = 17
+input_name = "image_nchw"
+input_shape = [2, 3, 224, 224]
+output_names = ['landmarks', 'handflag', 'handedness', 'world_landmarks']
+output_shapes = [[2, 63], [2, 1], [2, 1], [2, 63]]
+norm_mode = "0_to_1"
+norm_mean = [0.0, 0.0, 0.0]
+norm_std = [1.0, 1.0, 1.0]
+file_fp32 = "M1_hands_landmarks_fp32.onnx"
+sha256_fp32 = "C2BDBAADE2FB97640841AB8D636CF94D2B81DBD9E74334E32413DA347B9D70FB"
+file_fp16 = "M1_hands_landmarks_fp16.onnx"
+sha256_fp16 = "7488CE7EE978E499BCC35F8D56F7EDF8BB1CE02BE08DBEDD585DD9D3B3532A1D"
+file_int8 = "M1_hands_landmarks_fp16.onnx"
+sha256_int8 = "7488CE7EE978E499BCC35F8D56F7EDF8BB1CE02BE08DBEDD585DD9D3B3532A1D"
+int8_accepted = false
+int8_nme_delta_pct = 3.5591
+tier1_variant = "fp16"
+tier2_variant = "fp16"
+tier3_variant = "fp16"
+
+[models.M2_face_landmarks]
+role = "face_478_iris"
+cadence = "every_frame"
+opset = 17
+input_name = "image_nchw"
+input_shape = [1, 3, 256, 256]
+output_names = ['landmarks', 'faceflag']
+output_shapes = [[1, 1, 1, 1434], [1, 1, 1, 1], [1, 1]]
+norm_mode = "0_to_1"
+norm_mean = [0.0, 0.0, 0.0]
+norm_std = [1.0, 1.0, 1.0]
+file_fp32 = "M2_face_landmarks_fp32.onnx"
+sha256_fp32 = "8FBA4BA23CE068A4559E45DB49ECDB34F607FE717D869A525EB044BF244158B9"
+file_fp16 = "M2_face_landmarks_fp16.onnx"
+sha256_fp16 = "0689DD5AAC76967B708347068F604E5F6027E09DB5EE189BBF3A65BE245F701E"
+file_int8 = "M2_face_landmarks_fp16.onnx"
+sha256_int8 = "0689DD5AAC76967B708347068F604E5F6027E09DB5EE189BBF3A65BE245F701E"
+int8_accepted = false
+int8_nme_delta_pct = 8.6916
+tier1_variant = "fp16"
+tier2_variant = "fp16"
+tier3_variant = "fp16"
+
+[models.M3_arkit52_blendshapes]
+role = "blendshape_mlp"
+cadence = "every_frame_after_m2"
+opset = 17
+input_name = "landmarks_146x2"
+input_shape = [1, 146, 2]
+output_names = ['blendshapes']
+output_shapes = [[52]]
+norm_mode = "roi_pixels_256"
+norm_mean = [0.0, 0.0, 0.0]
+norm_std = [1.0, 1.0, 1.0]
+file_fp32 = "M3_arkit52_blendshapes_fp32.onnx"
+sha256_fp32 = "7139BC186CA27C474648DAEC8FD604B9F7B9C508BECC20F1039EECDB10DCBDD2"
+file_fp16 = "M3_arkit52_blendshapes_fp16.onnx"
+sha256_fp16 = "9286180A5469BED9489764ACB8684CAEF87FE7E5CEA1BCE05C451FC3480B12F1"
+file_int8 = "M3_arkit52_blendshapes_fp16.onnx"
+sha256_int8 = "9286180A5469BED9489764ACB8684CAEF87FE7E5CEA1BCE05C451FC3480B12F1"
+int8_accepted = false
+int8_nme_delta_pct = 0.0000
+tier1_variant = "fp16"
+tier2_variant = "fp16"
+tier3_variant = "fp16"

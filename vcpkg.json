@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "aether-studio",
+  "version": "1.0.0",
+  "builtin-baseline": "3af1d1e60af2b2abf55760538cd607829029b07a",
+  "dependencies": [
+    "vulkan-headers",
+    "vulkan-loader",
+    "vulkan-memory-allocator",
+    "vulkan-validationlayers",
+    "freetype",
+    {
+      "name": "imgui",
+      "features": [
+        "docking-experimental",
+        "freetype",
+        "vulkan-binding",
+        "win32-binding"
+      ]
+    },
+    "tracy",
+    "catch2",
+    "nlohmann-json",
+    "implot",
+    "imguizmo"
+  ]
+}

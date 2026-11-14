@@ -1,0 +1,1040 @@
+//! Allocation-free node graph evaluation VM (`REQ-PLG-002`) and lock-free WASM latched bridge (§7.3).
+
+use std::time::Instant;
+
+use aether_ffi::{AetherGraphOutputs, AetherTrackingFrame};
+
+use crate::events::SharedParamBank;
+use crate::graph::compiler::{
+    CompareOp, CompiledGraphPlan, ExprSetData, Op, PoseData, ValuesArena,
+};
+
+/// Number of WASM node instances supported concurrently (`§7.5 <= 64`).
+pub const MAX_LATCHED_INSTANCES: usize = 64;
+/// Number of scalar floats exchanged per latched WASM instance per tick.
+pub const LATCHED_IO_FLOATS: usize = 16;
+
+/// Lock-free single-slot triple buffer transferring fixed `[f32; 16]` buffers between `T2` and Worker (`HR-02`).
+struct AtomicFloatTripleBuffer {
+    bufs: [[core::sync::atomic::AtomicU32; LATCHED_IO_FLOATS]; 3],
+    shared: core::sync::atomic::AtomicU8,
+    producer_idx: core::sync::atomic::AtomicU8,
+    consumer_idx: core::sync::atomic::AtomicU8,
+}
+
+impl AtomicFloatTripleBuffer {
+    fn new() -> Self {
+        Self {
+            bufs: core::array::from_fn(|_| {
+                core::array::from_fn(|_| core::sync::atomic::AtomicU32::new(0.0_f32.to_bits()))
+            }),
+            shared: core::sync::atomic::AtomicU8::new(1),
+            producer_idx: core::sync::atomic::AtomicU8::new(0),
+            consumer_idx: core::sync::atomic::AtomicU8::new(2),
+        }
+    }
+
+    fn write(&self, src: &[f32; LATCHED_IO_FLOATS]) {
+        use core::sync::atomic::Ordering;
+        let idx = usize::from(self.producer_idx.load(Ordering::Relaxed) & 0x03).min(2);
+        for (dst, &val) in self.bufs[idx].iter().zip(src.iter()) {
+            let clean = if val.is_finite() { val } else { 0.0 };
+            dst.store(clean.to_bits(), Ordering::Relaxed);
+        }
+        let prev = self.shared.swap(0x80 | (idx as u8), Ordering::AcqRel);
+        self.producer_idx.store(prev & 0x03, Ordering::Relaxed);
+    }
+
+    fn read(&self, out: &mut [f32; LATCHED_IO_FLOATS]) -> bool {
+        use core::sync::atomic::Ordering;
+        let cur = self.shared.load(Ordering::Acquire);
+        if cur & 0x80 != 0 {
+            let old = self.consumer_idx.load(Ordering::Relaxed) & 0x03;
+            let swapped = self.shared.swap(old, Ordering::AcqRel) & 0x03;
+            self.consumer_idx.store(swapped, Ordering::Relaxed);
+        }
+        let idx = usize::from(self.consumer_idx.load(Ordering::Relaxed) & 0x03).min(2);
+        for (dst, src) in out.iter_mut().zip(self.bufs[idx].iter()) {
+            *dst = f32::from_bits(src.load(Ordering::Relaxed));
+        }
+        (cur & 0x80) != 0
+    }
+}
+
+/// Lock-free wait-free per-instance triple-buffered I/O bridge between `T2` (`Op::Latched`) and async WASM plugins (§7.3).
+pub struct LatchedBridge {
+    inputs: Vec<AtomicFloatTripleBuffer>,
+    outputs: Vec<AtomicFloatTripleBuffer>,
+    active_flags: [core::sync::atomic::AtomicBool; MAX_LATCHED_INSTANCES],
+}
+
+impl LatchedBridge {
+    /// Allocates all 64 triple-buffered slots upfront at `PluginHost::create`.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut inputs = Vec::with_capacity(MAX_LATCHED_INSTANCES);
+        let mut outputs = Vec::with_capacity(MAX_LATCHED_INSTANCES);
+        for _ in 0..MAX_LATCHED_INSTANCES {
+            inputs.push(AtomicFloatTripleBuffer::new());
+            outputs.push(AtomicFloatTripleBuffer::new());
+        }
+        Self {
+            inputs,
+            outputs,
+            active_flags: core::array::from_fn(|_| core::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Marks whether a latched plugin instance slot is active.
+    pub fn set_active(&self, slot: usize, active: bool) {
+        if let Some(flag) = self.active_flags.get(slot) {
+            flag.store(active, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// `T2` side: publishes latest inputs and reads latest asynchronously produced plugin outputs without blocking.
+    pub fn exchange_t2(
+        &self,
+        slot: usize,
+        in_floats: &[f32; LATCHED_IO_FLOATS],
+        out_floats: &mut [f32; LATCHED_IO_FLOATS],
+    ) {
+        if let (Some(i_buf), Some(o_buf)) = (self.inputs.get(slot), self.outputs.get(slot)) {
+            i_buf.write(in_floats);
+            let _ = o_buf.read(out_floats);
+        }
+    }
+
+    /// Worker side: fetches latest `T2` inputs if active.
+    #[must_use]
+    pub fn read_worker_input(&self, slot: usize, out_in: &mut [f32; LATCHED_IO_FLOATS]) -> bool {
+        if self
+            .active_flags
+            .get(slot)
+            .is_some_and(|f| f.load(core::sync::atomic::Ordering::Acquire))
+        {
+            if let Some(buf) = self.inputs.get(slot) {
+                return buf.read(out_in);
+            }
+        }
+        false
+    }
+
+    /// Worker side: publishes computed plugin outputs back to `T2`.
+    pub fn write_worker_output(&self, slot: usize, out_floats: &[f32; LATCHED_IO_FLOATS]) {
+        if let Some(buf) = self.outputs.get(slot) {
+            buf.write(out_floats);
+        }
+    }
+}
+
+impl Default for LatchedBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Safe borrowed inputs passed from the FFI boundary or tests to graph evaluation.
+pub struct SafeGraphInputs<'a> {
+    /// Borrowed tracking frame if provided by C++.
+    pub tracking: Option<&'a AetherTrackingFrame>,
+    /// Current QPC timestamp (us).
+    pub now_us: u64,
+    /// Tick delta time (seconds).
+    pub dt_s: f32,
+    /// Monotonic tick counter.
+    pub tick_index: u32,
+    /// Latest DSP viseme weights `A, I, U, E, O`.
+    pub dsp_visemes: [f32; 5],
+    /// Latest DSP input level (dBFS).
+    pub dsp_rms_db: f32,
+    /// Held key bitset.
+    pub keys_down: [u64; 2],
+    /// Newly pressed key bitset.
+    pub keys_pressed: [u64; 2],
+    /// External parameter slots.
+    pub external_params: [f32; 64],
+}
+
+/// Optional host-level overrides mixed cleanly during [`CompiledGraphPlan::evaluate_with_host`].
+pub struct HostEvalContext<'a> {
+    /// Shared lock-free parameter / hotkey / expression override bank.
+    pub params: &'a SharedParamBank,
+    /// Lock-free triple-buffered WASM instance I/O bridge.
+    pub latched: &'a LatchedBridge,
+    /// Single-tick external hotkeys latched for this evaluation.
+    pub pending_hotkeys: [u64; 2],
+}
+
+#[inline]
+fn xorshift64(s: &mut u64) -> f32 {
+    let mut x = *s;
+    if x == 0 {
+        x = 0x9E37_79B9_7F4A_7C15;
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *s = x;
+    ((x >> 40) as f32) / ((1_u64 << 24) as f32)
+}
+
+#[inline]
+fn key_is_set(bits: [u64; 2], key_code: u32) -> bool {
+    let idx = usize::try_from(key_code).unwrap_or(usize::MAX);
+    if idx < 64 {
+        (bits[0] & (1_u64 << idx)) != 0
+    } else if idx < 128 {
+        (bits[1] & (1_u64 << (idx - 64))) != 0
+    } else {
+        false
+    }
+}
+
+#[inline]
+fn vec3_norm(v: [f32; 3]) -> [f32; 3] {
+    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if len_sq <= 1e-12 {
+        [0.0, 0.0, 1.0]
+    } else {
+        let inv = len_sq.sqrt().recip();
+        [v[0] * inv, v[1] * inv, v[2] * inv]
+    }
+}
+
+#[inline]
+fn quat_slerp_norm(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    let r = [
+        a[0] + (b[0] * sign - a[0]) * t,
+        a[1] + (b[1] * sign - a[1]) * t,
+        a[2] + (b[2] * sign - a[2]) * t,
+        a[3] + (b[3] * sign - a[3]) * t,
+    ];
+    let len_sq = r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3];
+    if len_sq <= 1e-12 {
+        [0.0, 0.0, 0.0, 1.0]
+    } else {
+        let inv = len_sq.sqrt().recip();
+        [r[0] * inv, r[1] * inv, r[2] * inv, r[3] * inv]
+    }
+}
+
+#[inline]
+fn push_event(outputs: &mut AetherGraphOutputs, event_id: u32) {
+    let idx = usize::try_from(outputs.event_count).unwrap_or(16);
+    if idx < outputs.events.len() {
+        outputs.events[idx] = event_id;
+        outputs.event_count = outputs.event_count.saturating_add(1);
+    }
+}
+
+#[inline]
+fn eval_op(
+    op: &Op,
+    arena: &mut ValuesArena,
+    states: &mut [crate::graph::compiler::NodeState],
+    inputs: &SafeGraphInputs<'_>,
+    host: Option<&HostEvalContext<'_>>,
+    outputs: &mut AetherGraphOutputs,
+) -> f32 {
+    use crate::graph::compiler::NodeState;
+    let dt = if inputs.dt_s.is_finite() && inputs.dt_s > 0.0 {
+        inputs.dt_s.min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+
+    match *op {
+        Op::CopyFloat { src, dst } => {
+            arena.floats[dst] = arena.floats[src];
+            arena.floats[dst]
+        }
+        Op::CopyBool { src, dst } => {
+            arena.bools[dst] = arena.bools[src];
+            arena.bools[dst] as f32
+        }
+        Op::CopyEvent { src, dst } => {
+            arena.events[dst] = arena.events[src];
+            arena.events[dst] as f32
+        }
+        Op::CopyVec3 { src, dst } => {
+            arena.vec3s[dst] = arena.vec3s[src];
+            arena.vec3s[dst][0]
+        }
+        Op::CopyQuat { src, dst } => {
+            arena.quats[dst] = arena.quats[src];
+            arena.quats[dst][3]
+        }
+        Op::CopyTransform { src, dst } => {
+            arena.transforms[dst] = arena.transforms[src];
+            arena.transforms[dst][0]
+        }
+        Op::CopyPose { src, dst } => {
+            arena.poses[dst] = arena.poses[src];
+            arena.poses[dst].pos[0][3]
+        }
+        Op::CopyExprSet { src, dst } => {
+            arena.expr_sets[dst] = arena.expr_sets[src];
+            arena.expr_sets[dst].weights[0]
+        }
+        Op::CopyVisemeSet { src, dst } => {
+            arena.viseme_sets[dst] = arena.viseme_sets[src];
+            arena.viseme_sets[dst][0]
+        }
+        Op::CopyColor { src, dst } => {
+            arena.colors[dst] = arena.colors[src];
+            arena.colors[dst][0]
+        }
+        Op::CastBoolToFloat { src, dst } => {
+            let v = if arena.bools[src] != 0 { 1.0 } else { 0.0 };
+            arena.floats[dst] = v;
+            v
+        }
+        Op::CastFloatToBool { src, dst } => {
+            let b = u32::from(arena.floats[src].abs() > 0.5);
+            arena.bools[dst] = b;
+            b as f32
+        }
+        Op::BroadcastFloatToVec3 { src, dst } => {
+            let v = arena.floats[src];
+            arena.vec3s[dst] = [v, v, v];
+            v
+        }
+        Op::TransformPosToVec3 { src, dst } => {
+            let xf = arena.transforms[src];
+            arena.vec3s[dst] = [xf[0], xf[1], xf[2]];
+            xf[0]
+        }
+
+        Op::NpuPose {
+            out_pose,
+            out_expr,
+            out_face_conf,
+            out_hand_conf,
+            out_body_conf,
+            out_ep_id,
+        } => {
+            if let Some(tr) = inputs.tracking {
+                let pose = PoseData {
+                    pos: tr.joint_positions_ws,
+                    rot: tr.joint_rotations_quat,
+                };
+                arena.poses[out_pose] = pose;
+
+                let mut expr = ExprSetData::default();
+                for (dst, &w) in expr.weights.iter_mut().zip(tr.arkit_blendshapes.iter()) {
+                    *dst = if w.is_finite() {
+                        w.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                }
+                arena.expr_sets[out_expr] = expr;
+                arena.floats[out_face_conf] = if (tr.valid_flags & 1) != 0 {
+                    tr.upper_body_confidence.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                arena.floats[out_hand_conf] =
+                    0.5 * (tr.left_hand_confidence + tr.right_hand_confidence).clamp(0.0, 2.0);
+                arena.floats[out_body_conf] = tr.upper_body_confidence.clamp(0.0, 1.0);
+                arena.floats[out_ep_id] = tr.active_execution_provider as f32;
+            } else {
+                arena.poses[out_pose] = PoseData::default();
+                arena.expr_sets[out_expr] = ExprSetData::default();
+                arena.floats[out_face_conf] = 0.0;
+                arena.floats[out_hand_conf] = 0.0;
+                arena.floats[out_body_conf] = 0.0;
+                arena.floats[out_ep_id] = 3.0;
+            }
+            arena.floats[out_face_conf]
+        }
+
+        Op::DspAudio {
+            out_visemes,
+            out_rms_db,
+            out_voice_active,
+        } => {
+            let mut vis = [0.0_f32; 5];
+            for (dst, &v) in vis.iter_mut().zip(inputs.dsp_visemes.iter()) {
+                *dst = if v.is_finite() {
+                    v.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+            arena.viseme_sets[out_visemes] = vis;
+            let rms = if inputs.dsp_rms_db.is_finite() {
+                inputs.dsp_rms_db
+            } else {
+                -90.0
+            };
+            arena.floats[out_rms_db] = rms;
+            let voice = u32::from(rms > -50.0 || vis.iter().any(|&v| v > 0.05));
+            arena.bools[out_voice_active] = voice;
+            vis[0]
+        }
+
+        Op::Hotkey {
+            key_code,
+            out_pressed,
+            out_held,
+        } => {
+            let ext_pressed = host.is_some_and(|h| key_is_set(h.pending_hotkeys, key_code));
+            let pressed = u32::from(key_is_set(inputs.keys_pressed, key_code) || ext_pressed);
+            let held = u32::from(key_is_set(inputs.keys_down, key_code) || pressed != 0);
+            arena.events[out_pressed] = pressed;
+            arena.bools[out_held] = held;
+            pressed as f32
+        }
+
+        Op::Clock {
+            out_time_s,
+            out_dt_s,
+            out_tick,
+        } => {
+            let t = (inputs.now_us as f64 * 1e-6) as f32;
+            arena.floats[out_time_s] = t;
+            arena.floats[out_dt_s] = dt;
+            arena.floats[out_tick] = inputs.tick_index as f32;
+            t
+        }
+
+        Op::ExternalParam {
+            slot,
+            hotkey_slot,
+            out_value,
+            out_trigger,
+        } => {
+            let mut v = inputs.external_params.get(slot).copied().unwrap_or(0.0);
+            if let Some(h) = host {
+                let bank_val = h.params.get_external_param(slot);
+                if bank_val != 0.0 || v == 0.0 {
+                    v = bank_val;
+                }
+            }
+            arena.floats[out_value] = if v.is_finite() { v } else { 0.0 };
+            let trig = u32::from(host.is_some_and(|h| key_is_set(h.pending_hotkeys, hotkey_slot)));
+            arena.events[out_trigger] = trig;
+            arena.floats[out_value]
+        }
+
+        Op::VisibilityFirstIk {
+            in_pose,
+            in_hand_conf,
+            in_body_conf,
+            out_pose,
+        } => {
+            let mut pose = arena.poses[in_pose];
+            let hand_w = arena.floats[in_hand_conf].clamp(0.0, 1.0);
+            let body_w = arena.floats[in_body_conf].clamp(0.0, 1.0);
+            // Scale left/right hand bones (slots 24..53) by hand confidence and lower body (<12) by body confidence.
+            for p in &mut pose.pos[1..12] {
+                p[3] *= body_w;
+            }
+            for p in &mut pose.pos[24..54] {
+                p[3] *= hand_w;
+            }
+            arena.poses[out_pose] = pose;
+            hand_w
+        }
+
+        Op::LookAt {
+            in_target,
+            in_weight,
+            out_yaw,
+            out_pitch,
+        } => {
+            let dir = vec3_norm(arena.vec3s[in_target]);
+            let w = arena.floats[in_weight].clamp(0.0, 1.0);
+            let yaw = dir[0].atan2(dir[2]) * w;
+            let pitch = (-dir[1]).clamp(-1.0, 1.0).asin() * w;
+            outputs.look_at_ws = [
+                arena.vec3s[in_target][0],
+                arena.vec3s[in_target][1],
+                arena.vec3s[in_target][2],
+                w,
+            ];
+            arena.floats[out_yaw] = yaw;
+            arena.floats[out_pitch] = pitch;
+            yaw
+        }
+
+        Op::IdleBreath {
+            in_rate_hz,
+            in_amp,
+            out_pose,
+        } => {
+            let mut pose = PoseData::default();
+            let rate = arena.floats[in_rate_hz].clamp(0.05, 4.0);
+            let amp = arena.floats[in_amp].clamp(0.0, 0.25);
+            let t = (inputs.now_us as f64 * 1e-6) as f32;
+            let phase = (t * rate * core::f32::consts::TAU).sin() * amp;
+            // Subtle additive chest rotation on bone 8 (UpperChest)
+            pose.rot[8] = [
+                phase * 0.5,
+                0.0,
+                0.0,
+                (1.0 - (phase * phase * 0.25).min(0.5)).sqrt(),
+            ];
+            arena.poses[out_pose] = pose;
+            phase
+        }
+
+        Op::IdleAttractor { in_blend, out_pose } => {
+            let blend = arena.floats[in_blend].clamp(0.0, 1.0);
+            let mut pose = PoseData::default();
+            pose.pos[0][3] = blend;
+            arena.poses[out_pose] = pose;
+            blend
+        }
+
+        Op::FootPlanting {
+            in_pose,
+            in_floor_y,
+            out_pose,
+        } => {
+            let mut pose = arena.poses[in_pose];
+            let floor_y = arena.floats[in_floor_y];
+            for foot_bone in [5_usize, 6_usize] {
+                if pose.pos[foot_bone][1] < floor_y {
+                    pose.pos[foot_bone][1] = floor_y;
+                }
+            }
+            arena.poses[out_pose] = pose;
+            floor_y
+        }
+
+        Op::FormantLipSync {
+            in_visemes,
+            in_gain,
+            out_expr,
+        } => {
+            let vis = arena.viseme_sets[in_visemes];
+            let gain = arena.floats[in_gain].clamp(0.0, 4.0);
+            let mut expr = ExprSetData::default();
+            for (i, &w) in vis.iter().enumerate() {
+                if let Some(slot) = expr.weights.get_mut(52 + i) {
+                    *slot = (w * gain).clamp(0.0, 1.0);
+                }
+            }
+            // Map A-I-U-E-O smoothly onto Appendix B jawOpen (slot 24) and mouthFunnel/Smile hints.
+            expr.weights[24] =
+                ((vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65) * gain).clamp(0.0, 1.0);
+            arena.expr_sets[out_expr] = expr;
+            expr.weights[24]
+        }
+
+        Op::ExpressionTrigger {
+            in_trigger,
+            slot,
+            fade_in_ms,
+            hold_ms,
+            fade_out_ms,
+            target_weight,
+            state_idx,
+            out_expr,
+            out_active,
+        } => {
+            let trig = arena.events[in_trigger];
+            let NodeState::Trigger(st) = &mut states[state_idx] else {
+                return 0.0;
+            };
+            let fi = (fade_in_ms * 0.001).max(0.001);
+            let ho = (hold_ms * 0.001).max(0.0);
+            let fo = (fade_out_ms * 0.001).max(0.001);
+            let total = fi + ho + fo;
+            if trig > 0 && st.prev_event == 0 {
+                st.active = true;
+                st.elapsed_s = 0.0;
+            }
+            st.prev_event = trig;
+
+            let env = if st.active {
+                let w = if st.elapsed_s < fi {
+                    st.elapsed_s / fi
+                } else if st.elapsed_s < fi + ho {
+                    1.0
+                } else if st.elapsed_s < total {
+                    1.0 - (st.elapsed_s - fi - ho) / fo
+                } else {
+                    st.active = false;
+                    0.0
+                };
+                st.elapsed_s += dt;
+                (w * target_weight).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let mut expr = ExprSetData::default();
+            if slot < 64 {
+                expr.weights[slot] = env;
+                expr.override_mask[slot] = if env > 0.001 { 1.0 } else { 0.0 };
+            }
+            arena.expr_sets[out_expr] = expr;
+            arena.floats[out_active] = env;
+            env
+        }
+
+        Op::ExpressionMixer {
+            in_a,
+            in_b,
+            in_weight,
+            out_expr,
+        } => {
+            let a = arena.expr_sets[in_a];
+            let b = arena.expr_sets[in_b];
+            let t = arena.floats[in_weight].clamp(0.0, 1.0);
+            let mut out = ExprSetData::default();
+            for i in 0..64 {
+                out.weights[i] = (a.weights[i] * (1.0 - t) + b.weights[i] * t).clamp(0.0, 1.0);
+                out.override_mask[i] = a.override_mask[i].max(b.override_mask[i] * t);
+            }
+            arena.expr_sets[out_expr] = out;
+            t
+        }
+
+        Op::AutoBlink {
+            in_face_conf,
+            in_interval_s,
+            state_idx,
+            out_expr,
+            out_blink,
+        } => {
+            let conf = arena.floats[in_face_conf];
+            let interval = arena.floats[in_interval_s].clamp(0.5, 20.0);
+            let NodeState::AutoBlink(st) = &mut states[state_idx] else {
+                return 0.0;
+            };
+            let blink = if conf < 0.25 {
+                st.timer_s += dt;
+                if st.timer_s >= interval {
+                    st.timer_s = 0.0;
+                    st.blink_s = 0.16;
+                }
+                if st.blink_s > 0.0 {
+                    st.blink_s = (st.blink_s - dt).max(0.0);
+                    let phase = 1.0 - (st.blink_s / 0.16 - 0.5).abs() * 2.0;
+                    phase.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            } else {
+                st.timer_s = 0.0;
+                st.blink_s = 0.0;
+                0.0
+            };
+            let mut expr = ExprSetData::default();
+            expr.weights[8] = blink; // eyeBlinkLeft
+            expr.weights[9] = blink; // eyeBlinkRight
+            arena.expr_sets[out_expr] = expr;
+            arena.floats[out_blink] = blink;
+            blink
+        }
+
+        Op::BlendshapeRemap {
+            in_expr,
+            slot,
+            in_min,
+            in_max,
+            out_min,
+            out_max,
+            out_expr,
+        } => {
+            let mut expr = arena.expr_sets[in_expr];
+            let denom = if (in_max - in_min).abs() < 1e-6 {
+                1.0
+            } else {
+                in_max - in_min
+            };
+            if slot < 64 {
+                let u = ((expr.weights[slot] - in_min) / denom).clamp(0.0, 1.0);
+                expr.weights[slot] = (out_min + (out_max - out_min) * u).clamp(0.0, 1.0);
+            }
+            arena.expr_sets[out_expr] = expr;
+            expr.weights.get(slot).copied().unwrap_or(0.0)
+        }
+
+        Op::AddFloat { in_a, in_b, out } => {
+            let v = arena.floats[in_a] + arena.floats[in_b];
+            arena.floats[out] = v;
+            v
+        }
+        Op::AddVec3 { in_a, in_b, out } => {
+            let a = arena.vec3s[in_a];
+            let b = arena.vec3s[in_b];
+            arena.vec3s[out] = [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+            arena.vec3s[out][0]
+        }
+        Op::MulFloat { in_a, in_b, out } => {
+            let v = arena.floats[in_a] * arena.floats[in_b];
+            arena.floats[out] = v;
+            v
+        }
+        Op::MulVec3 { in_a, in_b, out } => {
+            let a = arena.vec3s[in_a];
+            let b = arena.vec3s[in_b];
+            arena.vec3s[out] = [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
+            arena.vec3s[out][0]
+        }
+        Op::LerpFloat {
+            in_a,
+            in_b,
+            in_t,
+            out,
+        } => {
+            let t = arena.floats[in_t].clamp(0.0, 1.0);
+            let v = arena.floats[in_a] + (arena.floats[in_b] - arena.floats[in_a]) * t;
+            arena.floats[out] = v;
+            v
+        }
+        Op::LerpVec3 {
+            in_a,
+            in_b,
+            in_t,
+            out,
+        } => {
+            let t = arena.floats[in_t].clamp(0.0, 1.0);
+            let a = arena.vec3s[in_a];
+            let b = arena.vec3s[in_b];
+            arena.vec3s[out] = [
+                a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t,
+            ];
+            arena.vec3s[out][0]
+        }
+        Op::LerpQuat {
+            in_a,
+            in_b,
+            in_t,
+            out,
+        } => {
+            let t = arena.floats[in_t].clamp(0.0, 1.0);
+            let q = quat_slerp_norm(arena.quats[in_a], arena.quats[in_b], t);
+            arena.quats[out] = q;
+            q[3]
+        }
+        Op::Remap {
+            src,
+            in_min,
+            in_max,
+            out_min,
+            out_max,
+            clamp,
+            dst,
+        } => {
+            let denom = if (in_max - in_min).abs() < 1e-6 {
+                1.0
+            } else {
+                in_max - in_min
+            };
+            let mut u = (arena.floats[src] - in_min) / denom;
+            if clamp {
+                u = u.clamp(0.0, 1.0);
+            }
+            let v = out_min + (out_max - out_min) * u;
+            arena.floats[dst] = v;
+            v
+        }
+        Op::Clamp {
+            src,
+            min_v,
+            max_v,
+            dst,
+        } => {
+            let v = arena.floats[src].clamp(min_v, max_v);
+            arena.floats[dst] = v;
+            v
+        }
+        Op::Smooth {
+            src,
+            cutoff_hz,
+            state_idx,
+            dst,
+        } => {
+            let x = arena.floats[src];
+            let NodeState::Smooth(st) = &mut states[state_idx] else {
+                return 0.0;
+            };
+            let v = if st.initialized {
+                let tau = (core::f32::consts::TAU * cutoff_hz.max(0.05)).recip();
+                let alpha = dt / (dt + tau);
+                st.prev += (x - st.prev) * alpha;
+                st.prev
+            } else {
+                st.initialized = true;
+                st.prev = x;
+                x
+            };
+            arena.floats[dst] = v;
+            v
+        }
+        Op::Spring {
+            src,
+            stiffness,
+            damping,
+            state_idx,
+            dst,
+        } => {
+            let target = arena.floats[src];
+            let NodeState::Spring(st) = &mut states[state_idx] else {
+                return 0.0;
+            };
+            if st.initialized {
+                let accel = (target - st.pos) * stiffness - st.vel * damping;
+                st.vel += accel * dt;
+                st.pos += st.vel * dt;
+            } else {
+                st.initialized = true;
+                st.pos = target;
+                st.vel = 0.0;
+            }
+            arena.floats[dst] = st.pos;
+            st.pos
+        }
+        Op::Compare {
+            in_a,
+            in_b,
+            cmp,
+            out,
+        } => {
+            let a = arena.floats[in_a];
+            let b = arena.floats[in_b];
+            let ok = match cmp {
+                CompareOp::Gt => a > b,
+                CompareOp::Lt => a < b,
+                CompareOp::Ge => a >= b,
+                CompareOp::Le => a <= b,
+                CompareOp::Eq => (a - b).abs() < 1e-5,
+            };
+            let res = u32::from(ok);
+            arena.bools[out] = res;
+            res as f32
+        }
+        Op::And { in_a, in_b, out } => {
+            let r = u32::from(arena.bools[in_a] != 0 && arena.bools[in_b] != 0);
+            arena.bools[out] = r;
+            r as f32
+        }
+        Op::Or { in_a, in_b, out } => {
+            let r = u32::from(arena.bools[in_a] != 0 || arena.bools[in_b] != 0);
+            arena.bools[out] = r;
+            r as f32
+        }
+        Op::Not { src, out } => {
+            let r = u32::from(arena.bools[src] == 0);
+            arena.bools[out] = r;
+            r as f32
+        }
+        Op::Select {
+            in_cond,
+            in_a,
+            in_b,
+            out,
+        } => {
+            let v = if arena.bools[in_cond] != 0 {
+                arena.floats[in_a]
+            } else {
+                arena.floats[in_b]
+            };
+            arena.floats[out] = v;
+            v
+        }
+        Op::DelayRead { state_idx, dst } => {
+            let prev = match &states[state_idx] {
+                NodeState::Delay(s) => s.prev,
+                _ => 0.0,
+            };
+            arena.floats[dst] = prev;
+            prev
+        }
+        Op::DelayWrite { src, state_idx } => {
+            let val = arena.floats[src];
+            if let NodeState::Delay(s) = &mut states[state_idx] {
+                s.prev = val;
+            }
+            val
+        }
+        Op::Random {
+            in_trigger,
+            state_idx,
+            dst,
+        } => {
+            let trig = arena.events[in_trigger];
+            let NodeState::Random(st) = &mut states[state_idx] else {
+                return 0.0;
+            };
+            if trig > 0 {
+                st.last = xorshift64(&mut st.seed);
+            }
+            arena.floats[dst] = st.last;
+            st.last
+        }
+        Op::Curve { src, lut_idx, dst } => {
+            let u = arena.floats[src].clamp(0.0, 1.0) * 63.0;
+            let lo = (u.floor() as usize).min(63);
+            let hi = (lo + 1).min(63);
+            let frac = u - (lo as f32);
+            let lut = &arena.luts[lut_idx];
+            let v = lut[lo] + (lut[hi] - lut[lo]) * frac;
+            arena.floats[dst] = v;
+            v
+        }
+
+        Op::OutputPose { in_pose } => {
+            let pose = &arena.poses[in_pose];
+            outputs.bone_rotation_offsets = pose.rot;
+            for (dst, &src) in outputs.ik_targets.iter_mut().take(6).zip(pose.pos.iter()) {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[7] = src[3];
+            }
+            pose.pos[0][3]
+        }
+
+        Op::OutputExpressions { in_expr } => {
+            let expr = &arena.expr_sets[in_expr];
+            outputs.expression_weights = expr.weights;
+            outputs.expression_override = expr.override_mask;
+            if let Some(h) = host {
+                for slot in 0..64 {
+                    let ov = h.params.get_expression_override(slot);
+                    if ov > 0.001 {
+                        outputs.expression_weights[slot] = ov;
+                        outputs.expression_override[slot] = 1.0;
+                    }
+                }
+            }
+            if inputs.external_params[0].is_finite() && inputs.external_params[0] != 0.0 {
+                outputs.expression_override[0] = inputs.external_params[0].clamp(0.0, 1.0);
+            }
+            outputs.expression_weights[0]
+        }
+
+        Op::CameraControl { in_focal, in_flat } => {
+            let focal = arena.floats[in_focal];
+            let flat = arena.floats[in_flat];
+            outputs.ik_targets[6][0] = focal;
+            outputs.ik_targets[6][1] = flat;
+            flat
+        }
+
+        Op::LightControl {
+            in_dir,
+            in_intensity,
+        } => {
+            let dir = vec3_norm(arena.vec3s[in_dir]);
+            let intensity = arena.floats[in_intensity];
+            outputs.look_at_ws = [dir[0], dir[1], dir[2], intensity];
+            intensity
+        }
+
+        Op::PropAttach { in_transform } => {
+            let xf = arena.transforms[in_transform];
+            outputs.ik_targets[7] = [xf[0], xf[1], xf[2], xf[3], xf[4], xf[5], xf[6], xf[7]];
+            xf[0]
+        }
+
+        Op::AsyncOutputSignal {
+            in_val,
+            in_trigger,
+            event_tag,
+        } => {
+            if arena.events[in_trigger] > 0 {
+                push_event(outputs, event_tag);
+            }
+            arena.floats[in_val]
+        }
+
+        Op::Latched {
+            instance_slot,
+            ref in_floats,
+            ref out_floats,
+        } => {
+            let mut in_buf = [0.0_f32; LATCHED_IO_FLOATS];
+            for (dst, &slot) in in_buf.iter_mut().zip(in_floats.iter()) {
+                if let Some(s) = slot {
+                    *dst = arena.floats[s];
+                }
+            }
+            let mut out_buf = [0.0_f32; LATCHED_IO_FLOATS];
+            if let Some(h) = host {
+                h.latched.exchange_t2(instance_slot, &in_buf, &mut out_buf);
+            }
+            for (i, &slot) in out_floats.iter().enumerate() {
+                if let Some(s) = slot {
+                    arena.floats[s] = out_buf[i];
+                }
+            }
+            out_buf[0]
+        }
+    }
+}
+
+impl CompiledGraphPlan {
+    /// Evaluates the compiled graph deterministically with zero heap allocation (`HR-01`, `REQ-PLG-002`).
+    pub fn evaluate(&mut self, inputs: &SafeGraphInputs<'_>, outputs: &mut AetherGraphOutputs) {
+        let _ = self.evaluate_with_host(inputs, None, outputs);
+    }
+
+    /// Evaluates the compiled graph with full `PluginHost` external params & latched WASM bridge; returns elapsed `us`.
+    pub fn evaluate_with_host(
+        &mut self,
+        inputs: &SafeGraphInputs<'_>,
+        host: Option<&HostEvalContext<'_>>,
+        outputs: &mut AetherGraphOutputs,
+    ) -> f32 {
+        let t0 = Instant::now();
+        outputs.expression_weights = [0.0; 64];
+        outputs.expression_override = [0.0; 64];
+        outputs.ik_targets = [[0.0; 8]; 8];
+        outputs.bone_rotation_offsets = [[0.0; 4]; 55];
+        outputs.look_at_ws = [0.0, 0.0, 1.0, 0.0];
+        outputs.events = [0; 16];
+        outputs.event_count = 0;
+
+        // If tracking arrived and the graph contains no OutputPose, still keep expressions sane? No: deterministic ops drive outputs; fallback only if empty op list.
+        if self.ops.is_empty() {
+            if let Some(track) = inputs.tracking {
+                for (dst, &src) in outputs
+                    .expression_weights
+                    .iter_mut()
+                    .zip(track.arkit_blendshapes.iter())
+                {
+                    *dst = src.clamp(0.0, 1.0);
+                }
+            }
+            for (idx, &v) in inputs.dsp_visemes.iter().enumerate() {
+                if let Some(slot) = outputs.expression_weights.get_mut(52 + idx) {
+                    *slot = v.clamp(0.0, 1.0);
+                }
+            }
+            if inputs.external_params[0].is_finite() {
+                outputs.expression_override[0] = inputs.external_params[0].clamp(0.0, 1.0);
+            }
+            return t0.elapsed().as_secs_f32() * 1_000_000.0;
+        }
+
+        // Split borrows between ops/meta and mutable arena/states.
+        let arena = &mut self.arena;
+        let states = &mut self.states;
+        for (op_idx, op) in self.ops.iter().enumerate() {
+            let op_start = Instant::now();
+            let val = eval_op(op, arena, states, inputs, host, outputs);
+            let op_us = op_start.elapsed().as_secs_f32() * 1_000_000.0;
+            if let Some(node_slot) = self.op_to_node_slot.get(op_idx).copied().flatten() {
+                if node_slot < self.node_eval_us.len() {
+                    self.node_eval_us[node_slot] = op_us;
+                    self.node_live_values[node_slot] = val;
+                }
+            }
+        }
+
+        t0.elapsed().as_secs_f32() * 1_000_000.0
+    }
+}

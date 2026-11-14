@@ -1,0 +1,49 @@
+# Build outputs and caches
+/build/
+/target/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/.vs/
+/.cache/
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.exe
+*.dll
+
+# Local runtime / crash / log outputs
+/crashes/
+/logs/
+*.dmp
+*.log
+
+# Python / tooling caches
+__pycache__/
+*.py[cod]
+/dist/
+/out/
+
+# Packaged release artifacts (attached to GitHub releases, not committed)
+*.zip
+*.msi
+*.wixpdb
+
+# IDE / OS junk
+/.vscode/
+/.idea/
+/.claude/
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.sln
+*.vcxproj*
+
+# Keep generated FFI contract header and model manifest tracked in git!
+!include/aether_ffi_contract.h
+/models/*.onnx
+/models/*.pre.onnx
+!models/manifest.toml
