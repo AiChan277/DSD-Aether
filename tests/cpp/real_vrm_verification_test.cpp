@@ -95,6 +95,129 @@ ImageLumaStats analyze_rgba8(const std::vector<uint8_t>& rgba, uint32_t w, uint3
     return st;
 }
 
+aether::animation::RestSkeletonMetrics build_vrm_rest_metrics(const aether::renderer::GpuAvatar& avatar) {
+    namespace anim = aether::animation;
+    anim::RestSkeletonMetrics rm = anim::build_default_humanoid_rest_metrics();
+
+    std::vector<anim::Quat> joint_world_rot(avatar.joints.size(), anim::Quat::identity());
+    std::vector<uint8_t> rot_resolved(avatar.joints.size(), 0U);
+    auto resolve_joint_world_rot = [&](auto& self, size_t idx, int depth) -> anim::Quat {
+        if (idx >= avatar.joints.size() || depth > 128) {
+            return anim::Quat::identity();
+        }
+        if (rot_resolved[idx] != 0U) {
+            return joint_world_rot[idx];
+        }
+        const auto& j = avatar.joints[idx];
+        const float* br = j.bind_rotation_quat;
+        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
+        const anim::Quat q_local =
+            (q2 > 1e-6f) ? anim::normalize(anim::Quat{br[0], br[1], br[2], br[3]}) : anim::Quat::identity();
+        anim::Quat q_parent = anim::Quat::identity();
+        if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar.joints.size()) {
+            q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
+        }
+        joint_world_rot[idx] = anim::normalize(q_parent * q_local);
+        rot_resolved[idx] = 1U;
+        return joint_world_rot[idx];
+    };
+    for (size_t i = 0; i < avatar.joints.size(); ++i) {
+        (void)resolve_joint_world_rot(resolve_joint_world_rot, i, 0);
+    }
+
+    std::array<anim::Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
+    const uint16_t hips_j = avatar.desc.humanoid_to_joint[AETHER_BONE_HIPS];
+    if (hips_j < avatar.joint_rest_world_pos.size()) {
+        const auto& hp = avatar.joint_rest_world_pos[hips_j];
+        world[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
+        rm.rest_world_rotations[AETHER_BONE_HIPS] =
+            (hips_j < joint_world_rot.size()) ? joint_world_rot[hips_j] : anim::Quat::identity();
+    } else {
+        world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
+        rm.rest_world_rotations[AETHER_BONE_HIPS] = anim::Quat::identity();
+    }
+    rm.rest_local_rotations[AETHER_BONE_HIPS] = rm.rest_world_rotations[AETHER_BONE_HIPS];
+
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        const uint16_t j = avatar.desc.humanoid_to_joint[b];
+        if (j < avatar.joint_rest_world_pos.size()) {
+            const auto& jp = avatar.joint_rest_world_pos[j];
+            world[b] = {jp[0], jp[1], jp[2]};
+            rm.rest_world_rotations[b] =
+                (j < joint_world_rot.size()) ? joint_world_rot[j] : rm.rest_world_rotations[pi];
+        } else {
+            world[b] = world[pi] + rm.rest_local_positions[b];
+            rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
+        }
+        rm.rest_local_rotations[b] =
+            anim::normalize(anim::conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
+    }
+
+    rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        rm.rest_local_positions[b] = world[b] - world[pi];
+        rm.bone_lengths[b] = std::max(anim::length(rm.rest_local_positions[b]), 0.02f);
+    }
+
+    uint32_t custom_cnt = 0;
+    for (const auto& col : avatar.colliders) {
+        if (custom_cnt >= rm.custom_colliders.size()) {
+            break;
+        }
+        uint16_t hb = AETHER_BONE_HIPS;
+        std::array<float, 3> jr{0.0f, 0.0f, 0.0f};
+        anim::Quat col_j_rot = anim::Quat::identity();
+        if (col.joint_index < avatar.joints.size()) {
+            jr = avatar.joint_rest_world_pos[col.joint_index];
+            col_j_rot = joint_world_rot[col.joint_index];
+            uint32_t j = col.joint_index;
+            for (size_t steps = 0; steps < avatar.joints.size() && j < avatar.joints.size(); ++steps) {
+                const uint16_t candidate = avatar.joints[j].humanoid_bone;
+                if (candidate < AETHER_HUMANOID_BONE_COUNT) {
+                    hb = candidate;
+                    break;
+                }
+                const int32_t p_idx = avatar.joints[j].parent_index;
+                if (p_idx < 0 || static_cast<size_t>(p_idx) >= avatar.joints.size()) {
+                    break;
+                }
+                j = static_cast<uint32_t>(p_idx);
+            }
+        }
+        auto& dst = rm.custom_colliders[custom_cnt++];
+        dst.attached_bone = static_cast<int32_t>(hb);
+        dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
+        dst.radius = std::clamp(col.radius, 0.01f, 0.50f);
+        const anim::Vec3 j_pos{jr[0], jr[1], jr[2]};
+        const anim::Vec3 a_ws = j_pos + anim::rotate_vec(col_j_rot, {col.offset[0], col.offset[1], col.offset[2]});
+        const anim::Vec3 b_ws = j_pos + anim::rotate_vec(col_j_rot, {col.tail[0], col.tail[1], col.tail[2]});
+        const anim::Quat inv_hb_rot = anim::conjugate(rm.rest_world_rotations[hb]);
+        dst.local_a = anim::rotate_vec(inv_hb_rot, a_ws - world[hb]);
+        dst.local_b = anim::rotate_vec(inv_hb_rot, b_ws - world[hb]);
+    }
+    rm.custom_collider_count = custom_cnt;
+    rm.valid = true;
+    return rm;
+}
+
+double mat3x4_delta_angle_deg(const float m[12]) noexcept {
+    const double trace = static_cast<double>(m[0]) + static_cast<double>(m[5]) + static_cast<double>(m[10]);
+    const double cos_theta = std::clamp(0.5 * (trace - 1.0), -1.0, 1.0);
+    return std::acos(cos_theta) * static_cast<double>(aether::animation::kRadToDeg);
+}
+
+aether::animation::Vec3 transform_point_3x4(const float m[12], const aether::animation::Vec3& p) noexcept {
+    return {
+        m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3],
+        m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
+        m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11],
+    };
+}
+
 } // namespace
 
 TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagnostics", "[vrm][snapshot]") {
@@ -163,6 +286,93 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
 
     const std::filesystem::path snap_dir(AETHER_VRM_SNAPSHOT_DIR);
     std::filesystem::create_directories(snap_dir);
+
+    // Evaluate neutral tracking (P=0, Y=0, R=0, T=(0,1.48,0), untracked hands) across 60 frames at 60 Hz
+    // and upload the resulting upright A-pose to both GPU pose slots before capturing headless snapshots.
+    const aether::animation::RestSkeletonMetrics rm = build_vrm_rest_metrics(*avatar);
+    std::array<aether::animation::Vec3, AETHER_HUMANOID_BONE_COUNT> rest_ws{};
+    rest_ws[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
+    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const int32_t p = rm.parent_indices[b];
+        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+        rest_ws[b] = rest_ws[pi] + rm.rest_local_positions[b];
+    }
+
+    aether::animation::SimEngine engine;
+    engine.reset(rm);
+    aether::animation::SimEngineConfig sim_cfg{};
+    sim_cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs graph_out{};
+    aether::animation::SkinningFrame skin{};
+    uint64_t sim_t_us = 1000000ULL;
+    for (int f = 0; f < 60; ++f) {
+        AetherTrackingFrame tf{};
+        tf.frame_sequence = static_cast<uint32_t>(f + 1);
+        tf.capture_timestamp_us = sim_t_us;
+        tf.inference_complete_us = sim_t_us;
+        tf.valid_flags = 0x01U | 0x08U;
+        tf.upper_body_confidence = 0.95f;
+        tf.left_hand_confidence = 0.0f;
+        tf.right_hand_confidence = 0.0f;
+        tf.lower_body_confidence = 0.0f;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            tf.joint_rotations_quat[b][3] = 1.0f;
+            tf.joint_positions_ws[b][3] = 0.0f;
+        }
+        tf.joint_positions_ws[AETHER_BONE_HIPS][0] = rm.rest_local_positions[AETHER_BONE_HIPS].x;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][1] = rm.rest_local_positions[AETHER_BONE_HIPS].y;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][2] = rm.rest_local_positions[AETHER_BONE_HIPS].z;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][3] = 0.95f;
+        tf.joint_positions_ws[AETHER_BONE_SPINE][3] = 0.95f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][0] = 0.0f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.48f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][2] = 0.0f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+        engine.tick(tf, dsp, graph_out, sim_t_us, 0.0f, sim_cfg, skin);
+        sim_t_us += 16667ULL;
+    }
+
+    const double head_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_HEAD]);
+    const double neck_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_NECK]);
+    const double chest_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_CHEST]);
+    const double spine_deg = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_SPINE]);
+    const auto l_sh_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_LEFT_SHOULDER], rest_ws[AETHER_BONE_LEFT_SHOULDER]);
+    const auto r_sh_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_RIGHT_SHOULDER], rest_ws[AETHER_BONE_RIGHT_SHOULDER]);
+    const auto l_ua_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_LEFT_UPPER_ARM], rest_ws[AETHER_BONE_LEFT_UPPER_ARM]);
+    const auto l_la_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_LEFT_LOWER_ARM], rest_ws[AETHER_BONE_LEFT_LOWER_ARM]);
+    const auto r_ua_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_RIGHT_UPPER_ARM], rest_ws[AETHER_BONE_RIGHT_UPPER_ARM]);
+    const auto r_la_ws =
+        transform_point_3x4(skin.bone_matrices[AETHER_BONE_RIGHT_LOWER_ARM], rest_ws[AETHER_BONE_RIGHT_LOWER_ARM]);
+    const auto l_dir = aether::animation::normalize_safe(l_la_ws - l_ua_ws);
+    const auto r_dir = aether::animation::normalize_safe(r_la_ws - r_ua_ws);
+    const double l_drop_deg =
+        std::asin(std::clamp(static_cast<double>(-l_dir.y), -1.0, 1.0)) * static_cast<double>(aether::animation::kRadToDeg);
+    const double r_drop_deg =
+        std::asin(std::clamp(static_cast<double>(-r_dir.y), -1.0, 1.0)) * static_cast<double>(aether::animation::kRadToDeg);
+
+    std::printf(
+        "[NEUTRAL-POSE] delta_deg(head=%.3f neck=%.3f chest=%.3f spine=%.3f) sh_dy=%.4f arm_drop=(L=%.2f, R=%.2f deg)\n",
+        head_deg, neck_deg, chest_deg, spine_deg, static_cast<double>(std::abs(l_sh_ws.y - r_sh_ws.y)), l_drop_deg,
+        r_drop_deg);
+
+    CHECK(head_deg < 1.0);
+    CHECK(neck_deg < 1.0);
+    CHECK(chest_deg < 1.0);
+    CHECK(spine_deg < 1.0);
+    CHECK(std::abs(l_sh_ws.y - r_sh_ws.y) < 0.015f);
+    CHECK(l_drop_deg >= 30.0);
+    CHECK(l_drop_deg <= 46.0);
+    CHECK(r_drop_deg >= 30.0);
+    CHECK(r_drop_deg <= 46.0);
+
+    avatar->update_pose(0, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
+    avatar->update_pose(1, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
 
     auto rig = aether::renderer::LightingRig::default_three_point();
     rig.bg_rgba[0] = 0.067f;
@@ -266,31 +476,7 @@ TEST_CASE("120-frame idle steady state on 8590256991748008892.vrm (330 Hz SimEng
     REQUIRE(avatar->colliders.size() > 0U);
 
     // 1. Verify full SimEngine idle convergence across 120 frames after tracking loss (at 333 Hz high FPS).
-    aether::animation::RestSkeletonMetrics rm = aether::animation::build_default_humanoid_rest_metrics();
-    const uint16_t hips_j = avatar->desc.humanoid_to_joint[AETHER_BONE_HIPS];
-    if (hips_j < avatar->joint_rest_world_pos.size()) {
-        const auto& hp = avatar->joint_rest_world_pos[hips_j];
-        rm.rest_local_positions[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
-    }
-    std::array<aether::animation::Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
-    world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        const uint16_t j = avatar->desc.humanoid_to_joint[b];
-        if (j < avatar->joint_rest_world_pos.size()) {
-            const auto& jp = avatar->joint_rest_world_pos[j];
-            world[b] = {jp[0], jp[1], jp[2]};
-        } else {
-            world[b] = world[pi] + rm.rest_local_positions[b];
-        }
-    }
-    for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        const int32_t p = rm.parent_indices[b];
-        const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
-        rm.rest_local_positions[b] = world[b] - world[pi];
-        rm.bone_lengths[b] = std::max(aether::animation::length(rm.rest_local_positions[b]), 0.02f);
-    }
+    const aether::animation::RestSkeletonMetrics rm = build_vrm_rest_metrics(*avatar);
 
     aether::animation::SimEngine engine;
     engine.reset(rm);
@@ -311,9 +497,17 @@ TEST_CASE("120-frame idle steady state on 8590256991748008892.vrm (330 Hz SimEng
         tf.upper_body_confidence = 0.9f;
         for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
             tf.joint_rotations_quat[b][3] = 1.0f;
-            tf.joint_positions_ws[b][3] = 0.9f;
+            tf.joint_positions_ws[b][3] = 0.0f;
         }
+        tf.joint_positions_ws[AETHER_BONE_HIPS][0] = rm.rest_local_positions[AETHER_BONE_HIPS].x;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][1] = rm.rest_local_positions[AETHER_BONE_HIPS].y;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][2] = rm.rest_local_positions[AETHER_BONE_HIPS].z;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][3] = 0.9f;
+        tf.joint_positions_ws[AETHER_BONE_SPINE][3] = 0.9f;
         tf.joint_positions_ws[AETHER_BONE_HEAD][0] = 0.015f * static_cast<float>(f % 3);
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.48f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][2] = 0.0f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.9f;
         tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = 0.08f;
         tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = 0.9968f;
         engine.tick(tf, dsp, graph_out, t_us, 0.010f, sim_cfg, skin);

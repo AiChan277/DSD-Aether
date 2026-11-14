@@ -1,5 +1,6 @@
 #pragma once
 
+#include "animation/ik_solvers.hpp"
 #include "animation/one_euro.hpp"
 
 #include <array>
@@ -15,7 +16,7 @@ struct VisibilityFirstConfig {
     float gate_low{0.30f};     // Appendix C: 0.30
     float gate_high{0.75f};    // Appendix C: 0.75
     float slew_per_s{4.0f};    // Appendix C: 4.0 /s (>= 250 ms full transition)
-    float breathing_hz{0.20f}; // Ultra-smooth 0.2 Hz optional breathing cycle
+    float breathing_hz{0.22f}; // Ultra-smooth 0.22 Hz optional breathing cycle
     float chest_pitch_rad{1.2f * kDegToRad};
     float shoulder_lift_m{0.004f};
     float attractor_lift_m{0.006f};
@@ -48,6 +49,7 @@ struct SolvedBodyPose {
     Quat right_wrist_rot_ws{Quat::identity()};
     float left_wrist_track_weight{0.0f};
     float right_wrist_track_weight{0.0f};
+    float lower_body_track_weight{0.0f};
     Vec3 left_foot_target_ws{};
     Vec3 right_foot_target_ws{};
     Vec3 head_target_pos_ws{};
@@ -76,6 +78,9 @@ class VisibilityFirstSolver {
     /** Updates rest-pose hips & foot anchors when switching avatars while preserving filter weights. */
     void set_rest_anchors(Vec3 root_hips_pos, Vec3 l_foot_rest, Vec3 r_foot_rest) noexcept;
 
+    /** Sets full avatar rest metrics (`rest_local_rotations`, `rest_world_rotations`) for relative deltas. */
+    void set_rest_metrics(const RestSkeletonMetrics& metrics) noexcept { rest_metrics_ = metrics; }
+
     void solve(const FilteredTrackingState& tracked, const AetherGraphOutputs& graph_out, float dt_s,
                const VisibilityFirstConfig& cfg, SolvedBodyPose& out) noexcept;
 
@@ -96,6 +101,22 @@ class VisibilityFirstSolver {
     Vec3 r_wrist_vel_{};
     float l_clavicle_lag_{0.0f};
     float r_clavicle_lag_{0.0f};
+
+    // 60 Hz analytical critically-damped kinematic chain springs (Spine -> Chest -> Neck -> Head)
+    struct SpringVec3State {
+        Vec3 pos{};
+        Vec3 vel{};
+    };
+    SpringVec3State spine_rot_spring_{};
+    SpringVec3State chest_rot_spring_{};
+    SpringVec3State neck_rot_spring_{};
+    SpringVec3State head_rot_spring_{};
+    SpringVec3State hips_lean_spring_{};
+    SpringVec3State chest_lean_spring_{};
+    Vec3 prev_target_head_rotvec_{};
+    Vec3 head_vel_ema_rad_s_{};
+    bool has_prev_target_head_{false};
+    RestSkeletonMetrics rest_metrics_{build_default_humanoid_rest_metrics()};
 
     std::array<Quat, AETHER_HUMANOID_BONE_COUNT> proc_rot_smooth_{};
     std::array<FootPlantState, 2> feet_{};

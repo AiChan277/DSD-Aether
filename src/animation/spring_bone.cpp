@@ -112,8 +112,8 @@ inline bool push_out_single_collider(uint32_t c, Vec3 head, Vec3 world_rest_dir,
 inline Vec3 integrate_verlet_constrained_next(Vec3 head, Vec3 cur, Vec3 prv, Vec3 world_rest_dir, Vec3 grav_force,
                                              Vec3 ext_accel, float stiffness, float raw_drag, float ext_drag_scale,
                                              float dt_s, float dt_sq, float drag_pow, float len) noexcept {
-    // Structural/air damping floor prevents zero-drag authored VRM springs from oscillating perpetually.
-    const float eff_drag = std::max(raw_drag, 0.18f);
+    // Structural/air damping floor prevents zero-drag authored VRM springs from oscillating or buzzing perpetually.
+    const float eff_drag = std::max(raw_drag, 0.35f);
     const float drag = std::clamp(eff_drag * ext_drag_scale, 0.0f, 0.99f);
     const float one_minus_drag = std::pow(1.0f - drag, drag_pow);
 
@@ -131,32 +131,24 @@ inline Vec3 integrate_verlet_constrained_next(Vec3 head, Vec3 cur, Vec3 prv, Vec
     return head + normalize_safe(next - head, world_rest_dir) * len;
 }
 
-inline void finalize_joint_verlet_step(uint32_t j, Vec3 cur, Vec3 prv, Vec3 pre_col_next, bool had_contact,
+inline void finalize_joint_verlet_step(uint32_t j, Vec3 cur, Vec3 prv, Vec3 /*pre_col_next*/, bool had_contact,
                                        Vec3& io_next, float bone_len, float dt_s, float* prev_x, float* prev_y,
                                        float* prev_z, float* curr_x, float* curr_y, float* curr_z) noexcept {
     // Sleep clamp eliminates residual float jitter so hair/cloth settle to < 1e-5 velocity at rest.
-    // On collider contact, treat impact as inelastic (remove normal push-out impulse) so touching
-    // overlapping colliders never injects outward phantom momentum on the next Verlet frame.
-    const Vec3 col_corr = io_next - pre_col_next;
+    // On collider contact, damp ONLY actual post-constraint displacement (inelastic friction) so static
+    // stiffness/gravity impulses cannot inject phantom tangential momentum into stationary joints.
     Vec3 next_prev = cur;
     if (had_contact) {
-        const Vec3 free_vel = pre_col_next - cur;
-        const float cc2 = length_sq(col_corr);
-        Vec3 tang_vel = free_vel;
-        if (cc2 > 1e-12f) {
-            const float inv_cc = 1.0f / std::sqrt(cc2);
-            const Vec3 n{col_corr.x * inv_cc, col_corr.y * inv_cc, col_corr.z * inv_cc};
-            const float vn = dot(free_vel, n);
-            tang_vel = free_vel - n * vn;
-        }
-        next_prev = io_next - tang_vel * 0.80f;
+        const Vec3 actual_disp = io_next - cur;
+        next_prev = io_next - actual_disp * 0.45f;
     }
 
     const float step_disp_sq = length_sq(io_next - cur);
     const float prev_disp_sq = length_sq(cur - prv);
-    const float sleep_step = std::max(3.0e-4f * dt_s, 2.0e-6f * std::max(bone_len, 0.05f));
+    const float free_sleep = std::max(1.2e-3f * dt_s, 1.5e-5f * std::max(bone_len, 0.05f));
+    const float sleep_step = had_contact ? std::max(5.0e-3f * dt_s, free_sleep) : free_sleep;
     const float sleep_step_sq = sleep_step * sleep_step;
-    constexpr float kStaticFloorSq = 6.0e-7f * 6.0e-7f;
+    constexpr float kStaticFloorSq = 1.5e-6f * 1.5e-6f;
     const bool decelerated_to_sleep = (prev_disp_sq > 0.0f && prev_disp_sq <= sleep_step_sq);
     const bool sub_micron_static = (step_disp_sq <= kStaticFloorSq);
     if (step_disp_sq <= sleep_step_sq && (decelerated_to_sleep || sub_micron_static || had_contact)) {
@@ -270,6 +262,11 @@ bool SpringBoneSimulator::add_capsule_collider(int32_t attached_bone, Vec3 head_
 
 void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMetrics& rest) noexcept {
     clear();
+    const auto unit_rest_rot = [&](uint32_t bone_id) noexcept -> Quat {
+        const Quat q = rest.rest_world_rotations[bone_id];
+        const float q2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
+        return (q2 > 1e-6f) ? normalize(q) : Quat::identity();
+    };
     if (rest.custom_collider_count > 0U) {
         const uint32_t col_n = std::min<uint32_t>(rest.custom_collider_count, static_cast<uint32_t>(rest.custom_colliders.size()));
         for (uint32_t i = 0; i < col_n; ++i) {
@@ -281,18 +278,26 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
             }
         }
     } else {
-        // Add torso, head & shoulder colliders so procedural hair & clothing respond smoothly
-        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD), {0.0f, 0.08f, 0.01f}, 0.11f);
-        (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST), {0.0f, -0.05f, 0.0f}, {0.0f, 0.14f, 0.0f},
-                                   0.12f);
-        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_LEFT_SHOULDER), {0.06f, 0.0f, 0.0f}, 0.07f);
-        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_RIGHT_SHOULDER), {-0.06f, 0.0f, 0.0f}, 0.07f);
+        // Add torso, head & shoulder colliders aligned in each bone's rest frame
+        const Quat inv_head = conjugate(unit_rest_rot(AETHER_BONE_HEAD));
+        const Quat inv_chest = conjugate(unit_rest_rot(AETHER_BONE_CHEST));
+        const Quat inv_lsh = conjugate(unit_rest_rot(AETHER_BONE_LEFT_SHOULDER));
+        const Quat inv_rsh = conjugate(unit_rest_rot(AETHER_BONE_RIGHT_SHOULDER));
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD), rotate_vec(inv_head, {0.0f, 0.08f, 0.01f}), 0.11f);
+        (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST), rotate_vec(inv_chest, {0.0f, -0.05f, 0.0f}),
+                                   rotate_vec(inv_chest, {0.0f, 0.14f, 0.0f}), 0.12f);
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_LEFT_SHOULDER),
+                                  rotate_vec(inv_lsh, {0.06f, 0.0f, 0.0f}), 0.07f);
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_RIGHT_SHOULDER),
+                                  rotate_vec(inv_rsh, {-0.06f, 0.0f, 0.0f}), 0.07f);
     }
 
+    const Quat inv_head = conjugate(unit_rest_rot(AETHER_BONE_HEAD));
     // 8 hair strands x 4 joints (indices 64..95) so secondary motion populates virtual hair bones when avatar loads
     for (int strand = 0; strand < 8; ++strand) {
         const float angle = static_cast<float>(strand) * (kTwoPi / 8.0f);
         const Vec3 dir_out{std::cos(angle) * 0.25f, -0.95f, std::sin(angle) * 0.25f};
+        const Vec3 dir_unit = normalize_safe(dir_out);
         for (int link = 0; link < 4; ++link) {
             const uint32_t j = static_cast<uint32_t>(strand * 4 + link);
             SpringJointDesc d{};
@@ -301,13 +306,14 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
             d.parent_bone_index =
                 (link == 0) ? static_cast<int32_t>(AETHER_BONE_HEAD) : static_cast<int32_t>(64U + j - 1U);
             d.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
-            d.local_bone_offset = (link == 0) ? Vec3{0.08f * std::cos(angle), 0.06f, 0.08f * std::sin(angle)}
-                                              : (normalize_safe(dir_out) * 0.06f);
-            d.rest_dir = normalize_safe(dir_out);
+            d.local_bone_offset =
+                (link == 0) ? rotate_vec(inv_head, {0.08f * std::cos(angle), 0.06f, 0.08f * std::sin(angle)})
+                            : (dir_unit * 0.06f);
+            d.rest_dir = (link == 0) ? normalize_safe(rotate_vec(inv_head, dir_unit)) : dir_unit;
             d.bone_length = 0.065f;
             d.hit_radius = 0.018f;
-            d.stiffness = 0.42f;
-            d.drag_force = 0.45f;
+            d.stiffness = 0.68f;
+            d.drag_force = 0.38f;
             d.gravity_power = 0.12f;
             (void)add_joint(d);
         }

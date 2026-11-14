@@ -732,12 +732,12 @@ RoiRectNorm LandmarkPoseSolver::compute_next_face_roi(const float* m2_landmarks_
     cand.cy = std::clamp(prev_face_roi.cy + (lc_x * s + lc_y * c) * prev_face_roi.height, 0.08f, 0.92f);
     const float span_x_px = ((max_x - min_x) / 256.0f) * prev_face_roi.width * static_cast<float>(std::max(cam_w, 1U));
     const float span_y_px = ((max_y - min_y) / 256.0f) * prev_face_roi.height * static_cast<float>(std::max(cam_h, 1U));
-    const float target_px = std::max(span_x_px, span_y_px) * 1.48f;
+    const float target_px = std::max(span_x_px, span_y_px) * 1.32f;
     cand.width = target_px / static_cast<float>(std::max(cam_w, 1U));
     cand.height = target_px / static_cast<float>(std::max(cam_h, 1U));
     cand.rotation_rad = 0.0f;
     cand.valid = true;
-    cand = enforce_square_pixel_roi(cand, cam_w, cam_h, 0.14f, 0.90f);
+    cand = enforce_square_pixel_roi(cand, cam_w, cam_h, 0.16f, 0.56f);
 
     // Critical anti-jitter hysteresis gate: freeze crop completely when movement < 2.5% of box width
     const float dx_ratio = std::abs(cand.cx - prev_face_roi.cx) / std::max(prev_face_roi.width, 1e-4f);
@@ -749,6 +749,56 @@ RoiRectNorm LandmarkPoseSolver::compute_next_face_roi(const float* m2_landmarks_
         return prev_face_roi;
     }
     return cand;
+}
+
+RoiRectNorm LandmarkPoseSolver::estimate_face_roi_from_m1(const float* m1_body_lm_39x5, const RoiRectNorm& lb_roi,
+                                                            float pose_flag, uint32_t cam_w,
+                                                            uint32_t cam_h) const noexcept {
+    if (m1_body_lm_39x5 == nullptr || pose_flag < 0.35f) {
+        return {};
+    }
+    float min_u = 1.0f;
+    float min_v = 1.0f;
+    float max_u = 0.0f;
+    float max_v = 0.0f;
+    float sum_u = 0.0f;
+    float sum_v = 0.0f;
+    uint32_t vis_count = 0U;
+    for (int i = 0; i <= 10; ++i) {
+        const float vis = sigmoid(m1_body_lm_39x5[i * 5 + 3]);
+        const float pres = sigmoid(m1_body_lm_39x5[i * 5 + 4]);
+        if (std::min(vis, pres) < 0.40f) {
+            continue;
+        }
+        const float lu = m1_body_lm_39x5[i * 5 + 0] / 256.0f;
+        const float lv = m1_body_lm_39x5[i * 5 + 1] / 256.0f;
+        const float u = lb_roi.cx + (lu - 0.5f) * lb_roi.width;
+        const float v = lb_roi.cy + (lv - 0.5f) * lb_roi.height;
+        if (u < 0.02f || u > 0.98f || v < 0.02f || v > 0.92f) {
+            continue;
+        }
+        min_u = std::min(min_u, u);
+        min_v = std::min(min_v, v);
+        max_u = std::max(max_u, u);
+        max_v = std::max(max_v, v);
+        sum_u += u;
+        sum_v += v;
+        ++vis_count;
+    }
+    if (vis_count < 3U) {
+        return {};
+    }
+    const float fw = static_cast<float>(std::max(cam_w, 1U));
+    const float fh = static_cast<float>(std::max(cam_h, 1U));
+    const float span_px = std::max((max_u - min_u) * fw, (max_v - min_v) * fh) * 1.95f;
+    RoiRectNorm roi{};
+    roi.cx = std::clamp(sum_u / static_cast<float>(vis_count), 0.10f, 0.90f);
+    roi.cy = std::clamp(sum_v / static_cast<float>(vis_count), 0.10f, 0.85f);
+    roi.width = span_px / fw;
+    roi.height = span_px / fh;
+    roi.rotation_rad = 0.0f;
+    roi.valid = true;
+    return enforce_square_pixel_roi(roi, cam_w, cam_h, 0.18f, 0.55f);
 }
 
 void LandmarkPoseSolver::populate_tracking_frame(
@@ -934,10 +984,37 @@ void LandmarkPoseSolver::populate_tracking_frame(
             }
         }
 
+        // Geometric iris gaze reinforcement for VRM blendshapes (`eyeLookDown/In/Out/Up`, indices 1..4 L, 8..11 R)
+        const auto blend_eye_gaze_bs = [&](int iris, int outer_c, int inner_c, int top_l, int bot_l, size_t bs_base,
+                                           bool is_left_screen) noexcept {
+            const float cx = 0.5f * (m2_landmarks_478x3[outer_c * 3 + 0] + m2_landmarks_478x3[inner_c * 3 + 0]);
+            const float cy = 0.5f * (m2_landmarks_478x3[top_l * 3 + 1] + m2_landmarks_478x3[bot_l * 3 + 1]);
+            const float ew =
+                std::max(1.0f, std::abs(m2_landmarks_478x3[inner_c * 3 + 0] - m2_landmarks_478x3[outer_c * 3 + 0]));
+            const float eh =
+                std::max(1.0f, std::abs(m2_landmarks_478x3[bot_l * 3 + 1] - m2_landmarks_478x3[top_l * 3 + 1]));
+            const float gx = std::clamp((m2_landmarks_478x3[iris * 3 + 0] - cx) / (0.28f * ew), -1.0f, 1.0f);
+            const float gy = std::clamp((m2_landmarks_478x3[iris * 3 + 1] - cy) / (0.28f * eh), -1.0f, 1.0f);
+            const float g_down = std::max(0.0f, gy);
+            const float g_up = std::max(0.0f, -gy);
+            const float g_in = is_left_screen ? std::max(0.0f, -gx) : std::max(0.0f, gx);
+            const float g_out = is_left_screen ? std::max(0.0f, gx) : std::max(0.0f, -gx);
+            out_frame.arkit_blendshapes[bs_base + 0] =
+                std::clamp(0.70f * g_down + 0.30f * out_frame.arkit_blendshapes[bs_base + 0], 0.0f, 1.0f);
+            out_frame.arkit_blendshapes[bs_base + 1] =
+                std::clamp(0.70f * g_in + 0.30f * out_frame.arkit_blendshapes[bs_base + 1], 0.0f, 1.0f);
+            out_frame.arkit_blendshapes[bs_base + 2] =
+                std::clamp(0.70f * g_out + 0.30f * out_frame.arkit_blendshapes[bs_base + 2], 0.0f, 1.0f);
+            out_frame.arkit_blendshapes[bs_base + 3] =
+                std::clamp(0.70f * g_up + 0.30f * out_frame.arkit_blendshapes[bs_base + 3], 0.0f, 1.0f);
+        };
+        blend_eye_gaze_bs(468, 33, 133, 159, 145, 1U, true);
+        blend_eye_gaze_bs(473, 263, 362, 386, 374, 8U, false);
+
         // Hysteresis EAR blink & Live2D MAR overrides (prevents eyelid flicker & rest mouth drift)
         auto eval_hyst_blink = [](float ear, float neutral_ear, bool& closed_state) noexcept -> float {
-            const float close_t = neutral_ear * 0.58f;
-            const float open_t = neutral_ear * 0.72f;
+            const float close_t = neutral_ear * 0.65f;
+            const float open_t = neutral_ear * 0.78f;
             if (closed_state) {
                 if (ear >= open_t) {
                     closed_state = false;
@@ -948,35 +1025,49 @@ void LandmarkPoseSolver::populate_tracking_frame(
                 }
             }
             const float raw_blink =
-                std::clamp((neutral_ear * 0.85f - ear) / std::max(neutral_ear * 0.36f, 0.05f), 0.0f, 1.0f);
+                std::clamp((neutral_ear * 0.88f - ear) / std::max(neutral_ear * 0.30f, 0.04f), 0.0f, 1.0f);
             if (closed_state) {
-                return std::max(raw_blink, 0.92f);
+                return std::max(raw_blink, 0.94f);
             }
-            return (raw_blink < 0.10f) ? 0.0f : (raw_blink * 0.75f);
+            return (raw_blink < 0.08f) ? 0.0f : (raw_blink * 0.80f);
         };
         const float blink_l = eval_hyst_blink(ear_l, neutral_ear_l_, blink_closed_l_);
         const float blink_r = eval_hyst_blink(ear_r, neutral_ear_r_, blink_closed_r_);
         out_frame.arkit_blendshapes[0] = std::clamp(blink_l * 0.80f + out_frame.arkit_blendshapes[0] * 0.20f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[7] = std::clamp(blink_r * 0.80f + out_frame.arkit_blendshapes[7] * 0.20f, 0.0f, 1.0f);
 
-        const float mar_delta = std::max(0.0f, mar_open - neutral_mar_open_ - 0.03f);
-        const float jaw_open_geom = std::clamp(mar_delta / 0.42f, 0.0f, 1.0f);
+        const float mar_delta = std::max(0.0f, mar_open - neutral_mar_open_ - 0.025f);
+        const float jaw_open_geom = std::clamp(mar_delta / 0.38f, 0.0f, 1.0f);
         const float w_delta = mouth_width_ratio - neutral_mouth_width_ratio_;
-        const float smile_geom = std::clamp((w_delta - 0.025f) / 0.14f, 0.0f, 1.0f);
-        const float pucker_geom = std::clamp((-w_delta - 0.025f) / 0.12f, 0.0f, 1.0f);
+        const float smile_geom = std::clamp((w_delta - 0.020f) / 0.13f, 0.0f, 1.0f);
+        const float pucker_geom = std::clamp((-w_delta - 0.020f) / 0.11f, 0.0f, 1.0f);
         const float narrow_ratio = std::clamp(
-            1.0f - ((mouth_width_ratio / std::max(neutral_mouth_width_ratio_, 0.25f)) - 0.72f) * 3.0f, 0.0f, 1.0f);
+            1.0f - ((mouth_width_ratio / std::max(neutral_mouth_width_ratio_, 0.25f)) - 0.75f) * 3.0f, 0.0f, 1.0f);
         const float funnel_geom = std::clamp(jaw_open_geom * narrow_ratio, 0.0f, 1.0f);
+        const float stretch_geom =
+            std::clamp((w_delta - 0.012f) / 0.11f * (1.0f - funnel_geom * 0.6f), 0.0f, 1.0f);
         out_frame.arkit_blendshapes[17] =
-            std::clamp(jaw_open_geom * 0.70f + out_frame.arkit_blendshapes[17] * 0.30f, 0.0f, 1.0f);
+            std::clamp(jaw_open_geom * 0.72f + out_frame.arkit_blendshapes[17] * 0.28f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[19] =
-            std::clamp(funnel_geom * 0.65f + out_frame.arkit_blendshapes[19] * 0.35f, 0.0f, 1.0f);
+            std::clamp(funnel_geom * 0.68f + out_frame.arkit_blendshapes[19] * 0.32f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[20] =
-            std::clamp(pucker_geom * 0.65f + out_frame.arkit_blendshapes[20] * 0.35f, 0.0f, 1.0f);
+            std::clamp(pucker_geom * 0.68f + out_frame.arkit_blendshapes[20] * 0.32f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[23] =
             std::clamp(smile_geom * 0.65f + out_frame.arkit_blendshapes[23] * 0.35f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[24] =
             std::clamp(smile_geom * 0.65f + out_frame.arkit_blendshapes[24] * 0.35f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[29] =
+            std::clamp(stretch_geom * 0.60f + out_frame.arkit_blendshapes[29] * 0.40f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[30] =
+            std::clamp(stretch_geom * 0.60f + out_frame.arkit_blendshapes[30] * 0.40f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[37] =
+            std::clamp(jaw_open_geom * 0.45f + out_frame.arkit_blendshapes[37] * 0.55f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[38] =
+            std::clamp(jaw_open_geom * 0.45f + out_frame.arkit_blendshapes[38] * 0.55f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[39] =
+            std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[39] * 0.70f, 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[40] =
+            std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[40] * 0.70f, 0.0f, 1.0f);
 
         // Export HUD overlay landmarks (normalized [0..1] camera space) & 3D head orientation triad
         static constexpr uint16_t kHudKeyIndices[24] = {
@@ -1036,52 +1127,55 @@ void LandmarkPoseSolver::populate_tracking_frame(
         blink_closed_r_ = false;
     }
 
-    // 2. Upper-Body Pose (MediaPipe 39 world landmarks -> Hips, Chest, Arms, Wrists)
+    // 2. Upper-Body Pose (strictly gate arms on in-frame elbow+wrist visibility; never overwrite CHEST/HIPS from out-of-frame M1 hips)
     const float body_conf = std::clamp(pose_flag, 0.0f, 1.0f);
     out_frame.upper_body_confidence = body_conf;
     if (m1_body_world_39x3 != nullptr && m1_body_lm_39x5 != nullptr && body_conf >= 0.30f) {
         valid_flags |= 0x08U;
-        // Hip midpoint (indices 23, 24), shoulder midpoint (11, 12), wrists (15, 16)
         const Vec3 l_hip{m1_body_world_39x3[23 * 3 + 0], -m1_body_world_39x3[23 * 3 + 1],
                          -m1_body_world_39x3[23 * 3 + 2]};
         const Vec3 r_hip{m1_body_world_39x3[24 * 3 + 0], -m1_body_world_39x3[24 * 3 + 1],
                          -m1_body_world_39x3[24 * 3 + 2]};
         const Vec3 hip_mid = (l_hip + r_hip) * 0.5f;
-        const Vec3 l_sh{m1_body_world_39x3[11 * 3 + 0], -m1_body_world_39x3[11 * 3 + 1],
-                        -m1_body_world_39x3[11 * 3 + 2]};
-        const Vec3 r_sh{m1_body_world_39x3[12 * 3 + 0], -m1_body_world_39x3[12 * 3 + 1],
-                        -m1_body_world_39x3[12 * 3 + 2]};
-        const Vec3 sh_mid = (l_sh + r_sh) * 0.5f;
         const Vec3 l_w{m1_body_world_39x3[15 * 3 + 0], -m1_body_world_39x3[15 * 3 + 1],
                        -m1_body_world_39x3[15 * 3 + 2]};
         const Vec3 r_w{m1_body_world_39x3[16 * 3 + 0], -m1_body_world_39x3[16 * 3 + 1],
                        -m1_body_world_39x3[16 * 3 + 2]};
 
-        const Vec3 hips_ws{std::clamp(hip_mid.x, -0.6f, 0.6f), 0.90f, std::clamp(hip_mid.z, -0.5f, 0.5f)};
+        const Vec3 hips_ws{0.0f, 0.90f, 0.0f};
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][0] = hips_ws.x;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][1] = hips_ws.y;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][2] = hips_ws.z;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][3] = body_conf;
         out_frame.joint_positions_ws[AETHER_BONE_SPINE][3] = body_conf;
 
-        const Vec3 torso_up = animation::normalize_safe(sh_mid - hip_mid, {0.0f, 1.0f, 0.0f});
-        const Quat chest_q = quat_from_two_vecs({0.0f, 1.0f, 0.0f}, torso_up);
-        out_frame.joint_rotations_quat[AETHER_BONE_CHEST][0] = chest_q.x;
-        out_frame.joint_rotations_quat[AETHER_BONE_CHEST][1] = chest_q.y;
-        out_frame.joint_rotations_quat[AETHER_BONE_CHEST][2] = chest_q.z;
-        out_frame.joint_rotations_quat[AETHER_BONE_CHEST][3] = chest_q.w;
+        const RoiRectNorm lb_roi = make_letterbox_square_roi(cam_w, cam_h);
+        auto arm_in_frame_conf = [&](int elbow_idx, int wrist_idx) noexcept -> float {
+            const float e_vis = sigmoid(m1_body_lm_39x5[elbow_idx * 5 + 3]);
+            const float w_vis = sigmoid(m1_body_lm_39x5[wrist_idx * 5 + 3]);
+            const float w_pres = sigmoid(m1_body_lm_39x5[wrist_idx * 5 + 4]);
+            const float lu = m1_body_lm_39x5[wrist_idx * 5 + 0] / 256.0f;
+            const float lv = m1_body_lm_39x5[wrist_idx * 5 + 1] / 256.0f;
+            const float u = lb_roi.cx + (lu - 0.5f) * lb_roi.width;
+            const float v = lb_roi.cy + (lv - 0.5f) * lb_roi.height;
+            if (u < 0.05f || u > 0.95f || v < 0.05f || v > 0.88f) {
+                return 0.0f;
+            }
+            const float min_c = std::min(e_vis, std::min(w_vis, w_pres));
+            return (min_c >= 0.65f) ? min_c : 0.0f;
+        };
 
-        // Place wrist IK targets relative to hips in avatar world frame
+        // Place wrist IK targets relative to hips in avatar world frame only when wrist+elbow are clearly visible in-frame
         const Vec3 lw_ws = hips_ws + (l_w - hip_mid);
         const Vec3 rw_ws = hips_ws + (r_w - hip_mid);
         out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = lw_ws.x;
         out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = lw_ws.y;
         out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = lw_ws.z;
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = sigmoid(m1_body_lm_39x5[15 * 5 + 3]);
+        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = arm_in_frame_conf(13, 15);
         out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = rw_ws.x;
         out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = rw_ws.y;
         out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = rw_ws.z;
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = sigmoid(m1_body_lm_39x5[16 * 5 + 3]);
+        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = arm_in_frame_conf(14, 16);
     }
 
     // 3. Batched Hands (slots 0 = left, 1 = right; finger curl -> 30 finger bones)

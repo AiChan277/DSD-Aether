@@ -89,6 +89,10 @@ class LandmarkPoseSolver {
                                                     float face_flag, uint32_t cam_w = 1280U,
                                                     uint32_t cam_h = 720U) const noexcept;
 
+    [[nodiscard]] RoiRectNorm estimate_face_roi_from_m1(const float* m1_body_lm_39x5, const RoiRectNorm& lb_roi,
+                                                        float pose_flag, uint32_t cam_w = 1280U,
+                                                        uint32_t cam_h = 720U) const noexcept;
+
     void populate_tracking_frame(const RoiRectNorm& face_roi, const float* m2_landmarks_478x3, float face_flag,
                                  const float* m3_blendshapes_52, const float* m1_body_world_39x3,
                                  const float* m1_body_lm_39x5, float pose_flag, bool run_left_hand, bool run_right_hand,

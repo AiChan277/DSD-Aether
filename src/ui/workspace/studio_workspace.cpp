@@ -143,6 +143,9 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
             wizard_.open(hw_, rhi::SelectedGpuInfo{}, host_status_.on_air);
         }
     }
+    if (params_.get_int(ParamId::TrackingEpMode) == 4) {
+        params_.set(ParamId::TrackingEpMode, 0.0);
+    }
     last_synced_ep_mode_ = params_.get_int(ParamId::TrackingEpMode);
     last_synced_synthetic_cam_ = params_.get_bool(ParamId::TrackingSyntheticCamera);
 

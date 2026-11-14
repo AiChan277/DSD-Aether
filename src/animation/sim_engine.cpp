@@ -8,17 +8,22 @@ namespace aether::animation {
 namespace {
 
 void write_bone_skin_matrix(const Vec3& world_pos, const Quat& world_rot, const Vec3& rest_pos,
-                            float out_mat[12]) noexcept {
-    // 3x4 row-major skinning matrix M = T(world_pos) * R(world_rot) * T(-rest_pos)
-    const float xx = world_rot.x * world_rot.x;
-    const float yy = world_rot.y * world_rot.y;
-    const float zz = world_rot.z * world_rot.z;
-    const float xy = world_rot.x * world_rot.y;
-    const float xz = world_rot.x * world_rot.z;
-    const float yz = world_rot.y * world_rot.z;
-    const float wx = world_rot.w * world_rot.x;
-    const float wy = world_rot.w * world_rot.y;
-    const float wz = world_rot.w * world_rot.z;
+                            const Quat& rest_world_rot, float out_mat[12]) noexcept {
+    // 3x4 row-major skinning matrix M = T(world_pos) * R(world_rot * conj(rest_world_rot)) * T(-rest_pos)
+    const float rw2 = rest_world_rot.w * rest_world_rot.w + rest_world_rot.x * rest_world_rot.x +
+                      rest_world_rot.y * rest_world_rot.y + rest_world_rot.z * rest_world_rot.z;
+    const Quat rw_unit = (rw2 > 1e-6f) ? normalize(rest_world_rot) : Quat::identity();
+    const Quat delta_rot = normalize(normalize(world_rot) * conjugate(rw_unit));
+
+    const float xx = delta_rot.x * delta_rot.x;
+    const float yy = delta_rot.y * delta_rot.y;
+    const float zz = delta_rot.z * delta_rot.z;
+    const float xy = delta_rot.x * delta_rot.y;
+    const float xz = delta_rot.x * delta_rot.z;
+    const float yz = delta_rot.y * delta_rot.z;
+    const float wx = delta_rot.w * delta_rot.x;
+    const float wy = delta_rot.w * delta_rot.y;
+    const float wz = delta_rot.w * delta_rot.z;
 
     const float r00 = 1.0f - 2.0f * (yy + zz);
     const float r01 = 2.0f * (xy - wz);
@@ -61,8 +66,15 @@ void SimEngine::reset(const RestSkeletonMetrics& rest) noexcept {
     kalman_.reset();
     ik_solver_.set_rest_metrics(rest);
     const auto& rm = ik_solver_.rest_metrics();
-    vis_solver_.reset(rm.rest_local_positions[AETHER_BONE_HIPS], {0.095f, 0.05f, 0.0f}, {-0.095f, 0.05f, 0.0f});
-    spring_.configure_default_skirt_and_hair(rm);
+    const Vec3 hips_rest = rm.rest_local_positions[AETHER_BONE_HIPS];
+    const Vec3 l_foot_rest = hips_rest + rm.rest_local_positions[AETHER_BONE_LEFT_UPPER_LEG] +
+                             rm.rest_local_positions[AETHER_BONE_LEFT_LOWER_LEG] +
+                             rm.rest_local_positions[AETHER_BONE_LEFT_FOOT];
+    const Vec3 r_foot_rest = hips_rest + rm.rest_local_positions[AETHER_BONE_RIGHT_UPPER_LEG] +
+                             rm.rest_local_positions[AETHER_BONE_RIGHT_LOWER_LEG] +
+                             rm.rest_local_positions[AETHER_BONE_RIGHT_FOOT];
+    vis_solver_.reset(hips_rest, l_foot_rest, r_foot_rest);
+    vis_solver_.set_rest_metrics(rm);
     expr_mixer_.reset();
 
     filtered_state_ = {};
@@ -72,6 +84,23 @@ void SimEngine::reset(const RestSkeletonMetrics& rest) noexcept {
     ik_world_rot_.fill(Quat::identity());
     bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
     bone_rot_ws_.fill(Quat::identity());
+
+    // Place skeleton in neutral upright A-pose BEFORE initializing SpringBone lengths/colliders.
+    FilteredTrackingState neutral{};
+    AetherGraphOutputs empty_graph{};
+    VisibilityFirstConfig vcfg{};
+    vis_solver_.solve(neutral, empty_graph, 1.0f / 60.0f, vcfg, solved_body_);
+    ik_solver_.solve(solved_body_, empty_graph, solved_body_.local_rotations, ik_world_pos_, ik_world_rot_);
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        bone_pos_ws_[b] = ik_world_pos_[b];
+        bone_rot_ws_[b] = ik_world_rot_[b];
+    }
+
+    spring_.configure_default_skirt_and_hair(rm);
+    const uint32_t total_bones =
+        std::min(kMaxBones, (spring_.joint_count() > 0) ? (64U + spring_.joint_count()) : AETHER_HUMANOID_BONE_COUNT);
+    spring_.reset_state(bone_pos_ws_, bone_rot_ws_, total_bones);
+
     last_seen_frame_seq_ = 0;
     last_tick_us_ = 0;
     spring_accum_s_ = 0.0f;
@@ -89,9 +118,23 @@ void SimEngine::set_rest_metrics(const RestSkeletonMetrics& rest) noexcept {
                              rm.rest_local_positions[AETHER_BONE_RIGHT_LOWER_LEG] +
                              rm.rest_local_positions[AETHER_BONE_RIGHT_FOOT];
     vis_solver_.set_rest_anchors(hips_rest, l_foot_rest, r_foot_rest);
-    spring_.configure_default_skirt_and_hair(rm);
+    vis_solver_.set_rest_metrics(rm);
+
+    FilteredTrackingState neutral{};
+    AetherGraphOutputs empty_graph{};
+    VisibilityFirstConfig vcfg{};
+    vis_solver_.solve(neutral, empty_graph, 1.0f / 60.0f, vcfg, solved_body_);
+    ik_solver_.solve(solved_body_, empty_graph, solved_body_.local_rotations, ik_world_pos_, ik_world_rot_);
     bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
     bone_rot_ws_.fill(Quat::identity());
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        bone_pos_ws_[b] = ik_world_pos_[b];
+        bone_rot_ws_[b] = ik_world_rot_[b];
+    }
+    spring_.configure_default_skirt_and_hair(rm);
+    const uint32_t total_bones =
+        std::min(kMaxBones, (spring_.joint_count() > 0) ? (64U + spring_.joint_count()) : AETHER_HUMANOID_BONE_COUNT);
+    spring_.reset_state(bone_pos_ws_, bone_rot_ws_, total_bones);
 }
 
 void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyncPacket& dsp,
@@ -169,11 +212,13 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
     out_skinning.bone_count = total_bones;
     out_skinning.morph_count = AETHER_HUMANOID_BONE_COUNT + 9U; // 52 ARKit + 5 visemes + custom
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], rest_world_pos[b], out_skinning.bone_matrices[b]);
+        write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], rest_world_pos[b], rm.rest_world_rotations[b],
+                               out_skinning.bone_matrices[b]);
     }
     for (size_t b = AETHER_HUMANOID_BONE_COUNT; b < total_bones; ++b) {
         // Virtual hair/cloth chain bones keep bind identity relative to their animated spring positions
-        write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], bone_pos_ws_[b], out_skinning.bone_matrices[b]);
+        write_bone_skin_matrix(bone_pos_ws_[b], bone_rot_ws_[b], bone_pos_ws_[b], bone_rot_ws_[b],
+                               out_skinning.bone_matrices[b]);
     }
 
     // 7. Blendshapes + 60 ms DSP mouth-ownership transition

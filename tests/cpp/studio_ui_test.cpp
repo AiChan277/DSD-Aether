@@ -208,14 +208,14 @@ TEST_CASE("HardwareOptimizerWizard tier selection & budget downshift follow §12
     dgpu.dedicated_vram_mb = 8192;
 
     auto rec_npu = HardwareOptimizerWizard::recommend_for_hardware(npu_hw, dgpu);
-    REQUIRE(rec_npu.ep_override == AETHER_EP_INTEL_NPU);
-    REQUIRE(rec_npu.tracking_ep_mode == 1);
+    REQUIRE(rec_npu.ep_override == -1);
+    REQUIRE(rec_npu.tracking_ep_mode == 0);
 
     HardwareInventory dgpu_hw{};
     dgpu_hw.npu.available = false;
     auto rec_dgpu = HardwareOptimizerWizard::recommend_for_hardware(dgpu_hw, dgpu);
-    REQUIRE(rec_dgpu.ep_override == AETHER_EP_DIRECTML_GPU);
-    REQUIRE(rec_dgpu.tracking_ep_mode == 2);
+    REQUIRE(rec_dgpu.ep_override == -1);
+    REQUIRE(rec_dgpu.tracking_ep_mode == 0);
 
     HardwareInventory cpu_hw{};
     rhi::SelectedGpuInfo soft_gpu{};

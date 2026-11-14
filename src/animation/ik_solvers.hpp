@@ -1,11 +1,13 @@
 #pragma once
 
-#include "animation/visibility_first.hpp"
+#include "animation/one_euro.hpp"
 
 #include <array>
 #include <cstdint>
 
 namespace aether::animation {
+
+struct SolvedBodyPose;
 
 struct JointLimitEulerRad {
     float min_x{-3.14159f}, max_x{3.14159f};
@@ -26,10 +28,30 @@ struct RestSkeletonMetrics {
     std::array<int32_t, AETHER_HUMANOID_BONE_COUNT> parent_indices{};
     std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> rest_local_positions{};
     std::array<Quat, AETHER_HUMANOID_BONE_COUNT> rest_local_rotations{};
+    std::array<Quat, AETHER_HUMANOID_BONE_COUNT> rest_world_rotations{};
     std::array<float, AETHER_HUMANOID_BONE_COUNT> bone_lengths{};
     std::array<RestColliderDef, 32> custom_colliders{};
     uint32_t custom_collider_count{0};
     bool valid{false};
+
+    /// Convert a world-space incremental delta quaternion (relative to rest world pose)
+    /// into this bone's local rotation: q_local = normalize(q_rest_local * q_delta_local).
+    [[nodiscard]] Quat world_delta_to_local_pose(uint32_t bone_id, const Quat& world_delta) const noexcept {
+        if (bone_id >= AETHER_HUMANOID_BONE_COUNT) {
+            return normalize(world_delta);
+        }
+        const Quat rl = rest_local_rotations[bone_id];
+        const float rl2 = rl.w * rl.w + rl.x * rl.x + rl.y * rl.y + rl.z * rl.z;
+        const Quat rest_local = (rl2 > 1e-6f) ? normalize(rl) : Quat::identity();
+
+        const Quat rw = rest_world_rotations[bone_id];
+        const float rw2 = rw.w * rw.w + rw.x * rw.x + rw.y * rw.y + rw.z * rw.z;
+        const Quat rest_world = (rw2 > 1e-6f) ? normalize(rw) : Quat::identity();
+
+        const Quat dw = normalize(world_delta);
+        const Quat delta_local = normalize(conjugate(rest_world) * dw * rest_world);
+        return normalize(rest_local * delta_local);
+    }
 };
 
 /** Builds canonical standard-T-pose humanoid rest metrics when only partial skeleton metadata exists. */

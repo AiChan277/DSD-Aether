@@ -57,21 +57,21 @@ WizardRecommendation HardwareOptimizerWizard::recommend_for_hardware(const Hardw
     }
 
     if (hw.npu.available) {
-        rec.tracking_ep_mode = 1; // NPU (OpenVINO)
-        rec.ep_override = AETHER_EP_INTEL_NPU;
+        rec.tracking_ep_mode = 0; // Auto (NPU -> GPU -> CPU)
+        rec.ep_override = -1;
         std::snprintf(rec.ep_reason.data(), rec.ep_reason.size(),
-                      "Tier 1 NPU (%s) detected; isolates ORT inference from GPU render.",
+                      "Auto (NPU -> GPU -> CPU) using Tier 1 NPU (%s) when available.",
                       hw.npu.device_name.empty() ? "OpenVINO" : hw.npu.device_name.c_str());
     } else if (has_large_dgpu) {
-        rec.tracking_ep_mode = 2; // dGPU (DirectML)
-        rec.ep_override = AETHER_EP_DIRECTML_GPU;
+        rec.tracking_ep_mode = 0; // Auto (NPU -> GPU -> CPU)
+        rec.ep_override = -1;
         std::snprintf(rec.ep_reason.data(), rec.ep_reason.size(),
-                      "Tier 2A discrete GPU (>= 4 GiB VRAM) selected via DirectML.");
+                      "Auto (NPU -> GPU -> CPU) using Tier 2A discrete GPU via DirectML.");
     } else if (!hw.gpus.empty() && !hw.gpus[0].is_software) {
-        rec.tracking_ep_mode = 3; // iGPU (DirectML)
-        rec.ep_override = AETHER_EP_DIRECTML_GPU;
+        rec.tracking_ep_mode = 0; // Auto (NPU -> GPU -> CPU)
+        rec.ep_override = -1;
         std::snprintf(rec.ep_reason.data(), rec.ep_reason.size(),
-                      "Tier 2B integrated/compact GPU selected to offload CPU threads.");
+                      "Auto (NPU -> GPU -> CPU) using Tier 2B integrated/compact GPU.");
     } else {
         rec.tracking_ep_mode = 4; // CPU
         rec.ep_override = AETHER_EP_CPU;

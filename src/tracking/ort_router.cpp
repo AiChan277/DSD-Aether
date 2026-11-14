@@ -681,9 +681,10 @@ void AetherTrackingRouter::record_frame_latency(double total_infer_ms, std::stri
     }
     rolling_avg_ms_ = impl_->health_sum_ms / static_cast<double>(impl_->health_count);
 
-    if (impl_->health_count >= cap && rolling_avg_ms_ > cfg_.health_budget_ms && active_ep_ != EpTier::Cpu) {
+    if (cfg_.health_budget_ms < 20.0 && impl_->health_count >= cap && rolling_avg_ms_ > cfg_.health_budget_ms &&
+        active_ep_ != EpTier::Cpu) {
         const EpTier prev = active_ep_;
-        const AetherStatus st = force_demote_one_tier("Rolling 120-frame inference latency exceeded 9.0 ms");
+        const AetherStatus st = force_demote_one_tier("Rolling 120-frame inference latency exceeded health budget");
         if (st == AETHER_OK && out_demotion_msg != nullptr) {
             try {
                 *out_demotion_msg = std::string("Health monitor demoted EP from ") + ep_display_name(prev) + " to " +

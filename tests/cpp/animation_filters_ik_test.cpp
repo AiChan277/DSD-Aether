@@ -2,6 +2,7 @@
 #include "animation/ik_solvers.hpp"
 #include "animation/kalman.hpp"
 #include "animation/one_euro.hpp"
+#include "animation/sim_engine.hpp"
 #include "animation/visibility_first.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -238,4 +239,152 @@ TEST_CASE("ExpressionMixer executes smooth 60 ms mouth-ownership handoff between
     CHECK(std::abs(out_morphs[kVisemeSlotOffset + 0] - 0.90f) < 0.01f);
     // Camera jawOpen is handed off smoothly to 0 so it doesn't double-open the jaw with visemes!
     CHECK(out_morphs[17] < 0.05f);
+}
+
+TEST_CASE("60Hz critically-damped kinematic chain, zero jitter, C2 follow-through & A-pose",
+          "[animation][spring][apose]") {
+    using namespace aether::animation;
+
+    // 1. Stationary webcam micro-jitter (< 0.03 deg) -> < 0.001 deg settled jitter & relaxed A-pose
+    {
+        SimEngine engine;
+        RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
+        // Inject non-identity VRM bind rotations to verify rest-pose preservation
+        rm.rest_local_rotations[AETHER_BONE_SPINE] = from_euler_xyz(0.05f, -0.10f, 0.04f);
+        rm.rest_local_rotations[AETHER_BONE_CHEST] = from_euler_xyz(-0.04f, 0.12f, -0.03f);
+        rm.rest_local_rotations[AETHER_BONE_NECK] = from_euler_xyz(0.03f, 0.08f, -0.02f);
+        rm.rest_local_rotations[AETHER_BONE_HEAD] = from_euler_xyz(-0.02f, -0.10f, 0.05f);
+        rm.rest_local_rotations[AETHER_BONE_LEFT_UPPER_ARM] = from_euler_xyz(0.0f, 1.5707963f, 0.0f);
+        rm.rest_local_rotations[AETHER_BONE_RIGHT_UPPER_ARM] = from_euler_xyz(0.0f, -1.5707963f, 0.0f);
+        rm.rest_world_rotations[AETHER_BONE_HIPS] = Quat::identity();
+        for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            const int32_t p = rm.parent_indices[b];
+            const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
+            rm.rest_world_rotations[b] = normalize(rm.rest_world_rotations[pi] * rm.rest_local_rotations[b]);
+        }
+        engine.reset(rm);
+
+        SimEngineConfig cfg{};
+        cfg.visibility.enable_idle_breathing = false;
+        AetherDspSyncPacket dsp{};
+        AetherGraphOutputs gout{};
+        SkinningFrame skin{};
+
+        std::mt19937 rng(777U);
+        std::normal_distribution<float> deg_noise(0.0f, 0.025f * kDegToRad);
+        Quat prev_head_rot = Quat::identity();
+        float max_jitter_deg = 0.0f;
+
+        for (int f = 0; f < 180; ++f) {
+            AetherTrackingFrame raw{};
+            raw.frame_sequence = static_cast<uint32_t>(f + 1);
+            raw.capture_timestamp_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+            raw.inference_complete_us = raw.capture_timestamp_us + 4000ULL;
+            raw.valid_flags = 0x09U;
+            raw.upper_body_confidence = 0.90f;
+            raw.left_hand_confidence = 0.0f;
+            raw.right_hand_confidence = 0.0f;
+            const Quat qn = from_euler_xyz(deg_noise(rng), deg_noise(rng), deg_noise(rng));
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][0] = qn.x;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][1] = qn.y;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][2] = qn.z;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][3] = qn.w;
+            raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+            raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+
+            engine.tick(raw, dsp, gout, raw.capture_timestamp_us + 8000ULL, 0.0f, cfg, skin);
+            const Quat head_rot = engine.bone_rot_ws()[AETHER_BONE_HEAD];
+            if (f >= 120) {
+                const float delta_deg = angle_between(head_rot, prev_head_rot) * kRadToDeg;
+                max_jitter_deg = std::max(max_jitter_deg, delta_deg);
+            }
+            prev_head_rot = head_rot;
+        }
+        CHECK(max_jitter_deg < 0.001f);
+
+        // Verify upright rest pose preservation & relaxed ~38 deg A-pose upper arms
+        const Vec3 head_delta_aa =
+            to_axis_angle(normalize(engine.bone_rot_ws()[AETHER_BONE_HEAD] * conjugate(rm.rest_world_rotations[AETHER_BONE_HEAD])));
+        CHECK(length(head_delta_aa) * kRadToDeg < 0.25f);
+
+        // With no hands tracked, upper arms hang downward from shoulder (~38 deg adduction along -Y)
+        const Vec3 l_arm_vec =
+            engine.bone_pos_ws()[AETHER_BONE_LEFT_LOWER_ARM] - engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM];
+        const Vec3 r_arm_vec =
+            engine.bone_pos_ws()[AETHER_BONE_RIGHT_LOWER_ARM] - engine.bone_pos_ws()[AETHER_BONE_RIGHT_UPPER_ARM];
+        const float l_drop_deg = std::asin(std::clamp(-normalize_safe(l_arm_vec).y, -1.0f, 1.0f)) * kRadToDeg;
+        const float r_drop_deg = std::asin(std::clamp(-normalize_safe(r_arm_vec).y, -1.0f, 1.0f)) * kRadToDeg;
+        CHECK(l_drop_deg > 30.0f);
+        CHECK(l_drop_deg < 46.0f);
+        CHECK(r_drop_deg > 30.0f);
+        CHECK(r_drop_deg < 46.0f);
+    }
+
+    // 2. Step head turn (+24 deg Yaw): layered Spine -> Chest -> Neck -> Head follow-through,
+    //    critically damped (zero overshoot), and SpringBone settles within 0.5 s.
+    {
+        SimEngine engine;
+        RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
+        engine.reset(rm);
+        SimEngineConfig cfg{};
+        cfg.visibility.enable_idle_breathing = false;
+        AetherDspSyncPacket dsp{};
+        AetherGraphOutputs gout{};
+        SkinningFrame skin{};
+
+        constexpr float kTargetYawRad = 24.0f * kDegToRad;
+        float max_head_yaw_deg = 0.0f;
+        std::array<float, 180> head_yaws{};
+        float worst_spring_disp_late = 0.0f;
+        Vec3 prev_hair_tip{};
+
+        for (int f = 0; f < 180; ++f) {
+            AetherTrackingFrame raw{};
+            raw.frame_sequence = static_cast<uint32_t>((f / 2) + 1); // 30 Hz camera feeding 60 Hz sim
+            raw.capture_timestamp_us = static_cast<uint64_t>((f / 2) * 2 + 1) * 16667ULL;
+            raw.inference_complete_us = raw.capture_timestamp_us + 2000ULL;
+            raw.valid_flags = 0x01U;
+            raw.upper_body_confidence = 0.0f;
+            const Quat q_yaw = from_axis_angle({0.0f, 1.0f, 0.0f}, (f >= 6) ? kTargetYawRad : 0.0f);
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][0] = q_yaw.x;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][1] = q_yaw.y;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][2] = q_yaw.z;
+            raw.joint_rotations_quat[AETHER_BONE_HEAD][3] = q_yaw.w;
+            raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+            raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+
+            const uint64_t tick_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+            engine.tick(raw, dsp, gout, tick_us, 0.0f, cfg, skin);
+
+            const float h_yaw = to_euler_xyz(engine.bone_rot_ws()[AETHER_BONE_HEAD]).y * kRadToDeg;
+            head_yaws[static_cast<size_t>(f)] = h_yaw;
+            max_head_yaw_deg = std::max(max_head_yaw_deg, h_yaw);
+
+            const Vec3 tip = engine.bone_pos_ws()[67]; // end of hair strand 0
+            if (f >= 90) { // >= 0.5 s after 60-frame convergence window
+                worst_spring_disp_late = std::max(worst_spring_disp_late, length(tip - prev_hair_tip));
+            }
+            prev_hair_tip = tip;
+        }
+
+        // Critically damped: converges to ~24 deg with <= 0.3 deg overshoot
+        CHECK(max_head_yaw_deg <= 24.3f);
+        CHECK(head_yaws[179] >= 23.7f);
+        CHECK(head_yaws[179] <= 24.3f);
+        // C2 monotonic rise (no velocity reversal / ringing spikes on step response after visibility ramp)
+        for (size_t i = 20; i < 180; ++i) {
+            CHECK(head_yaws[i] >= head_yaws[i - 1] - 0.05f);
+        }
+        // Layered chain contributions at steady state (Spine ~15%, Chest+UChest ~20%, Neck ~30%, Head ~35%)
+        const float spine_y = to_euler_xyz(engine.bone_rot_ws()[AETHER_BONE_SPINE]).y * kRadToDeg;
+        const float uchest_y = to_euler_xyz(engine.bone_rot_ws()[AETHER_BONE_UPPER_CHEST]).y * kRadToDeg;
+        const float neck_y = to_euler_xyz(engine.bone_rot_ws()[AETHER_BONE_NECK]).y * kRadToDeg;
+        const float head_y = to_euler_xyz(engine.bone_rot_ws()[AETHER_BONE_HEAD]).y * kRadToDeg;
+        CHECK(spine_y > 2.5f);
+        CHECK(uchest_y > spine_y + 3.0f);
+        CHECK(neck_y > uchest_y + 5.0f);
+        CHECK(head_y > neck_y + 6.0f);
+        // Hair/cloth settled cleanly well within 0.5s after head stabilizes
+        CHECK(worst_spring_disp_late < 5e-4f);
+    }
 }

@@ -117,7 +117,7 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
         const uint64_t t_m0_0 = aether::now_us();
         if (router_.run_m0_face_detector() == AETHER_OK) {
             RoiRectNorm m0_roi = decode_m0_best_face_roi(router_.buffers().m0_regressors.data(),
-                                                         router_.buffers().m0_classif.data(), 0.45f);
+                                                         router_.buffers().m0_classif.data(), 0.30f);
             if (m0_roi.valid) {
                 m0_roi.cx = lb_roi.cx + (m0_roi.cx - 0.5f) * lb_roi.width;
                 m0_roi.cy = lb_roi.cy + (m0_roi.cy - 0.5f) * lb_roi.height;
@@ -135,30 +135,52 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
         }
         // If no real face in synthetic/empty pattern yet, fall back to centered aspect-square nominal crop
         if (!face_roi_.valid) {
-            face_roi_ = enforce_square_pixel_roi(RoiRectNorm{0.5f, 0.42f, 0.48f, 0.48f, 0.0f, true}, cam_frame->width,
+            face_roi_ = enforce_square_pixel_roi(RoiRectNorm{0.5f, 0.42f, 0.40f, 0.40f, 0.0f, true}, cam_frame->width,
                                                  cam_frame->height);
         }
     }
 
-    // 2. Warp Body (256x256 letterboxed 1:1) and Face (256x256 square) NCHW crops (`<= 0.6 ms` AVX2)
-    warp_frame_to_nchw(*cam_frame, lb_roi, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m1_body_in.data(),
-                       false);
-    fill_letterbox_bands_nchw(router_.buffers().m1_body_in.data(), 256, 256, cam_frame->width, cam_frame->height,
-                              RoiNormRange::ZeroToOne);
+    // 2. Run M1_body on 2-frame cadence (always on first frame or face loss) and M2 face warp every frame
+    const bool run_body_this_frame = ((frame_seq_ & 1U) == 0U) || roi_reset_this_frame || !roi_locked_.load(std::memory_order_acquire);
+    if (run_body_this_frame) {
+        warp_frame_to_nchw(*cam_frame, lb_roi, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m1_body_in.data(),
+                           false);
+        fill_letterbox_bands_nchw(router_.buffers().m1_body_in.data(), 256, 256, cam_frame->width, cam_frame->height,
+                                  RoiNormRange::ZeroToOne);
+    }
     warp_frame_to_nchw(*cam_frame, face_roi_, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m2_face_in.data(),
                        false);
     const uint64_t t_prep_end = aether::now_us();
 
-    // 3. Execute M1_body + M2_face_landmarks
+    // 3. Execute M1_body (when scheduled) + M2_face_landmarks
     const uint64_t t_inf_start = aether::now_us();
-    if (router_.run_m1_body() != AETHER_OK || router_.run_m2_face_landmarks() != AETHER_OK) {
+    if (run_body_this_frame && router_.run_m1_body() != AETHER_OK) {
+        return false;
+    }
+    if (router_.run_m2_face_landmarks() != AETHER_OK) {
         return false;
     }
 
-    // 4. Conditional M1_hands (`batch=2` 224x224) gated by `>= 0.30` confidence + `5%` border margin
+    // 4. Conditional M1_hands (`batch=2` 224x224) gated by `>= 0.50` wrist confidence + un-letterboxed in-frame check
     const float pose_flag = router_.buffers().m1_body_flag[0];
-    const HandRoiDecision hand_rois =
-        compute_hand_rois_from_pose(router_.buffers().m1_body_lm.data(), pose_flag, 0.30f, 0.05f);
+    HandRoiDecision hand_rois =
+        compute_hand_rois_from_pose(router_.buffers().m1_body_lm.data(), pose_flag, 0.50f, 0.05f);
+    auto unletterbox_hand_roi = [&](RoiRectNorm& r, bool& active) {
+        if (!active) {
+            return;
+        }
+        r.cx = lb_roi.cx + (r.cx - 0.5f) * lb_roi.width;
+        r.cy = lb_roi.cy + (r.cy - 0.5f) * lb_roi.height;
+        r.width *= lb_roi.width;
+        r.height *= lb_roi.height;
+        if (r.cx < 0.05f || r.cx > 0.95f || r.cy < 0.05f || r.cy > 0.88f) {
+            active = false;
+            return;
+        }
+        r = enforce_square_pixel_roi(r, cam_frame->width, cam_frame->height, 0.14f, 0.48f);
+    };
+    unletterbox_hand_roi(hand_rois.left_roi, hand_rois.run_left);
+    unletterbox_hand_roi(hand_rois.right_roi, hand_rois.run_right);
     if (hand_rois.run_left || hand_rois.run_right) {
         const size_t hand_plane_floats = 3ULL * 224ULL * 224ULL;
         if (hand_rois.run_left) {
@@ -187,10 +209,14 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
 
     const uint64_t t_inf_end = aether::now_us();
 
-    // Update face ROI tracking state with 2.5% hysteresis deadband
+    // Update face ROI tracking state with 2.5% hysteresis deadband; recover via M1 head landmarks if M2 missed
     const RoiRectNorm current_face_roi = face_roi_;
     face_roi_ = solver_.compute_next_face_roi(router_.buffers().m2_face_lm.data(), current_face_roi, face_flag,
                                               cam_frame->width, cam_frame->height);
+    if (!face_roi_.valid) {
+        face_roi_ = solver_.estimate_face_roi_from_m1(router_.buffers().m1_body_lm.data(), lb_roi, pose_flag,
+                                                      cam_frame->width, cam_frame->height);
+    }
     roi_locked_.store(face_roi_.valid, std::memory_order_release);
 
     // 6. Solve rigid skull solvePnP + EAR/MAR + Iris + Upper Body + Hands directly into triple buffer

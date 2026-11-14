@@ -20,7 +20,7 @@ struct TrackingRouterConfig {
     bool enable_npu_fast_compile{false};
     uint32_t cpu_intra_op_threads{4};
     uint32_t health_window_frames{120};
-    double health_budget_ms{9.0};
+    double health_budget_ms{28.0};
     // CI testing bitmask: bit `k` set forces tier `EpTier(k)` initialization to simulate failure.
     uint32_t forced_fail_ep_mask{0};
 };

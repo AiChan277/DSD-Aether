@@ -1,4 +1,5 @@
 #include "animation/ik_solvers.hpp"
+#include "animation/visibility_first.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,7 @@ RestSkeletonMetrics build_default_humanoid_rest_metrics() noexcept {
     RestSkeletonMetrics m{};
     m.parent_indices.fill(-1);
     m.rest_local_rotations.fill(Quat::identity());
+    m.rest_world_rotations.fill(Quat::identity());
     m.bone_lengths.fill(0.06f);
 
     // Core spine/neck/head chain (0..6)
@@ -195,12 +197,29 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
             const int32_t p = metrics_.parent_indices[b];
             const size_t pi = (p >= 0 && p < static_cast<int32_t>(b)) ? static_cast<size_t>(p) : 0U;
             if (b >= AETHER_BONE_SPINE) {
-                io_local_rots[b] = clamp_rotation_to_limits(io_local_rots[b],
-                                                            joint_limit_for_bone(static_cast<AetherHumanoidBone>(b)));
+                const Quat rl = metrics_.rest_local_rotations[b];
+                const float rl2 = rl.w * rl.w + rl.x * rl.x + rl.y * rl.y + rl.z * rl.z;
+                const Quat rest_unit = (rl2 > 1e-6f) ? normalize(rl) : Quat::identity();
+
+                const Quat rw = metrics_.rest_world_rotations[b];
+                const float rw2 = rw.w * rw.w + rw.x * rw.x + rw.y * rw.y + rw.z * rw.z;
+                const Quat rw_unit = (rw2 > 1e-6f) ? normalize(rw) : Quat::identity();
+
+                // Express local delta in character anatomical rest axes before applying anatomical Euler limits.
+                const Quat delta_local = normalize(conjugate(rest_unit) * io_local_rots[b]);
+                const Quat delta_anatomical = normalize(rw_unit * delta_local * conjugate(rw_unit));
+                const Quat clamped_anatomical = clamp_rotation_to_limits(
+                    delta_anatomical, joint_limit_for_bone(static_cast<AetherHumanoidBone>(b)));
+                const Quat clamped_local = normalize(conjugate(rw_unit) * clamped_anatomical * rw_unit);
+                io_local_rots[b] = normalize(rest_unit * clamped_local);
             }
             out_world_rotations[b] = normalize(out_world_rotations[pi] * io_local_rots[b]);
+            const Quat rpw = metrics_.rest_world_rotations[pi];
+            const float rpw2 = rpw.w * rpw.w + rpw.x * rpw.x + rpw.y * rpw.y + rpw.z * rpw.z;
+            const Quat rest_parent_world = (rpw2 > 1e-6f) ? normalize(rpw) : Quat::identity();
+            const Quat parent_delta_world = normalize(out_world_rotations[pi] * conjugate(rest_parent_world));
             out_world_positions[b] =
-                out_world_positions[pi] + rotate_vec(out_world_rotations[pi], metrics_.rest_local_positions[b]);
+                out_world_positions[pi] + rotate_vec(parent_delta_world, metrics_.rest_local_positions[b]);
         }
     };
     compute_fk();
@@ -273,12 +292,16 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
     const Vec3 forward_chest = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {0.0f, 0.0f, 1.0f});
     const Vec3 l_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {0.35f, -0.45f, -0.82f});
     const Vec3 r_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {-0.35f, -0.45f, -0.82f});
-    apply_arm_ik(AETHER_BONE_LEFT_SHOULDER, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM,
-                 AETHER_BONE_LEFT_HAND, body_pose.left_wrist_target_ws, l_elbow_pole,
-                 body_pose.left_wrist_track_weight);
-    apply_arm_ik(AETHER_BONE_RIGHT_SHOULDER, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM,
-                 AETHER_BONE_RIGHT_HAND, body_pose.right_wrist_target_ws, r_elbow_pole,
-                 body_pose.right_wrist_track_weight);
+    if (body_pose.left_wrist_track_weight >= 0.05f) {
+        apply_arm_ik(AETHER_BONE_LEFT_SHOULDER, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM,
+                     AETHER_BONE_LEFT_HAND, body_pose.left_wrist_target_ws, l_elbow_pole,
+                     body_pose.left_wrist_track_weight);
+    }
+    if (body_pose.right_wrist_track_weight >= 0.05f) {
+        apply_arm_ik(AETHER_BONE_RIGHT_SHOULDER, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM,
+                     AETHER_BONE_RIGHT_HAND, body_pose.right_wrist_target_ws, r_elbow_pole,
+                     body_pose.right_wrist_track_weight);
+    }
 
     const Vec3 knee_pole = normalize_safe(Vec3{forward_chest.x, -0.05f, std::max(0.5f, forward_chest.z)});
     const auto apply_leg_ik = [&](AetherHumanoidBone up_b, AetherHumanoidBone lo_b, AetherHumanoidBone ft_b,
@@ -297,10 +320,12 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
         io_local_rots[lo_b] =
             clamp_rotation_to_limits(normalize(conjugate(up_w) * ik.lower_world_rot), joint_limit_for_bone(lo_b));
     };
-    apply_leg_ik(AETHER_BONE_LEFT_UPPER_LEG, AETHER_BONE_LEFT_LOWER_LEG, AETHER_BONE_LEFT_FOOT,
-                 body_pose.left_foot_target_ws);
-    apply_leg_ik(AETHER_BONE_RIGHT_UPPER_LEG, AETHER_BONE_RIGHT_LOWER_LEG, AETHER_BONE_RIGHT_FOOT,
-                 body_pose.right_foot_target_ws);
+    if (body_pose.lower_body_track_weight >= 0.05f) {
+        apply_leg_ik(AETHER_BONE_LEFT_UPPER_LEG, AETHER_BONE_LEFT_LOWER_LEG, AETHER_BONE_LEFT_FOOT,
+                     body_pose.left_foot_target_ws);
+        apply_leg_ik(AETHER_BONE_RIGHT_UPPER_LEG, AETHER_BONE_RIGHT_LOWER_LEG, AETHER_BONE_RIGHT_FOOT,
+                     body_pose.right_foot_target_ws);
+    }
 
     compute_fk();
 }

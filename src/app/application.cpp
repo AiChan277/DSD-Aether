@@ -348,14 +348,45 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         return rm;
     }
 
+    std::vector<animation::Quat> joint_world_rot(avatar.joints.size(), animation::Quat::identity());
+    std::vector<uint8_t> rot_resolved(avatar.joints.size(), 0U);
+    auto resolve_joint_world_rot = [&](auto& self, size_t idx, int depth) -> animation::Quat {
+        if (idx >= avatar.joints.size() || depth > 128) {
+            return animation::Quat::identity();
+        }
+        if (rot_resolved[idx] != 0U) {
+            return joint_world_rot[idx];
+        }
+        const auto& j = avatar.joints[idx];
+        const float* br = j.bind_rotation_quat;
+        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
+        const animation::Quat q_local =
+            (q2 > 1e-6f) ? animation::normalize(animation::Quat{br[0], br[1], br[2], br[3]})
+                         : animation::Quat::identity();
+        animation::Quat q_parent = animation::Quat::identity();
+        if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar.joints.size()) {
+            q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
+        }
+        joint_world_rot[idx] = animation::normalize(q_parent * q_local);
+        rot_resolved[idx] = 1U;
+        return joint_world_rot[idx];
+    };
+    for (size_t i = 0; i < avatar.joints.size(); ++i) {
+        (void)resolve_joint_world_rot(resolve_joint_world_rot, i, 0);
+    }
+
     std::array<animation::Vec3, AETHER_HUMANOID_BONE_COUNT> world{};
     const uint16_t hips_j = avatar.desc.humanoid_to_joint[AETHER_BONE_HIPS];
     if (hips_j < avatar.joint_rest_world_pos.size()) {
         const auto& hp = avatar.joint_rest_world_pos[hips_j];
         world[AETHER_BONE_HIPS] = {hp[0], hp[1], hp[2]};
+        rm.rest_world_rotations[AETHER_BONE_HIPS] =
+            (hips_j < joint_world_rot.size()) ? joint_world_rot[hips_j] : animation::Quat::identity();
     } else {
         world[AETHER_BONE_HIPS] = rm.rest_local_positions[AETHER_BONE_HIPS];
+        rm.rest_world_rotations[AETHER_BONE_HIPS] = animation::Quat::identity();
     }
+    rm.rest_local_rotations[AETHER_BONE_HIPS] = rm.rest_world_rotations[AETHER_BONE_HIPS];
 
     for (size_t b = 1; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
         const int32_t p = rm.parent_indices[b];
@@ -364,9 +395,14 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         if (j < avatar.joint_rest_world_pos.size()) {
             const auto& jp = avatar.joint_rest_world_pos[j];
             world[b] = {jp[0], jp[1], jp[2]};
+            rm.rest_world_rotations[b] =
+                (j < joint_world_rot.size()) ? joint_world_rot[j] : rm.rest_world_rotations[pi];
         } else {
             world[b] = world[pi] + rm.rest_local_positions[b];
+            rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
         }
+        rm.rest_local_rotations[b] =
+            animation::normalize(animation::conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
     }
 
     rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
@@ -384,8 +420,10 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         }
         uint16_t hb = AETHER_BONE_HIPS;
         std::array<float, 3> jr{0.0f, 0.0f, 0.0f};
+        animation::Quat col_j_rot = animation::Quat::identity();
         if (col.joint_index < avatar.joints.size()) {
             jr = avatar.joint_rest_world_pos[col.joint_index];
+            col_j_rot = joint_world_rot[col.joint_index];
             uint32_t j = col.joint_index;
             for (size_t steps = 0; steps < avatar.joints.size() && j < avatar.joints.size(); ++steps) {
                 const uint16_t candidate = avatar.joints[j].humanoid_bone;
@@ -404,16 +442,14 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         dst.attached_bone = static_cast<int32_t>(hb);
         dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
         dst.radius = std::clamp(col.radius, 0.01f, 0.50f);
-        dst.local_a = {
-            jr[0] + col.offset[0] - world[hb].x,
-            jr[1] + col.offset[1] - world[hb].y,
-            jr[2] + col.offset[2] - world[hb].z,
-        };
-        dst.local_b = {
-            jr[0] + col.tail[0] - world[hb].x,
-            jr[1] + col.tail[1] - world[hb].y,
-            jr[2] + col.tail[2] - world[hb].z,
-        };
+        const animation::Vec3 j_pos{jr[0], jr[1], jr[2]};
+        const animation::Vec3 a_ws =
+            j_pos + animation::rotate_vec(col_j_rot, {col.offset[0], col.offset[1], col.offset[2]});
+        const animation::Vec3 b_ws =
+            j_pos + animation::rotate_vec(col_j_rot, {col.tail[0], col.tail[1], col.tail[2]});
+        const animation::Quat inv_hb_rot = animation::conjugate(rm.rest_world_rotations[hb]);
+        dst.local_a = animation::rotate_vec(inv_hb_rot, a_ws - world[hb]);
+        dst.local_b = animation::rotate_vec(inv_hb_rot, b_ws - world[hb]);
     }
     rm.custom_collider_count = custom_cnt;
     rm.valid = true;
@@ -897,6 +933,9 @@ int run_application(const AppLaunchOptions& opts) {
         const std::filesystem::path cfg_dir =
             paths.app_data_dir.empty() ? ui::default_config_dir() : std::filesystem::path(paths.app_data_dir);
         (void)ui::load_app_settings_toml(cfg_dir / "settings.toml", boot_settings, boot_params);
+        if (boot_params.get_int(ui::ParamId::TrackingEpMode) == 4) {
+            boot_params.set(ui::ParamId::TrackingEpMode, 0.0);
+        }
     }
 
     rhi::RhiDeviceConfig rhi_cfg{};

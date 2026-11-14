@@ -47,6 +47,8 @@ class alignas(64) SimEngine {
     [[nodiscard]] const SpringBoneSimulator& spring_simulator() const noexcept { return spring_; }
     [[nodiscard]] const VisibilityFirstSolver& visibility_solver() const noexcept { return vis_solver_; }
     [[nodiscard]] const FilteredTrackingState& last_predicted() const noexcept { return predicted_state_; }
+    [[nodiscard]] const std::array<Vec3, kMaxBones>& bone_pos_ws() const noexcept { return bone_pos_ws_; }
+    [[nodiscard]] const std::array<Quat, kMaxBones>& bone_rot_ws() const noexcept { return bone_rot_ws_; }
 
     void export_spring_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,
                                SpringSegmentOverlay* out_segs, uint32_t max_segs,

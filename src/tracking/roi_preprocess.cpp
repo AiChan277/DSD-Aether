@@ -461,8 +461,10 @@ RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
     uint32_t count = 0U;
 
     const uint8_t* px = src.bytes.data();
-    for (uint32_t y = src.height / 12U; y < (src.height * 11U) / 12U; y += kStep) {
-        for (uint32_t x = src.width / 10U; x < (src.width * 9U) / 10U; x += kStep) {
+    // Scan upper 68% of frame so brightly colored red/orange shirts never pull the fallback centroid downward
+    const uint32_t y_end = (src.height * 68U) / 100U;
+    for (uint32_t y = src.height / 14U; y < y_end; y += kStep) {
+        for (uint32_t x = src.width / 8U; x < (src.width * 7U) / 8U; x += kStep) {
             uint8_t yv = 0;
             uint8_t cb = 128;
             uint8_t cr = 128;
@@ -488,7 +490,8 @@ RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
                 cb = static_cast<uint8_t>(std::clamp(128.0f - 0.168736f * r - 0.331264f * g + 0.5f * b, 0.0f, 255.0f));
                 cr = static_cast<uint8_t>(std::clamp(128.0f + 0.5f * r - 0.418688f * g - 0.081312f * b, 0.0f, 255.0f));
             }
-            if (yv >= 50U && yv <= 240U && cb >= 77U && cb <= 127U && cr >= 133U && cr <= 173U) {
+            const int cr_minus_cb = static_cast<int>(cr) - static_cast<int>(cb);
+            if (yv >= 50U && yv <= 240U && cb >= 82U && cb <= 122U && cr >= 135U && cr <= 162U && cr_minus_cb <= 68) {
                 const float nx = static_cast<float>(x) / static_cast<float>(src.width);
                 const float ny = static_cast<float>(y) / static_cast<float>(src.height);
                 sum_x += nx;
@@ -511,11 +514,11 @@ RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
     RoiRectNorm roi{};
     roi.cx = mean_x;
     roi.cy = mean_y;
-    roi.width = std::clamp(span, 0.22f, 0.72f);
+    roi.width = std::clamp(span, 0.20f, 0.48f);
     roi.height = roi.width;
     roi.rotation_rad = 0.0f;
     roi.valid = true;
-    return enforce_square_pixel_roi(roi, src.width, src.height, 0.22f, 0.85f);
+    return enforce_square_pixel_roi(roi, src.width, src.height, 0.20f, 0.55f);
 }
 
 void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, uint32_t dst_h,
