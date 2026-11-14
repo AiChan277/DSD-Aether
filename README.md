@@ -2,7 +2,7 @@
 
 Real-time VTuber studio for Windows 10/11 x64: NPU-first motion tracking, Live2D-grade 2.5D NPR rendering with hardware ray tracing, zero-copy alpha video output (Spout2, DirectShow virtual camera, NDI 6) and audio-DSP sync.
 
-**Version:** `a1.0.0B` — alpha 1, revision 0, build 0.
+**Version:** `a1.0.1B` — alpha 1, revision 0, build 1.
 
 The binding specification is [`AETHER-2.5D_Technical_Specification_v1.0.pdf`](AETHER-2.5D_Technical_Specification_v1.0.pdf) (AETHER-TS-001). Implementation status lives in [`docs/STATUS.md`](docs/STATUS.md), design decisions in [`docs/adr/`](docs/adr/), and per-phase reports in [`docs/phases/`](docs/phases/).
 
