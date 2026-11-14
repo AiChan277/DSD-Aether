@@ -184,6 +184,19 @@ target_link_libraries(studio_ui_test PRIVATE
 )
 set_tests_properties(studio_ui_test PROPERTIES TIMEOUT 120)
 
+# UE5 Blueprint node-graph wire editing: connect / disconnect / re-route / undo / JSON + real ImGui input
+aether_add_cpp_test(node_graph_interaction_test cpp/node_graph_interaction_test.cpp)
+target_link_libraries(node_graph_interaction_test PRIVATE
+    aether_ui
+)
+set_tests_properties(node_graph_interaction_test PROPERTIES TIMEOUT 60)
+
+# Headless Studio UI snapshots (CPU-rasterized ImGui draw data -> <build>/tests/ui_snapshots/*.png)
+aether_add_cpp_test(studio_ui_snapshot_test cpp/studio_ui_snapshot_test.cpp)
+target_compile_definitions(studio_ui_snapshot_test PRIVATE AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(studio_ui_snapshot_test PRIVATE aether_ui aether_rhi aether_renderer windowscodecs ole32)
+set_tests_properties(studio_ui_snapshot_test PROPERTIES TIMEOUT 300)
+
 # Epoch/Mark-Sweep Garbage Collector & DirectX 11 2.5D NPR Renderer Tests
 aether_add_cpp_test(gc_and_dx11_renderer_test cpp/gc_and_dx11_renderer_test.cpp)
 target_link_libraries(gc_and_dx11_renderer_test PRIVATE

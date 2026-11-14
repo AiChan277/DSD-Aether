@@ -8,12 +8,46 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <string_view>
 
 namespace aether::ui {
 namespace {
+
+void apply_custom_xform_payload(ParamStore* params, const std::string& payload) noexcept {
+    if (params == nullptr) {
+        return;
+    }
+    constexpr std::string_view kPrefix = "xform:";
+    if (payload.size() <= kPrefix.size() || std::string_view(payload).substr(0, kPrefix.size()) != kPrefix) {
+        return;
+    }
+    const char* cur = payload.data() + kPrefix.size();
+    const char* end = payload.data() + payload.size();
+    std::array<float, 5> vals{0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    for (size_t i = 0; i < vals.size(); ++i) {
+        const auto res = std::from_chars(cur, end, vals[i]);
+        if (res.ec != std::errc()) {
+            return;
+        }
+        cur = res.ptr;
+        if (i + 1 < vals.size()) {
+            if (cur >= end || *cur != ';') {
+                return;
+            }
+            ++cur;
+        }
+    }
+    (void)params->set(ParamId::AvatarPosX, static_cast<double>(vals[0]));
+    (void)params->set(ParamId::AvatarPosY, static_cast<double>(vals[1]));
+    (void)params->set(ParamId::AvatarPosZ, static_cast<double>(vals[2]));
+    (void)params->set(ParamId::AvatarRotY, static_cast<double>(vals[3]));
+    (void)params->set(ParamId::AvatarScale, static_cast<double>(vals[4]));
+}
 
 const char* kPanelOutliner = "Outliner & Project";
 const char* kPanelViewport = "Viewport";
@@ -22,6 +56,10 @@ const char* kPanelNodeGraph = "Node Graph";
 const char* kPanelConsole = "Console";
 const char* kPanelExpressions = "Expressions";
 const char* kPanelTimeline = "Performance Timeline";
+
+// v2: broadcast-overhaul dock geometry; older per-mode layouts are ignored so the new defaults apply once.
+constexpr const char* kLayoutIniFmt = "mode_v2_%d.ini";
+constexpr double kExpressionRampSeconds = 0.18;
 
 void safe_copy_cstr(char* dst, size_t cap, const char* src) noexcept {
     if (dst == nullptr || cap == 0) {
@@ -130,7 +168,7 @@ void StudioWorkspace::save_mode_layout_ini(StudioMode mode) const {
         return;
     }
     std::array<char, 32> fname{};
-    std::snprintf(fname.data(), fname.size(), "mode_%d.ini", static_cast<int>(mode));
+    std::snprintf(fname.data(), fname.size(), kLayoutIniFmt, static_cast<int>(mode));
     const auto p = config_dir_ / "layouts" / fname.data();
     const std::string p_str = p.string();
     ImGui::SaveIniSettingsToDisk(p_str.c_str());
@@ -141,7 +179,7 @@ void StudioWorkspace::load_mode_layout_ini(StudioMode mode) {
         return;
     }
     std::array<char, 32> fname{};
-    std::snprintf(fname.data(), fname.size(), "mode_%d.ini", static_cast<int>(mode));
+    std::snprintf(fname.data(), fname.size(), kLayoutIniFmt, static_cast<int>(mode));
     const auto p = config_dir_ / "layouts" / fname.data();
     std::error_code ec;
     if (std::filesystem::exists(p, ec)) {
@@ -235,6 +273,7 @@ void StudioWorkspace::switch_mode(StudioMode new_mode) {
     save_mode_layout_ini(mode_);
     layout_maximized_ = false;
     mode_ = new_mode;
+    synced_param_epoch_ = 0; // Rigging forces the skeleton overlay: resync viewport actions now
     if (allow_disk_config_) {
         load_mode_layout_ini(mode_);
     } else {
@@ -252,9 +291,22 @@ void StudioWorkspace::build_dock_layout(ImGuiID dockspace_id, StudioMode mode) {
     ImGui::DockBuilderRemoveNode(dockspace_id);
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
 
+    // §2.2 dock geometry: Outliner 275 px * dpi, Inspector 325 px * dpi (wider in Rigging), never more
+    // than ~30% of the window each. Nodes mode gives the bottom Node Graph 65% of the center height.
+    const PrecisionDarkTokens& t = tokens();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const ImVec2 avail_size = vp != nullptr ? vp->WorkSize : ImVec2(1440.0f, 900.0f);
-    ImGui::DockBuilderSetNodeSize(dockspace_id, avail_size);
+    const float dpi = std::max(0.75f, effective_dpi_scale());
+    ImVec2 avail_size = ImVec2(1440.0f, 900.0f);
+    if (vp != nullptr) {
+        const float top_h = std::max(ImGui::GetFrameHeight(), vp->WorkPos.y - vp->Pos.y);
+        const float bot_h = std::round(t.status_bar_h_px * dpi);
+        const ImVec2 dock_pos(vp->Pos.x, vp->Pos.y + top_h);
+        avail_size = ImVec2(vp->Size.x, std::max(120.0f, vp->Size.y - top_h - bot_h));
+        ImGui::DockBuilderSetNodePos(dockspace_id, dock_pos);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, avail_size);
+    } else {
+        ImGui::DockBuilderSetNodeSize(dockspace_id, avail_size);
+    }
 
     ImGuiID main_id = dockspace_id;
     if (layout_maximized_ && maximized_window_[0] != '\0') {
@@ -263,37 +315,44 @@ void StudioWorkspace::build_dock_layout(ImGuiID dockspace_id, StudioMode mode) {
         return;
     }
 
-    const float left_frac = (mode == StudioMode::Rigging) ? 0.21f : (mode == StudioMode::Nodes ? 0.17f : 0.19f);
-    const float right_frac = (mode == StudioMode::Rigging) ? 0.25f : 0.23f;
-    const float bottom_frac = (mode == StudioMode::Nodes) ? 0.22f : 0.25f;
+    const float total_w = std::max(640.0f, avail_size.x);
+    const float left_px = t.left_dock_w_px * dpi * (mode == StudioMode::Rigging ? 1.05f : 1.0f);
+    const float right_px = t.right_dock_w_px * dpi * (mode == StudioMode::Rigging ? 1.06f : 1.0f);
+    const float left_frac = std::clamp(left_px / total_w, 0.12f, 0.30f);
+    const float right_frac = std::clamp(right_px / (total_w * (1.0f - left_frac)), 0.14f, 0.36f);
+    const float bottom_frac = (mode == StudioMode::Nodes) ? 0.65f : (mode == StudioMode::Rigging ? 0.24f : 0.28f);
 
     ImGuiID left_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Left, left_frac, nullptr, &main_id);
-    ImGuiID right_id =
-        ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Right, right_frac / (1.0f - left_frac), nullptr, &main_id);
+    ImGuiID right_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Right, right_frac, nullptr, &main_id);
     ImGuiID bottom_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Down, bottom_frac, nullptr, &main_id);
 
     ImGui::DockBuilderDockWindow(kPanelOutliner, left_id);
     ImGui::DockBuilderDockWindow(kPanelInspector, right_id);
-
-    if (mode == StudioMode::Nodes) {
-        ImGuiID preview_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Left, 0.36f, nullptr, &main_id);
-        ImGui::DockBuilderDockWindow(kPanelViewport, preview_id);
-        ImGui::DockBuilderDockWindow(kPanelNodeGraph, main_id);
-        ImGui::DockBuilderDockWindow(kPanelConsole, bottom_id);
-        ImGui::DockBuilderDockWindow(kPanelTimeline, bottom_id);
-        ImGui::DockBuilderDockWindow(kPanelExpressions, bottom_id);
-    } else {
-        ImGui::DockBuilderDockWindow(kPanelViewport, main_id);
-        ImGui::DockBuilderDockWindow(kPanelConsole, bottom_id);
-        ImGui::DockBuilderDockWindow(kPanelExpressions, bottom_id);
-        ImGui::DockBuilderDockWindow(kPanelTimeline, bottom_id);
-        ImGui::DockBuilderDockWindow(kPanelNodeGraph, bottom_id);
-    }
-
+    ImGui::DockBuilderDockWindow(kPanelViewport, main_id);
+    ImGui::DockBuilderDockWindow(kPanelNodeGraph, bottom_id);
+    ImGui::DockBuilderDockWindow(kPanelConsole, bottom_id);
+    ImGui::DockBuilderDockWindow(kPanelExpressions, bottom_id);
+    ImGui::DockBuilderDockWindow(kPanelTimeline, bottom_id);
     ImGui::DockBuilderFinish(dockspace_id);
+
+    // Bring the mode's primary bottom tab to front once its window exists.
+    safe_copy_cstr(focus_tab_after_layout_.data(), focus_tab_after_layout_.size(),
+                   mode == StudioMode::LiveStudio ? kPanelConsole : kPanelNodeGraph);
 }
 
 void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
+    // Wireframe, Rigging collider overlays, and live AvatarRoot transform stay synced every frame
+    // even when StudioActions was freshly default-constructed without a ParamStore epoch bump.
+    actions.viewport.wireframe = viewport_panel_.wireframe_enabled();
+    actions.viewport.show_rig_colliders = viewport_panel_.rig_colliders_enabled() || (mode_ == StudioMode::Rigging);
+    actions.viewport.show_skeleton_heatmap =
+        params_.get_bool(ParamId::AppSkeletonHeatmap) || (mode_ == StudioMode::Rigging);
+    actions.viewport.avatar_pos[0] = params_.get_float(ParamId::AvatarPosX);
+    actions.viewport.avatar_pos[1] = params_.get_float(ParamId::AvatarPosY);
+    actions.viewport.avatar_pos[2] = params_.get_float(ParamId::AvatarPosZ);
+    actions.viewport.avatar_rot_y_deg = params_.get_float(ParamId::AvatarRotY);
+    actions.viewport.avatar_scale = params_.get_float(ParamId::AvatarScale);
+
     if (synced_param_epoch_ == params_.epoch()) {
         return;
     }
@@ -303,6 +362,11 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.live2d_flatness = params_.get_float(ParamId::RenderFlatness);
     v.key_azimuth_deg = params_.get_float(ParamId::RenderKeyAzimuthDeg);
     v.key_elevation_deg = params_.get_float(ParamId::RenderKeyElevationDeg);
+    // Fill / Rim orbit rigidly with the key (Light Orbit Gizmo handles drive the same rig).
+    v.fill_azimuth_deg = wrap_degrees(v.key_azimuth_deg + LightRigOffsets::kFillAzDeg);
+    v.fill_elevation_deg = std::clamp(v.key_elevation_deg + LightRigOffsets::kFillElDeg, -85.0f, 85.0f);
+    v.rim_azimuth_deg = wrap_degrees(v.key_azimuth_deg + LightRigOffsets::kRimAzDeg);
+    v.rim_elevation_deg = std::clamp(v.key_elevation_deg + LightRigOffsets::kRimElDeg, -85.0f, 85.0f);
     v.key_intensity = params_.get_float(ParamId::RenderKeyIntensity);
     v.fill_intensity = params_.get_float(ParamId::RenderFillIntensity);
     v.rim_intensity = params_.get_float(ParamId::RenderRimIntensity);
@@ -312,7 +376,8 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.debug_view = static_cast<uint8_t>(params_.get_int(ParamId::RenderDebugView));
     v.denoiser_kind = static_cast<uint8_t>(params_.get_int(ParamId::RenderDenoiser));
     v.render_backend = static_cast<uint8_t>(params_.get_int(ParamId::RenderBackend));
-    v.show_skeleton_heatmap = params_.get_bool(ParamId::AppSkeletonHeatmap);
+    // Rigging mode always shows the joint/bone overlay in the viewport.
+    v.show_skeleton_heatmap = params_.get_bool(ParamId::AppSkeletonHeatmap) || mode_ == StudioMode::Rigging;
     v.show_checkerboard = params_.get_bool(ParamId::AppCheckerboardBg);
     v.show_orbit_orb = params_.get_bool(ParamId::AppOrbitOrbVisible);
     v.lighting_dirty = true;
@@ -424,6 +489,9 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
             actions.pending_graph_json = json;
             actions.request_apply_graph_json = true;
         };
+        ctx.apply_custom_payload = [&](const std::string& payload) {
+            apply_custom_xform_payload(&params_, payload);
+        };
         if (undo_.undo(ctx)) {
             push_toast(ToastSeverity::Info, "Undo", undo_.redo_label(), now_s);
         }
@@ -436,6 +504,9 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
             node_canvas_.set_graph_json(json);
             actions.pending_graph_json = json;
             actions.request_apply_graph_json = true;
+        };
+        ctx.apply_custom_payload = [&](const std::string& payload) {
+            apply_custom_xform_payload(&params_, payload);
         };
         if (undo_.redo(ctx)) {
             push_toast(ToastSeverity::Info, "Redo", undo_.undo_label(), now_s);
@@ -496,10 +567,13 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, StudioActions& actio
         actions.request_open_project_dialog = true;
     } else if (keymap_.is_pressed(ActionId::ProjectNew) && !host_status_.on_air) {
         actions.request_new_project = true;
-    } else if (keymap_.is_pressed(ActionId::Undo)) {
+    } else if (keymap_.is_pressed(ActionId::Undo) && !typing) {
         PaletteInvokeResult r{true, PaletteCommandTag::Undo, {}};
         execute_palette_command(r, now_s, actions);
-    } else if (keymap_.is_pressed(ActionId::Redo)) {
+    } else if ((keymap_.is_pressed(ActionId::Redo) ||
+                (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && !ImGui::GetIO().KeyAlt &&
+                 ImGui::IsKeyPressed(ImGuiKey_Z, false))) &&
+               !typing) {
         PaletteInvokeResult r{true, PaletteCommandTag::Redo, {}};
         execute_palette_command(r, now_s, actions);
     } else if (keymap_.is_pressed(ActionId::Preferences)) {
@@ -528,53 +602,105 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, StudioActions& actio
         }
         dock_layout_dirty_ = true;
     } else if (!typing) {
+        // Global toggles (any panel)
+        auto toggle_param = [&](ParamId pid) {
+            const double old_v = params_.get(pid);
+            const double new_v = params_.get_bool(pid) ? 0.0 : 1.0;
+            if (params_.set(pid, new_v)) {
+                undo_.push_param(pid, old_v, new_v);
+            }
+        };
         if (keymap_.is_pressed(ActionId::ViewportHeatmap)) {
-            params_.set(ParamId::AppSkeletonHeatmap, params_.get_bool(ParamId::AppSkeletonHeatmap) ? 0.0 : 1.0);
+            toggle_param(ParamId::AppSkeletonHeatmap);
         } else if (keymap_.is_pressed(ActionId::ViewportOrbitOrb)) {
-            params_.set(ParamId::AppOrbitOrbVisible, params_.get_bool(ParamId::AppOrbitOrbVisible) ? 0.0 : 1.0);
+            toggle_param(ParamId::AppOrbitOrbVisible);
         } else if (keymap_.is_pressed(ActionId::ToggleRayTracing)) {
-            params_.set(ParamId::RenderRtEnabled, params_.get_bool(ParamId::RenderRtEnabled) ? 0.0 : 1.0);
+            toggle_param(ParamId::RenderRtEnabled);
         } else if (keymap_.is_pressed(ActionId::OutlinerFilter)) {
             outliner_panel_.set_focus_filter_requested();
-        } else if (keymap_.is_pressed(ActionId::GizmoSelect)) {
-            viewport_panel_.set_gizmo_tool(GizmoTool::Select);
-        } else if (keymap_.is_pressed(ActionId::GizmoMove)) {
-            viewport_panel_.set_gizmo_tool(GizmoTool::Move);
-        } else if (keymap_.is_pressed(ActionId::GizmoRotate)) {
-            viewport_panel_.set_gizmo_tool(GizmoTool::Rotate);
-        } else if (keymap_.is_pressed(ActionId::GizmoScale)) {
-            viewport_panel_.set_gizmo_tool(GizmoTool::Scale);
-        } else if (keymap_.is_pressed(ActionId::GizmoLocalWorld)) {
-            viewport_panel_.toggle_local_world();
-        } else if (keymap_.is_pressed(ActionId::ViewportGrid)) {
-            viewport_panel_.toggle_grid();
-        } else if (keymap_.is_pressed(ActionId::ViewportFrameHead) || keymap_.is_pressed(ActionId::ViewportFrameBody)) {
-            actions.viewport.reset_camera = true;
         }
 
-        // Camera bookmarks 1-5 & Ctrl+Alt+1-5
-        for (size_t i = 0; i < 5; ++i) {
-            const auto cam_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportCam1) + i);
-            const auto store_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportStoreCam1) + i);
-            if (keymap_.is_pressed(store_aid)) {
-                viewport_panel_.store_camera_bookmark(i);
-            } else if (keymap_.is_pressed(cam_aid)) {
-                viewport_panel_.recall_camera_bookmark(i, actions);
+        // Viewport-scoped keys (Q/W/E/R/X/F/G/1-5): Q/W/E/R/X work whenever Viewport is focused or hovered;
+        // F/G/1-5 respect the hovered zone so Node Graph F (Frame Graph) stays conflict-free.
+        const bool vp_hovered = (std::strcmp(last_hovered_zone_window_.data(), kPanelViewport) == 0);
+        if (viewport_panel_.is_focused() || vp_hovered) {
+            if (keymap_.is_pressed(ActionId::GizmoSelect)) {
+                viewport_panel_.set_gizmo_tool(GizmoTool::Select);
+            } else if (keymap_.is_pressed(ActionId::GizmoMove)) {
+                viewport_panel_.set_gizmo_tool(GizmoTool::Move);
+            } else if (keymap_.is_pressed(ActionId::GizmoRotate)) {
+                viewport_panel_.set_gizmo_tool(GizmoTool::Rotate);
+            } else if (keymap_.is_pressed(ActionId::GizmoScale)) {
+                viewport_panel_.set_gizmo_tool(GizmoTool::Scale);
+            } else if (keymap_.is_pressed(ActionId::GizmoLocalWorld)) {
+                viewport_panel_.toggle_local_world();
+            }
+        }
+        if (vp_hovered || (viewport_panel_.is_focused() &&
+                           std::strcmp(last_hovered_zone_window_.data(), kPanelNodeGraph) != 0)) {
+            if (keymap_.is_pressed(ActionId::ViewportGrid)) {
+                viewport_panel_.toggle_grid();
+            } else if (keymap_.is_pressed(ActionId::ViewportFrameHead) ||
+                       keymap_.is_pressed(ActionId::ViewportFrameBody)) {
+                viewport_panel_.reset_camera(actions);
+            }
+            for (size_t i = 0; i < 5; ++i) {
+                const auto cam_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportCam1) + i);
+                const auto store_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportStoreCam1) + i);
+                if (keymap_.is_pressed(store_aid)) {
+                    viewport_panel_.store_camera_bookmark(i);
+                } else if (keymap_.is_pressed(cam_aid)) {
+                    viewport_panel_.recall_camera_bookmark(i, actions);
+                }
             }
         }
 
-        // F1-F8 Quick Expressions
-        for (size_t i = 0; i < 8 && i < expressions_.size(); ++i) {
+        // F1-F8 Quick Expressions: latch / release; weights ramp in update_expression_ramps()
+        for (size_t i = 0; i < StudioActions::kQuickExpressionSlots && i < expressions_.size(); ++i) {
             const auto expr_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::Expression1) + i);
             if (keymap_.is_pressed(expr_aid)) {
-                auto& ex = expressions_[i];
-                ex.triggered_override = !ex.triggered_override;
-                ex.current_weight = ex.triggered_override ? 1.0f : 0.0f;
-                actions.request_trigger_expression = true;
-                actions.expression_slot = static_cast<int32_t>(i);
-                actions.expression_weight = ex.current_weight;
+                expressions_[i].triggered_override = !expressions_[i].triggered_override;
             }
         }
+    }
+}
+
+void StudioWorkspace::update_expression_ramps(double now_s, StudioActions& actions) noexcept {
+    const double dt = std::clamp(now_s - last_ramp_s_, 0.0, 0.1);
+    last_ramp_s_ = now_s;
+    const bool instant = params_.get_bool(ParamId::AppReduceMotion);
+    for (size_t i = 0; i < StudioActions::kQuickExpressionSlots && i < expressions_.size(); ++i) {
+        ExpressionSlotInfo& ex = expressions_[i];
+        const float target = ex.triggered_override ? 1.0f : 0.0f;
+        float& u = expr_ramp_u_[i];
+        if (u == target) {
+            continue;
+        }
+        const float step = instant ? 1.0f : static_cast<float>(dt / kExpressionRampSeconds);
+        u = target > u ? std::min(target, u + step) : std::max(target, u - step);
+        // Cubic Hermite (smoothstep) ease: zero velocity at both ends of the blend.
+        const float w = u * u * (3.0f - 2.0f * u);
+        ex.current_weight = w;
+        actions.expression_weights[i] = w;
+        actions.expression_dirty_mask = static_cast<uint8_t>(actions.expression_dirty_mask | (1u << i));
+    }
+}
+
+void StudioWorkspace::ensure_broadcast_outputs_enabled(double now_s) {
+    // Go Live = master broadcast transmission: Spout2 + Virtual Cam must be transmitting.
+    bool changed = false;
+    for (const ParamId pid : {ParamId::OutputSpoutEnabled, ParamId::OutputVcamEnabled}) {
+        if (!params_.get_bool(pid)) {
+            const double old_v = params_.get(pid);
+            if (params_.set(pid, 1.0)) {
+                undo_.push_param(pid, old_v, 1.0);
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        push_toast(ToastSeverity::Info, "Broadcast Outputs Enabled", "Spout2 and Virtual Cam started for Go Live.",
+                   now_s);
     }
 }
 
@@ -610,7 +736,7 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     // Z5 Top Menu & Mode Bar
     bool mode_changed = false;
     StudioMode requested_mode = mode_;
-    const TopMenuAction top_act = telemetry_bar_.draw_top_bar(requested_mode, mode_changed, rhi, ffi_layout_ok,
+    const TopMenuAction top_act = telemetry_bar_.draw_top_bar(now_s, requested_mode, mode_changed, rhi, ffi_layout_ok,
                                                               host_status_, undo_, fonts_, scale, actions);
     if (mode_changed) {
         switch_mode(requested_mode);
@@ -651,6 +777,16 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     case TopMenuAction::ResetLayout:
         reset_current_layout();
         break;
+    case TopMenuAction::Undo: {
+        PaletteInvokeResult r{true, PaletteCommandTag::Undo, {}};
+        execute_palette_command(r, now_s, actions);
+        break;
+    }
+    case TopMenuAction::Redo: {
+        PaletteInvokeResult r{true, PaletteCommandTag::Redo, {}};
+        execute_palette_command(r, now_s, actions);
+        break;
+    }
     default:
         break;
     }
@@ -658,8 +794,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     // Main Dockspace inside viewport (leaving space cleanly for Top Menu + Bottom Status Strip)
     const PrecisionDarkTokens& t = tokens();
     const ImGuiViewport* main_vp = ImGui::GetMainViewport();
-    const float top_h = ImGui::GetFrameHeight();
-    const float bot_h = t.status_bar_h_px * scale;
+    const float top_h = std::max(ImGui::GetFrameHeight(), main_vp->WorkPos.y - main_vp->Pos.y);
+    const float bot_h = std::round(t.status_bar_h_px * scale);
     const ImVec2 dock_pos(main_vp->Pos.x, main_vp->Pos.y + top_h);
     const ImVec2 dock_sz(main_vp->Size.x, std::max(120.0f, main_vp->Size.y - top_h - bot_h));
 
@@ -677,10 +813,10 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     ImGui::PopStyleVar(3);
 
     const ImGuiID dockspace_id = ImGui::GetID("##AetherDockSpace");
-    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     if (dock_layout_dirty_) {
         build_dock_layout(dockspace_id, mode_);
     }
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
 
     auto track_hovered_zone = [&](const char* win_name) {
@@ -692,9 +828,12 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     // Z1 Outliner (OutlinerPanel manages its own ImGui::Begin("Outliner & Project")/End)
     outliner_panel_.draw(mode_, host_status_.on_air, avatar, output_view, bones_, materials_, expressions_, plugins_,
                          params_, undo_, fonts_, selection_, actions);
+    if (outliner_panel_.consume_inspect_outputs_request()) {
+        inspector_panel_.request_focus_output_section();
+    }
 
     // Z2 Viewport (ViewportPanel manages its own ImGui::Begin("Viewport")/End)
-    viewport_panel_.draw(avatar, tracking, render_view, input_echo, host_status_.tracking_paused, params_, undo_,
+    viewport_panel_.draw(mode_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused, params_, undo_,
                          fonts_, scale, actions);
 
     // Z3 Inspector (InspectorPanel manages its own ImGui::Begin("Inspector")/End)
@@ -727,24 +866,27 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     // Z4 Node Graph
     if (ImGui::Begin(kPanelNodeGraph)) {
         track_hovered_zone(kPanelNodeGraph);
-        node_canvas_.draw(host_status_, undo_, fonts_, scale, selection_, actions);
+        node_canvas_.draw(host_status_, undo_, keymap_, fonts_, scale, selection_, actions);
     }
     ImGui::End();
 
     // Z4 Auxiliary Tabs (Console, Expressions, Timeline)
     if (ImGui::Begin(kPanelConsole)) {
         track_hovered_zone(kPanelConsole);
-        const char* copied = nullptr;
-        timeline_console_.draw_console_tab(recent_logs_, log_head_, log_count_, fonts_, copied);
-        if (copied != nullptr) {
-            push_toast(ToastSeverity::Info, "Log Copied", copied, now_s);
+        const ConsoleTabResult res = timeline_console_.draw_console_tab(recent_logs_, log_head_, log_count_, fonts_);
+        if (res.copied_notice != nullptr) {
+            push_toast(ToastSeverity::Info, "Console", res.copied_notice, now_s);
+        }
+        if (res.clear_requested) {
+            log_head_ = 0;
+            log_count_ = 0;
         }
     }
     ImGui::End();
 
     if (ImGui::Begin(kPanelExpressions)) {
         track_hovered_zone(kPanelExpressions);
-        timeline_console_.draw_expressions_tab(expressions_, fonts_, actions);
+        timeline_console_.draw_expressions_tab(expressions_, fonts_);
     }
     ImGui::End();
 
@@ -753,6 +895,14 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         timeline_console_.draw_timeline_tab(telemetry, render_view, tracking, params_, fonts_);
     }
     ImGui::End();
+
+    if (focus_tab_after_layout_[0] != '\0') {
+        ImGui::SetWindowFocus(focus_tab_after_layout_.data());
+        focus_tab_after_layout_[0] = '\0';
+    }
+
+    // Quick-expression latches from F-keys, the Outliner grid or the Expressions tab ramp smoothly.
+    update_expression_ramps(now_s, actions);
 
     // Z5 Bottom Status Strip (4 Hz sampling + 500 ms color hysteresis)
     telemetry_bar_.draw_bottom_bar(now_s, telemetry, arena, rhi, tracking, render_view, output_view, fonts_, scale);
@@ -799,6 +949,11 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         set_high_contrast_theme(hc);
         apply_precision_dark_style(ImGui::GetStyle(), effective_dpi_scale(), hc);
         actions.request_reapply_theme_or_dpi = true;
+    }
+
+    // Go Live (top bar, Ctrl+Shift+L or palette) starts the Spout2 + Virtual Cam transmitters.
+    if (actions.request_set_on_air && actions.target_on_air && !host_status_.on_air) {
+        ensure_broadcast_outputs_enabled(now_s);
     }
 
     // Propagate ParamStore epochs cleanly into Render / Tracking / Output actions same frame

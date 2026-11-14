@@ -31,7 +31,12 @@ struct SkinningSnapshot {
     uint64_t t2_done_us{0};
     float spring_sim_ms{0.0f};
     bool dsp_attenuated_on_t2{false};
-    uint8_t reserved_pad_[7]{};
+    uint8_t reserved_pad_[3]{};
+    uint32_t spring_collider_count{0};
+    uint32_t spring_segment_count{0};
+    std::array<aether::animation::SpringColliderOverlay, aether::animation::kMaxOverlayColliders> spring_colliders{};
+    std::array<aether::animation::SpringSegmentOverlay, aether::animation::kMaxOverlaySpringSegments>
+        spring_segments{};
     uint64_t reserved_[2]{};
 };
 
@@ -84,6 +89,7 @@ struct OutputWorkItem {
     uint64_t t3_start_us{0};
     uint64_t t3_submit_us{0};
     uint64_t ui_cpu_us{0};
+    bool tracking_active{true};
 };
 
 /**

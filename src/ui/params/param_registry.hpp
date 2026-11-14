@@ -223,13 +223,14 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
               0.0, 1.0, 1.0, 0, nullptr,
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderDenoiser, "render.denoiser", "Render", "Denoiser Backend",
-              "Ray-traced shadow denoiser backend selection.", "", ParamType::Enum, ParamOwner::T3, 0.0, 0.0, 4.0, 1.0,
-              0, "Auto|Built-in|NRD|OIDN|FidelityFX", PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
+              "Ray-traced shadow denoiser backend selection.", "", ParamType::Enum, ParamOwner::T3, 0.0, 0.0, 5.0, 1.0,
+              0, "Auto|Built-in SVGF-Lite|NVIDIA NRD SIGMA|Intel OIDN XMX|AMD FidelityFX|NVIDIA OptiX",
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderDebugView, "render.debug_view", "Render", "Debug View",
               "Viewport shader diagnostic visualization pass.", "", ParamType::Enum, ParamOwner::T3, 0.0, 0.0, 13.0,
               1.0, 0,
-              "Final|Albedo|True Normals|Proxy Normals|Z-Flatten|SDF Face|Hair Stencil|RT Raw|RT Denoised|Rim "
-              "Occ|Bounce|Outline|Motion Vec|Overdraw",
+              "Final Composite|Albedo|True Normals|Proxy Normals|Z-Flatten Weight|SDF Face Shadow|Hair Stencil|Ray "
+              "Query Shadow Mask|RT Shadow Denoised|Rim Occlusion|Bounce|Inverted Hull Outline|Motion Vectors|Overdraw",
               PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderBackend, "render.backend", "Render", "Render Backend",
               "Avatar renderer. DirectX 11 is a compatibility path without ray tracing; UI and outputs stay on Vulkan.",

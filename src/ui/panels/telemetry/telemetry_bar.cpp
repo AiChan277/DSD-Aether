@@ -7,11 +7,12 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 namespace aether::ui {
 
-TopMenuAction TelemetryBar::draw_top_bar(StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi,
+TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi,
                                          bool ffi_layout_ok, const StudioHostStatus& host_status, const UndoStack& undo,
                                          const UiFontSet& fonts, float dpi_scale, StudioActions& actions) {
     TopMenuAction menu_act = TopMenuAction::None;
@@ -50,11 +51,17 @@ TopMenuAction TelemetryBar::draw_top_bar(StudioMode& mode, bool& mode_changed, c
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(tr("Edit"))) {
-            char undo_lbl[80]{};
+            char undo_lbl[96]{};
             std::snprintf(undo_lbl, sizeof(undo_lbl), "Undo %s", undo.undo_label());
             if (ImGui::MenuItem(undo_lbl, "Ctrl+Z", false, undo.can_undo())) {
-                // Triggered cleanly via Actions / Keymap
+                menu_act = TopMenuAction::Undo;
             }
+            char redo_lbl[96]{};
+            std::snprintf(redo_lbl, sizeof(redo_lbl), "Redo %s", undo.redo_label());
+            if (ImGui::MenuItem(redo_lbl, "Ctrl+Y", false, undo.can_redo())) {
+                menu_act = TopMenuAction::Redo;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(tr("Preferences..."), "Ctrl+,")) {
                 menu_act = TopMenuAction::OpenPreferences;
             }
@@ -102,11 +109,18 @@ TopMenuAction TelemetryBar::draw_top_bar(StudioMode& mode, bool& mode_changed, c
         }
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float menu_h = ImGui::GetWindowHeight();
+        const float btn_h = std::min(t.control_h_compact_px * scale, std::max(14.0f, menu_h - 4.0f * scale));
+        const float btn_y = std::max(0.0f, (menu_h - btn_h) * 0.5f);
+
         const auto mode_tab = [&](StudioMode m, const char* label) {
             const bool active = (mode == m);
+            ImGui::SetCursorPosY(btn_y);
             ImGui::PushStyleColor(ImGuiCol_Button, active ? t.bg_selected : t.bg_app);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.bg_hover);
             ImGui::PushStyleColor(ImGuiCol_Text, active ? t.text_primary : t.text_secondary);
-            if (ImGui::Button(label, ImVec2(96.0f * scale, t.control_h_compact_px * scale))) {
+            const float tab_w = std::max(96.0f * scale, ImGui::CalcTextSize(label).x + 24.0f * scale);
+            if (ImGui::Button(label, ImVec2(tab_w, btn_h))) {
                 if (mode != m) {
                     mode = m;
                     mode_changed = true;
@@ -117,7 +131,7 @@ TopMenuAction TelemetryBar::draw_top_bar(StudioMode& mode, bool& mode_changed, c
                 const ImVec2 bmax = ImGui::GetItemRectMax();
                 dl->AddRectFilled(ImVec2(bmin.x, bmax.y - 2.0f * scale), bmax, t.col32_accent);
             }
-            ImGui::PopStyleColor(2);
+            ImGui::PopStyleColor(3);
         };
 
         mode_tab(StudioMode::LiveStudio, tr("Live Studio"));
@@ -126,31 +140,68 @@ TopMenuAction TelemetryBar::draw_top_bar(StudioMode& mode, bool& mode_changed, c
         ImGui::SameLine(0.0f, 4.0f * scale);
         mode_tab(StudioMode::Nodes, tr("Nodes"));
 
-        // Right-aligned Palette trigger + Project dirty indicator + ON AIR pill (§12.4)
-        const float right_pad = 250.0f * scale;
+        // Right-aligned Palette trigger + Go Live tally (§12.4)
+        if (host_status.on_air && on_air_since_s_ < 0.0) {
+            on_air_since_s_ = now_s;
+        } else if (!host_status.on_air) {
+            on_air_since_s_ = -1.0;
+        }
+        char live_lbl[48]{};
+        if (host_status.on_air) {
+            const auto secs = static_cast<long long>(std::max(0.0, now_s - on_air_since_s_));
+            std::snprintf(live_lbl, sizeof(live_lbl), "%s LIVE  %02lld:%02lld:%02lld###oa", icons::kRadioOn,
+                          secs / 3600, (secs / 60) % 60, secs % 60);
+        } else {
+            std::snprintf(live_lbl, sizeof(live_lbl), "%s###oa", tr("Go Live"));
+        }
+        const float search_w = 132.0f * scale;
+        const float live_w = std::max(112.0f * scale, ImGui::CalcTextSize("_ LIVE  00:00:00").x + 20.0f * scale);
+        const float right_block = search_w + live_w + 6.0f * scale + t.panel_pad_px * scale;
         const float bar_w = ImGui::GetWindowWidth();
-        if (ImGui::GetCursorPosX() < bar_w - right_pad) {
-            ImGui::SetCursorPosX(bar_w - right_pad);
+        if (ImGui::GetCursorPosX() < bar_w - right_block) {
+            ImGui::SetCursorPosX(bar_w - right_block);
         }
 
+        ImGui::SetCursorPosY(btn_y);
         ImGui::PushStyleColor(ImGuiCol_Button, t.bg_inset);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.bg_hover);
         ImGui::PushStyleColor(ImGuiCol_Text, t.text_tertiary);
-        if (ImGui::Button(tr("Search Ctrl+K"), ImVec2(118.0f * scale, t.control_h_compact_px * scale))) {
+        char search_lbl[48]{};
+        std::snprintf(search_lbl, sizeof(search_lbl), "%s  %s", icons::kSearch, tr("Search  Ctrl+K"));
+        if (ImGui::Button(search_lbl, ImVec2(search_w, btn_h))) {
             menu_act = TopMenuAction::OpenPalette;
         }
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor(3);
         ImGui::SameLine(0.0f, 6.0f * scale);
 
+        ImGui::SetCursorPosY(btn_y);
         ImGui::PushStyleColor(ImGuiCol_Button, host_status.on_air ? t.status_live : t.bg_raised);
-        ImGui::PushStyleColor(ImGuiCol_Text, host_status.on_air ? t.text_on_accent : t.text_secondary);
-        if (ImGui::Button(host_status.on_air ? "ON AIR##oa" : "Go Live##oa",
-                          ImVec2(92.0f * scale, t.control_h_compact_px * scale))) {
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, host_status.on_air ? t.status_live : t.bg_hover);
+        ImGui::PushStyleColor(ImGuiCol_Text, host_status.on_air ? t.text_on_accent : t.text_primary);
+        if (ImGui::Button(live_lbl, ImVec2(live_w, btn_h))) {
             actions.request_set_on_air = true;
             actions.target_on_air = !host_status.on_air;
         }
-        ImGui::PopStyleColor(2);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", tr("Lock destructive avatar/wizard actions while broadcasting (Ctrl+Shift+L)"));
+        ImGui::PopStyleColor(3);
+        if (host_status.on_air) {
+            // Glowing tally halo, pulsing at 1 Hz
+            const ImVec2 bmin = ImGui::GetItemRectMin();
+            const ImVec2 bmax = ImGui::GetItemRectMax();
+            const float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(now_s) * 6.2831853f);
+            const auto alpha = static_cast<uint32_t>(70.0f + 90.0f * pulse);
+            for (int i = 1; i <= 3; ++i) {
+                const float g = static_cast<float>(i) * 1.5f * scale;
+                ImGui::GetWindowDrawList()->AddRect(
+                    ImVec2(bmin.x - g, bmin.y - g), ImVec2(bmax.x + g, bmax.y + g),
+                    col32_with_alpha(t.col32_status_live, alpha / static_cast<uint32_t>(i)),
+                    t.radius_control_px * scale + g, 0, 1.5f * scale);
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("%s", host_status.on_air
+                                        ? tr("Stop broadcasting (Ctrl+Shift+L). Outputs keep their settings.")
+                                        : tr("Start broadcasting: enables Spout2 + Virtual Cam and locks destructive "
+                                             "edits (Ctrl+Shift+L)"));
         }
 
         ImGui::EndMainMenuBar();
@@ -177,15 +228,22 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
         std::snprintf(t4_buf_.data(), t4_buf_.size(), "T4 Spout:%llu VCam:%llu",
                       static_cast<unsigned long long>(output_view.spout_frames_published),
                       static_cast<unsigned long long>(output_view.vcam_frames_published));
-        std::snprintf(m2p_buf_.data(), m2p_buf_.size(), "M2P p50 %.1f / p95 %.1fms",
-                      static_cast<double>(telemetry.m2p.p50_ms), static_cast<double>(telemetry.m2p.p95_ms));
+        const bool m2p_valid = (telemetry.m2p.sample_count > 0U) && (telemetry.m2p.p50_ms > 0.0f) &&
+                               (telemetry.m2p.p95_ms <= 5000.0f);
+        if (m2p_valid) {
+            std::snprintf(m2p_buf_.data(), m2p_buf_.size(), "M2P p50 %.1f / p95 %.1fms",
+                          static_cast<double>(telemetry.m2p.p50_ms), static_cast<double>(telemetry.m2p.p95_ms));
+        } else {
+            std::snprintf(m2p_buf_.data(), m2p_buf_.size(), "M2P -- / -- ms");
+        }
         std::snprintf(dsp_buf_.data(), dsp_buf_.size(), "DSP %.1fms",
                       static_cast<double>(output_view.dsp_recommended_delay_ms));
         std::snprintf(ui_buf_.data(), ui_buf_.size(), "UI %.3fms | Arena+%zuB",
                       static_cast<double>(telemetry.ui_cpu.p95_ms), arena.steady_bump_growth_bytes());
 
         const bool raw_over =
-            (telemetry.m2p.p95_ms > 20.0f) || (render_view.total_gpu_ms > 4.2f) || (telemetry.ui_cpu.p95_ms > 0.4f);
+            (m2p_valid && telemetry.m2p.p95_ms > 20.0f) || (render_view.total_gpu_ms > 4.2f) ||
+            (telemetry.ui_cpu.p95_ms > 0.4f);
         if (raw_over) {
             if (over_budget_since_s_ < 0.0) {
                 over_budget_since_s_ = now_s;
@@ -207,8 +265,8 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     const float bar_h = std::round(t.status_bar_h_px * scale);
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y + vp->WorkSize.y - bar_h));
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, bar_h));
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - bar_h));
+    ImGui::SetNextWindowSize(ImVec2(vp->Size.x, bar_h));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(t.panel_pad_px * scale, 3.0f * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, t.bg_app);

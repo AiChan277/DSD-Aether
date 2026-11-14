@@ -1,5 +1,7 @@
 #include "renderer/frame_graph.hpp"
 
+#include "animation/spring_bone.hpp"
+
 #include "core/log.hpp"
 #include "generated/phase4_shaders_spv.hpp"
 #include "renderer/sdf_generator.hpp"
@@ -851,6 +853,9 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         destroy_pso(pso_live2d_opaque_);
         destroy_pso(pso_live2d_double_sided_);
         destroy_pso(pso_live2d_blend_);
+        destroy_pso(pso_live2d_opaque_wire_);
+        destroy_pso(pso_live2d_double_sided_wire_);
+        destroy_pso(pso_live2d_blend_wire_);
         destroy_pso(pso_orbit_orb_);
         destroy_pso(pso_outline_hull_);
         destroy_pso(pso_crease_lines_);
@@ -928,6 +933,7 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         bool stencil_write{false};
         bool premul_blend{false};
         bool dynamic_cull{false};
+        VkPolygonMode polygon_mode{VK_POLYGON_MODE_FILL};
     };
 
     auto build_gfx = [&](const GfxDesc& gd, VkPipeline& out_pso) -> Expected<void> {
@@ -959,7 +965,7 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         vp.scissorCount = 1;
 
         VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.polygonMode = gd.polygon_mode;
         rs.cullMode = gd.cull;
         rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rs.lineWidth = 1.0f;
@@ -1115,6 +1121,30 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         !r) {
         return r;
     }
+    wireframe_supported_ = device_->gpu_info().fill_mode_non_solid;
+    if (wireframe_supported_) {
+        if (auto r = build_gfx({shaders::Phase4ShaderId::Live2dNprVs, shaders::Phase4ShaderId::Live2dNprFs, &kHdrFmt, 1,
+                                VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_BACK_BIT, true,
+                                false, false, false, false, VK_POLYGON_MODE_LINE},
+                               pso_live2d_opaque_wire_);
+            !r) {
+            return r;
+        }
+        if (auto r = build_gfx({shaders::Phase4ShaderId::Live2dNprVs, shaders::Phase4ShaderId::Live2dNprFs, &kHdrFmt, 1,
+                                VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_NONE, true,
+                                false, false, false, false, VK_POLYGON_MODE_LINE},
+                               pso_live2d_double_sided_wire_);
+            !r) {
+            return r;
+        }
+        if (auto r = build_gfx({shaders::Phase4ShaderId::Live2dNprVs, shaders::Phase4ShaderId::Live2dNprFs, &kHdrFmt, 1,
+                                VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_NONE, true,
+                                false, false, true, false, VK_POLYGON_MODE_LINE},
+                               pso_live2d_blend_wire_);
+            !r) {
+            return r;
+        }
+    }
     if (auto r = build_gfx({shaders::Phase4ShaderId::OutlineHullVs, shaders::Phase4ShaderId::OutlineHullFs, &kHdrFmt, 1,
                             VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_FRONT_BIT, true,
                             false, false, true, false},
@@ -1166,6 +1196,9 @@ void FrameGraph::destroy_pipelines() noexcept {
     drop_p(pso_live2d_opaque_);
     drop_p(pso_live2d_double_sided_);
     drop_p(pso_live2d_blend_);
+    drop_p(pso_live2d_opaque_wire_);
+    drop_p(pso_live2d_double_sided_wire_);
+    drop_p(pso_live2d_blend_wire_);
     drop_p(pso_orbit_orb_);
     drop_p(pso_outline_hull_);
     drop_p(pso_crease_lines_);
@@ -1186,6 +1219,7 @@ void FrameGraph::destroy_pipelines() noexcept {
         pipe_layout_global_ = VK_NULL_HANDLE;
     }
     pipelines_ready_ = false;
+    wireframe_supported_ = false;
 }
 
 Expected<void> FrameGraph::apply_face_sdf(const SdfBakeOutput& baked) {
@@ -1522,11 +1556,28 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         prev_view_proj_ = fg.view_proj;
     }
 
+    const float av_scale = std::clamp(req.avatar_scale, 0.25f, 4.0f);
+    const float av_yaw_rad = req.avatar_rot_y_deg * (3.1415926535f / 180.0f);
+    const float av_cos = std::cos(av_yaw_rad);
+    const float av_sin = std::sin(av_yaw_rad);
+    fg.avatar_pos_scale[0] = req.avatar_pos[0];
+    fg.avatar_pos_scale[1] = req.avatar_pos[1];
+    fg.avatar_pos_scale[2] = req.avatar_pos[2];
+    fg.avatar_pos_scale[3] = av_scale;
+    fg.avatar_rot_sincos[0] = av_cos;
+    fg.avatar_rot_sincos[1] = av_sin;
+    fg.avatar_rot_sincos[2] = av_yaw_rad;
+    fg.avatar_rot_sincos[3] = 1.0f;
+
     // Head pivot in camera view space (`§10.4`)
     Mat4Vec3 pivot_ws{req.camera.target_x, req.camera.target_y, req.camera.target_z};
     if (has_avatar && req.avatar->desc.head_joint < req.avatar->joint_anim_world_pos.size()) {
         const auto& hp = req.avatar->joint_anim_world_pos[req.avatar->desc.head_joint];
-        pivot_ws = {hp[0], hp[1], hp[2]};
+        pivot_ws = {
+            (av_cos * hp[0] + av_sin * hp[2]) * av_scale + req.avatar_pos[0],
+            hp[1] * av_scale + req.avatar_pos[1],
+            (-av_sin * hp[0] + av_cos * hp[2]) * av_scale + req.avatar_pos[2],
+        };
     }
     const float pivot_vx =
         fg.view.col0[0] * pivot_ws.x + fg.view.col1[0] * pivot_ws.y + fg.view.col2[0] * pivot_ws.z + fg.view.col3[0];
@@ -1544,13 +1595,13 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     fg.head_pivot_view_and_flatness[2] = pivot_vz;
     fg.head_pivot_view_and_flatness[3] = rig.global_live2d_flatness;
 
-    fg.head_fwd_world[0] = 0.0f;
+    fg.head_fwd_world[0] = av_sin;
     fg.head_fwd_world[1] = 0.0f;
-    fg.head_fwd_world[2] = 1.0f;
+    fg.head_fwd_world[2] = av_cos;
     fg.head_fwd_world[3] = rig.hair_shadow_offset_px;
-    fg.head_right_world[0] = 1.0f;
+    fg.head_right_world[0] = av_cos;
     fg.head_right_world[1] = 0.0f;
-    fg.head_right_world[2] = 0.0f;
+    fg.head_right_world[2] = -av_sin;
     fg.head_right_world[3] = rig.hair_shadow_strength;
 
     fg.light_params[0] = rig.sdf_feather;
@@ -1993,13 +2044,17 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
             vkCmdBindIndexBuffer(cmd, req.avatar->index_buf.handle, 0, VK_INDEX_TYPE_UINT32);
 
             timing_.begin_scope(cmd, fslot, rhi::GpuPassId::Live2dNpr);
+            const bool use_wire = req.wireframe && wireframe_supported_ && (pso_live2d_opaque_wire_ != VK_NULL_HANDLE);
             auto draw_npr_list = [&](const std::vector<uint32_t>& list, bool transparent_bucket) {
                 VkPipeline cur = VK_NULL_HANDLE;
                 for (const uint32_t idx : list) {
                     const auto& d = cached_submeshes_[idx];
-                    VkPipeline want = transparent_bucket
-                                          ? pso_live2d_blend_
-                                          : ((d.cull_mode != 0u) ? pso_live2d_double_sided_ : pso_live2d_opaque_);
+                    VkPipeline want =
+                        transparent_bucket
+                            ? (use_wire ? pso_live2d_blend_wire_ : pso_live2d_blend_)
+                            : ((d.cull_mode != 0u)
+                                   ? (use_wire ? pso_live2d_double_sided_wire_ : pso_live2d_double_sided_)
+                                   : (use_wire ? pso_live2d_opaque_wire_ : pso_live2d_opaque_));
                     if (want != cur) {
                         bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want,
                                               transparent_bucket ? "live2d_blend" : "live2d_opaque_or_ds");
@@ -2024,7 +2079,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
             // Pass 7: Inverted-hull outlines (front-face culled back faces)
             timing_.begin_scope(cmd, fslot, rhi::GpuPassId::OutlineHull);
             const float outline_mul = std::max(0.0f, req.outline_width_scale) * std::max(0.0f, rig.outline_width_scale);
-            if (outline_mul > 0.0f) {
+            if (!use_wire && outline_mul > 0.0f) {
                 bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_outline_hull_, "outline_hull");
                 for (const uint32_t idx : opaque_draw_indices_) {
                     const auto& d = cached_submeshes_[idx];
@@ -2407,11 +2462,19 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
-        if (req.show_skeleton_heatmap && req.avatar != nullptr && !req.avatar->joints.empty()) {
+        if (req.show_skeleton_heatmap || req.show_rig_colliders) {
+            const float av_scale = std::clamp(req.avatar_scale, 0.25f, 4.0f);
+            const float av_yaw_rad = req.avatar_rot_y_deg * (3.1415926535f / 180.0f);
+            const float av_cos = std::cos(av_yaw_rad);
+            const float av_sin = std::sin(av_yaw_rad);
             uint32_t bone_cnt = 0;
-            const auto& jpos = (req.avatar->joint_anim_world_pos.size() == req.avatar->joints.size())
-                                   ? req.avatar->joint_anim_world_pos
-                                   : req.avatar->joint_rest_world_pos;
+            auto xform_pt = [&](const std::array<float, 3>& p) -> std::array<float, 3> {
+                return {
+                    (av_cos * p[0] + av_sin * p[2]) * av_scale + req.avatar_pos[0],
+                    p[1] * av_scale + req.avatar_pos[1],
+                    (-av_sin * p[0] + av_cos * p[2]) * av_scale + req.avatar_pos[2],
+                };
+            };
             auto to_ndc = [&](const std::array<float, 3>& p, float out_xy[2]) -> bool {
                 const float x = fg.view_proj.col0[0] * p[0] + fg.view_proj.col1[0] * p[1] +
                                 fg.view_proj.col2[0] * p[2] + fg.view_proj.col3[0];
@@ -2427,28 +2490,109 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                 out_xy[1] = -(y / pw);
                 return true;
             };
-            for (size_t j = 0; j < req.avatar->joints.size() && bone_cnt < heatmap_scratch_.size(); ++j) {
-                const int32_t p = req.avatar->joints[j].parent_index;
-                if (p < 0 || static_cast<size_t>(p) >= jpos.size() || j >= jpos.size()) {
-                    continue;
+            auto push_seg = [&](const std::array<float, 3>& a, const std::array<float, 3>& b, float width_px,
+                                uint32_t cat, float stress, uint32_t tag) {
+                if (bone_cnt >= heatmap_scratch_.size()) {
+                    return;
                 }
                 float p0[2]{}, p1[2]{};
-                if (!to_ndc(jpos[static_cast<size_t>(p)], p0) || !to_ndc(jpos[j], p1)) {
-                    continue;
+                if (!to_ndc(a, p0) || !to_ndc(b, p1)) {
+                    return;
                 }
-                const float stress = (req.joint_stress != nullptr && j < req.joint_stress_count)
-                                         ? std::clamp(req.joint_stress[j], 0.0f, 1.0f)
-                                         : 0.25f;
-                const uint32_t cat = (stress > 0.85f) ? 2u : ((stress > 0.60f) ? 1u : 0u);
-                auto& b = heatmap_scratch_[bone_cnt++];
-                b.p0_ndc_weight[0] = p0[0];
-                b.p0_ndc_weight[1] = p0[1];
-                b.p0_ndc_weight[2] = stress;
-                b.p0_ndc_weight[3] = 4.0f;
-                b.p1_ndc_pad[0] = p1[0];
-                b.p1_ndc_pad[1] = p1[1];
-                b.p1_ndc_pad[2] = static_cast<float>(cat);
-                b.p1_ndc_pad[3] = static_cast<float>(j);
+                auto& item = heatmap_scratch_[bone_cnt++];
+                item.p0_ndc_weight[0] = p0[0];
+                item.p0_ndc_weight[1] = p0[1];
+                item.p0_ndc_weight[2] = stress;
+                item.p0_ndc_weight[3] = width_px;
+                item.p1_ndc_pad[0] = p1[0];
+                item.p1_ndc_pad[1] = p1[1];
+                item.p1_ndc_pad[2] = static_cast<float>(cat);
+                item.p1_ndc_pad[3] = static_cast<float>(tag);
+            };
+            if (req.show_skeleton_heatmap && req.avatar != nullptr && !req.avatar->joints.empty()) {
+                const auto& jpos = (req.avatar->joint_anim_world_pos.size() == req.avatar->joints.size())
+                                       ? req.avatar->joint_anim_world_pos
+                                       : req.avatar->joint_rest_world_pos;
+                for (size_t j = 0; j < req.avatar->joints.size() && bone_cnt < heatmap_scratch_.size(); ++j) {
+                    const int32_t p = req.avatar->joints[j].parent_index;
+                    if (p < 0 || static_cast<size_t>(p) >= jpos.size() || j >= jpos.size()) {
+                        continue;
+                    }
+                    const float stress = (req.joint_stress != nullptr && j < req.joint_stress_count)
+                                             ? std::clamp(req.joint_stress[j], 0.0f, 1.0f)
+                                             : 0.25f;
+                    const uint32_t cat = (stress > 0.85f) ? 2u : ((stress > 0.60f) ? 1u : 0u);
+                    push_seg(xform_pt(jpos[static_cast<size_t>(p)]), xform_pt(jpos[j]), 4.0f, cat, stress,
+                             static_cast<uint32_t>(j));
+                }
+            }
+            if (req.show_rig_colliders) {
+                if (req.spring_segments != nullptr) {
+                    for (uint32_t s = 0; s < req.spring_segment_count && bone_cnt < heatmap_scratch_.size(); ++s) {
+                        const auto& seg = req.spring_segments[s];
+                        const uint32_t cat = (seg.in_contact != 0U) ? 6u : 5u;
+                        push_seg(xform_pt({seg.head[0], seg.head[1], seg.head[2]}),
+                                 xform_pt({seg.tail[0], seg.tail[1], seg.tail[2]}), 2.2f, cat, 0.5f, s);
+                    }
+                }
+                if (req.spring_colliders != nullptr) {
+                    constexpr float kTwoPiF = 6.283185307f;
+                    auto add_pt = [](const std::array<float, 3>& o, const Mat4Vec3& u, const Mat4Vec3& v, float r,
+                                     float cu, float sv) -> std::array<float, 3> {
+                        return {o[0] + r * (cu * u.x + sv * v.x), o[1] + r * (cu * u.y + sv * v.y),
+                                o[2] + r * (cu * u.z + sv * v.z)};
+                    };
+                    auto push_ring = [&](const std::array<float, 3>& center, const Mat4Vec3& u, const Mat4Vec3& v,
+                                         float r, uint32_t segs, float arc_rad, uint32_t cat, uint32_t tag) {
+                        std::array<float, 3> prev = add_pt(center, u, v, r, 1.0f, 0.0f);
+                        for (uint32_t k = 1; k <= segs; ++k) {
+                            const float ang = arc_rad * (static_cast<float>(k) / static_cast<float>(segs));
+                            const std::array<float, 3> cur = add_pt(center, u, v, r, std::cos(ang), std::sin(ang));
+                            push_seg(prev, cur, 2.0f, cat, 1.0f, tag);
+                            prev = cur;
+                        }
+                    };
+                    for (uint32_t c = 0; c < req.spring_collider_count && bone_cnt < heatmap_scratch_.size(); ++c) {
+                        const auto& col = req.spring_colliders[c];
+                        const uint32_t cat = (col.in_contact != 0U) ? 4u : 3u;
+                        const std::array<float, 3> p0 = xform_pt({col.p0[0], col.p0[1], col.p0[2]});
+                        const std::array<float, 3> p1 = xform_pt({col.p1[0], col.p1[1], col.p1[2]});
+                        const float r = std::max(col.radius, 0.003f) * av_scale;
+                        const Mat4Vec3 ax_x{av_cos, 0.0f, -av_sin};
+                        const Mat4Vec3 ax_y{0.0f, 1.0f, 0.0f};
+                        const Mat4Vec3 ax_z{av_sin, 0.0f, av_cos};
+                        const Mat4Vec3 d{p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+                        const float dlen = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+                        if (col.shape == 0U || dlen < 1e-4f) {
+                            // Procedural 3-axis wireframe sphere
+                            push_ring(p0, ax_x, ax_y, r, 14, kTwoPiF, cat, c);
+                            push_ring(p0, ax_x, ax_z, r, 14, kTwoPiF, cat, c);
+                            push_ring(p0, ax_y, ax_z, r, 14, kTwoPiF, cat, c);
+                        } else {
+                            // Procedural 3-axis wireframe capsule (3 equatorial rings + 4 rails + 4 hemisphere arcs)
+                            const Mat4Vec3 axis = {d.x / dlen, d.y / dlen, d.z / dlen};
+                            const Mat4Vec3 ref = (std::abs(axis.y) < 0.9f) ? Mat4Vec3{0.0f, 1.0f, 0.0f}
+                                                                            : Mat4Vec3{1.0f, 0.0f, 0.0f};
+                            const Mat4Vec3 u = normalize3(cross3(axis, ref));
+                            const Mat4Vec3 v = cross3(axis, u);
+                            const std::array<float, 3> pmid{0.5f * (p0[0] + p1[0]), 0.5f * (p0[1] + p1[1]),
+                                                            0.5f * (p0[2] + p1[2])};
+                            push_ring(p0, u, v, r, 12, kTwoPiF, cat, c);
+                            push_ring(pmid, u, v, r, 12, kTwoPiF, cat, c);
+                            push_ring(p1, u, v, r, 12, kTwoPiF, cat, c);
+                            for (const Mat4Vec3& rad : {u, Mat4Vec3{-u.x, -u.y, -u.z}, v, Mat4Vec3{-v.x, -v.y, -v.z}}) {
+                                push_seg({p0[0] + r * rad.x, p0[1] + r * rad.y, p0[2] + r * rad.z},
+                                         {p1[0] + r * rad.x, p1[1] + r * rad.y, p1[2] + r * rad.z}, 2.0f, cat, 1.0f,
+                                         c);
+                            }
+                            const Mat4Vec3 neg_axis{-axis.x, -axis.y, -axis.z};
+                            push_ring(p0, u, neg_axis, r, 6, 3.14159265f, cat, c);
+                            push_ring(p0, v, neg_axis, r, 6, 3.14159265f, cat, c);
+                            push_ring(p1, u, axis, r, 6, 3.14159265f, cat, c);
+                            push_ring(p1, v, axis, r, 6, 3.14159265f, cat, c);
+                        }
+                    }
+                }
             }
             if (bone_cnt > 0) {
                 auto hb_res = rebar_.allocate(static_cast<VkDeviceSize>(bone_cnt) * sizeof(GpuHeatmapBone), 16);

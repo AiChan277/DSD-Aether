@@ -5,7 +5,8 @@ use core::mem::{align_of, offset_of, size_of};
 use crate::types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
-    AetherGraphPlanStats, AetherHostCommand, AetherHostConfig, AetherHostEvent, AetherJointDesc,
+    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig, AetherHostEvent,
+    AetherJointDesc,
     AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
     AetherRuntimeConfig, AetherSpringJointDesc, AetherSubmeshDesc, AetherTextureDesc,
     AetherTrackingFrame, AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
@@ -311,3 +312,33 @@ const _: () = assert!(offset_of!(AetherGraphPlanStats, osc_rate_limited) == 48);
 const _: () = assert!(offset_of!(AetherGraphPlanStats, plugin_count) == 52);
 const _: () = assert!(offset_of!(AetherGraphPlanStats, node_eval_us) == 56);
 const _: () = assert!(offset_of!(AetherGraphPlanStats, node_live_values) == 1080);
+
+const _: () = assert!(size_of::<AetherGraphTelemetryReadout>() == 13120);
+const _: () = assert!(align_of::<AetherGraphTelemetryReadout>() == 64);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, struct_size) == 0);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, active_node_count) == 4);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_readout_count) == 8);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, valid) == 12);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, eval_sequence) == 16);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, total_eval_ns) == 24);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, node_ids) == 32);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, node_eval_ns) == 2080);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_node_ids) == 3104);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_values) == 6176);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_indices) == 12320);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_kinds) == 12704);
+const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, _reserved_tail) == 13088);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telemetry_readout_is_64_byte_aligned_and_packed() {
+        assert_eq!(align_of::<AetherGraphTelemetryReadout>(), 64);
+        assert_eq!(size_of::<AetherGraphTelemetryReadout>(), 13120);
+        assert_eq!(size_of::<AetherGraphTelemetryReadout>() % 64, 0);
+        assert_eq!(offset_of!(AetherGraphTelemetryReadout, node_ids), 32);
+        assert_eq!(offset_of!(AetherGraphTelemetryReadout, pin_values), 6176);
+    }
+}

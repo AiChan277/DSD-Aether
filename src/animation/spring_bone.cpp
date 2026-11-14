@@ -83,6 +83,9 @@ void SpringBoneSimulator::clear() noexcept {
     colliders_.count = 0;
     state_initialized_ = false;
     teleport_resets_ = 0;
+    last_center_pos_ = {};
+    active_contact_.fill(0);
+    joint_contact_.fill(0);
 }
 
 bool SpringBoneSimulator::add_joint(const SpringJointDesc& desc) noexcept {
@@ -161,14 +164,26 @@ bool SpringBoneSimulator::add_capsule_collider(int32_t attached_bone, Vec3 head_
     return true;
 }
 
-void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMetrics& /*rest*/) noexcept {
+void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMetrics& rest) noexcept {
     clear();
-    // Add torso, head & shoulder colliders so procedural hair & clothing respond smoothly
-    (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD), {0.0f, 0.08f, 0.01f}, 0.11f);
-    (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST), {0.0f, -0.05f, 0.0f}, {0.0f, 0.14f, 0.0f},
-                               0.12f);
-    (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_LEFT_SHOULDER), {0.06f, 0.0f, 0.0f}, 0.07f);
-    (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_RIGHT_SHOULDER), {-0.06f, 0.0f, 0.0f}, 0.07f);
+    if (rest.custom_collider_count > 0U) {
+        const uint32_t col_n = std::min<uint32_t>(rest.custom_collider_count, static_cast<uint32_t>(rest.custom_colliders.size()));
+        for (uint32_t i = 0; i < col_n; ++i) {
+            const auto& cd = rest.custom_colliders[i];
+            if (cd.shape == static_cast<uint8_t>(ColliderShape::Capsule)) {
+                (void)add_capsule_collider(cd.attached_bone, cd.local_a, cd.local_b, cd.radius);
+            } else {
+                (void)add_sphere_collider(cd.attached_bone, cd.local_a, cd.radius);
+            }
+        }
+    } else {
+        // Add torso, head & shoulder colliders so procedural hair & clothing respond smoothly
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HEAD), {0.0f, 0.08f, 0.01f}, 0.11f);
+        (void)add_capsule_collider(static_cast<int32_t>(AETHER_BONE_CHEST), {0.0f, -0.05f, 0.0f}, {0.0f, 0.14f, 0.0f},
+                                   0.12f);
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_LEFT_SHOULDER), {0.06f, 0.0f, 0.0f}, 0.07f);
+        (void)add_sphere_collider(static_cast<int32_t>(AETHER_BONE_RIGHT_SHOULDER), {-0.06f, 0.0f, 0.0f}, 0.07f);
+    }
 
     // 8 hair strands x 4 joints (indices 64..95) so secondary motion populates virtual hair bones when avatar loads
     for (int strand = 0; strand < 8; ++strand) {
@@ -197,6 +212,9 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
 void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_pos_ws,
                                       const std::array<Quat, kMaxBones>& bone_rot_ws,
                                       uint32_t /*bone_count*/) noexcept {
+    active_contact_.fill(0);
+    joint_contact_.fill(0);
+    evaluate_colliders(bone_pos_ws, bone_rot_ws);
     for (uint32_t j = 0; j < count_; ++j) {
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
                                                           local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
@@ -223,6 +241,7 @@ void SpringBoneSimulator::evaluate_colliders(const std::array<Vec3, kMaxBones>& 
                                              const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept {
     // Evaluate collider spheres/capsules in `center` (root hips) space when center_bone_index >= 0 on rig
     const Vec3 center_pos = bone_pos_ws[AETHER_BONE_HIPS];
+    last_center_pos_ = center_pos;
     for (uint32_t c = 0; c < colliders_.count; ++c) {
         const int32_t b = colliders_.attached_bone[c];
         Vec3 bp{};
@@ -292,6 +311,8 @@ void SpringBoneSimulator::step_scalar(float dt_sq, Vec3 ext_accel, float ext_dra
             const Vec3 diff = next - closest;
             const float d2 = dot(diff, diff);
             if (d2 < sum_r * sum_r) {
+                active_contact_[c] = 1U;
+                joint_contact_[j] = 1U;
                 const float d = std::sqrt(std::max(d2, 1e-12f));
                 next = closest + diff * (sum_r / d);
                 next = head + normalize_safe(next - head, world_rest_dir) * len;
@@ -419,6 +440,8 @@ void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_
                         const Vec3 diff = next - closest;
                         const float d2s = dot(diff, diff);
                         if (d2s < sum_rk * sum_rk) {
+                            active_contact_[ck] = 1U;
+                            joint_contact_[j] = 1U;
                             const float d = std::sqrt(std::max(d2s, 1e-12f));
                             next = closest + diff * (sum_rk / d);
                             next = head + normalize_safe(next - head, world_rest_dir) * len;
@@ -442,6 +465,8 @@ void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_
             const Vec3 diff = next - closest;
             const float d2s = dot(diff, diff);
             if (d2s < sum_r * sum_r) {
+                active_contact_[c] = 1U;
+                joint_contact_[j] = 1U;
                 const float d = std::sqrt(std::max(d2s, 1e-12f));
                 next = closest + diff * (sum_r / d);
                 next = head + normalize_safe(next - head, world_rest_dir) * len;
@@ -494,6 +519,8 @@ void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float e
     }
     prev_root_pos_ = root_now;
 
+    active_contact_.fill(0);
+    joint_contact_.fill(0);
     evaluate_colliders(io_bone_pos_ws, io_bone_rot_ws);
 
     const float dt = std::clamp(fixed_dt_s, 1.0f / 240.0f, 1.0f / 30.0f);
@@ -517,6 +544,47 @@ void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float e
     case SimdPath::Avx512:
         step_avx512(dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
         break;
+    }
+}
+
+void SpringBoneSimulator::export_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,
+                                         SpringSegmentOverlay* out_segs, uint32_t max_segs, uint32_t& out_seg_count,
+                                         const std::array<Vec3, kMaxBones>& bone_pos_ws) const noexcept {
+    out_col_count = 0;
+    out_seg_count = 0;
+    if (out_cols != nullptr && max_cols > 0U) {
+        const uint32_t n = std::min(colliders_.count, max_cols);
+        for (uint32_t c = 0; c < n; ++c) {
+            SpringColliderOverlay& d = out_cols[c];
+            d.p0[0] = colliders_.center_ax[c] + last_center_pos_.x;
+            d.p0[1] = colliders_.center_ay[c] + last_center_pos_.y;
+            d.p0[2] = colliders_.center_az[c] + last_center_pos_.z;
+            d.radius = colliders_.radius[c];
+            d.p1[0] = colliders_.center_bx[c] + last_center_pos_.x;
+            d.p1[1] = colliders_.center_by[c] + last_center_pos_.y;
+            d.p1[2] = colliders_.center_bz[c] + last_center_pos_.z;
+            d.shape = colliders_.shape[c];
+            d.in_contact = active_contact_[c];
+        }
+        out_col_count = n;
+    }
+    if (out_segs != nullptr && max_segs > 0U) {
+        const uint32_t n = std::min(count_, max_segs);
+        for (uint32_t j = 0; j < n; ++j) {
+            const int32_t cb = center_bone_idx_[j];
+            const Vec3 c_pos =
+                (cb >= 0 && static_cast<uint32_t>(cb) < kMaxBones) ? bone_pos_ws[static_cast<size_t>(cb)] : Vec3{};
+            SpringSegmentOverlay& s = out_segs[j];
+            s.head[0] = head_x_[j] + c_pos.x;
+            s.head[1] = head_y_[j] + c_pos.y;
+            s.head[2] = head_z_[j] + c_pos.z;
+            s.hit_radius = hit_radius_[j];
+            s.tail[0] = curr_x_[j] + c_pos.x;
+            s.tail[1] = curr_y_[j] + c_pos.y;
+            s.tail[2] = curr_z_[j] + c_pos.z;
+            s.in_contact = joint_contact_[j];
+        }
+        out_seg_count = n;
     }
 }
 

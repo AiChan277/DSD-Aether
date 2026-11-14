@@ -9,15 +9,47 @@
 #include <implot.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <cstring>
 
 namespace aether::ui {
+namespace {
 
-TimelineConsole::TimelineConsole() noexcept {
-    for (size_t i = 0; i < kPlotHistory; ++i) {
-        x_vals_[i] = static_cast<float>(i);
+bool icase_contains(const char* haystack, const char* needle) noexcept {
+    if (needle == nullptr || needle[0] == '\0') {
+        return true;
+    }
+    const size_t nlen = std::strlen(needle);
+    for (const char* p = haystack; *p != '\0'; ++p) {
+        size_t i = 0;
+        while (i < nlen && p[i] != '\0' &&
+               std::tolower(static_cast<unsigned char>(p[i])) == std::tolower(static_cast<unsigned char>(needle[i]))) {
+            ++i;
+        }
+        if (i == nlen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const char* level_tag(LogLevel lvl) noexcept {
+    switch (lvl) {
+    case LogLevel::Error:
+        return "ERR ";
+    case LogLevel::Warn:
+        return "WARN";
+    case LogLevel::Debug:
+        return "DBG ";
+    default:
+        return "INFO";
     }
 }
+
+} // namespace
+
+TimelineConsole::TimelineConsole() noexcept = default;
 
 void TimelineConsole::push_sample(const TelemetrySnapshot& telemetry, const DevShellRenderView& render_view,
                                   const DevShellTrackingView& tracking, bool paused) noexcept {
@@ -32,12 +64,15 @@ void TimelineConsole::push_sample(const TelemetrySnapshot& telemetry, const DevS
         std::max(0.05f, telemetry.last_frame.motion_to_photon_ms() - (hist_t1_[idx] + hist_t2_[idx] + hist_t3_[idx]));
     hist_m2p_[idx] = telemetry.last_frame.motion_to_photon_ms();
     write_idx_ = (write_idx_ + 1U) % kPlotHistory;
+    sample_count_ = std::min(sample_count_ + 1U, kPlotHistory);
 }
 
-void TimelineConsole::draw_console_tab(std::span<const LogRecord> logs, size_t log_head, size_t log_count,
-                                       const UiFontSet& fonts, const char*& out_copied_notice) {
+ConsoleTabResult TimelineConsole::draw_console_tab(std::span<const LogRecord> logs, size_t log_head, size_t log_count,
+                                                   const UiFontSet& fonts) {
     const PrecisionDarkTokens& t = tokens();
+    ConsoleTabResult result{};
 
+    // Toolbar: level filters | text filter | auto-scroll | Copy | Clear
     ImGui::Checkbox(tr("Info"), &filter_info_);
     ImGui::SameLine();
     ImGui::Checkbox(tr("Warn"), &filter_warn_);
@@ -45,32 +80,59 @@ void TimelineConsole::draw_console_tab(std::span<const LogRecord> logs, size_t l
     ImGui::Checkbox(tr("Error"), &filter_err_);
     ImGui::SameLine();
     ImGui::Checkbox(tr("Auto-scroll"), &auto_scroll_);
+    ImGui::SameLine();
+    const float btns_w = ImGui::CalcTextSize("CopyClear").x + ImGui::GetStyle().FramePadding.x * 4.0f +
+                         ImGui::GetStyle().ItemSpacing.x * 2.0f;
+    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - btns_w));
+    ImGui::InputTextWithHint("##ConsoleFilter", tr("Filter messages"), text_filter_.data(), text_filter_.size());
 
-    ImGui::BeginChild("##ConsoleRows", ImVec2(0.0f, 0.0f), true);
-    if (log_count == 0) {
-        (void)draw_empty_state(fonts, tr("No messages"));
-        ImGui::EndChild();
-        return;
-    }
-
-    static std::array<size_t, 256> s_indices{};
+    // Collect visible rows (bounded, allocation-free)
     size_t filtered_n = 0;
     const size_t ring_cap = logs.size();
-    const size_t start_idx = (log_head + ring_cap - log_count) % ring_cap;
-    for (size_t i = 0; i < log_count && filtered_n < s_indices.size(); ++i) {
-        const size_t real_idx = (start_idx + i) % ring_cap;
-        const LogLevel lvl = logs[real_idx].level;
-        const bool pass = ((lvl == LogLevel::Info || lvl == LogLevel::Debug) && filter_info_) ||
-                          (lvl == LogLevel::Warn && filter_warn_) || (lvl == LogLevel::Error && filter_err_);
-        if (pass) {
-            s_indices[filtered_n++] = real_idx;
+    if (ring_cap > 0 && log_count > 0) {
+        const size_t start_idx = (log_head + ring_cap - log_count) % ring_cap;
+        for (size_t i = 0; i < log_count && filtered_n < filtered_rows_.size(); ++i) {
+            const size_t real_idx = (start_idx + i) % ring_cap;
+            const LogRecord& rec = logs[real_idx];
+            const bool level_pass = ((rec.level == LogLevel::Info || rec.level == LogLevel::Debug) && filter_info_) ||
+                                    (rec.level == LogLevel::Warn && filter_warn_) ||
+                                    (rec.level == LogLevel::Error && filter_err_);
+            if (level_pass && (icase_contains(rec.message, text_filter_.data()) ||
+                               icase_contains(rec.category, text_filter_.data()))) {
+                filtered_rows_[filtered_n++] = real_idx;
+            }
         }
     }
 
+    ImGui::SameLine();
+    ImGui::BeginDisabled(filtered_n == 0);
+    if (ImGui::Button(tr("Copy"))) {
+        ImGui::LogToClipboard();
+        for (size_t r = 0; r < filtered_n; ++r) {
+            const LogRecord& rec = logs[filtered_rows_[r]];
+            ImGui::LogText("[%s] [%s] %s\n", level_tag(rec.level), rec.category, rec.message);
+        }
+        ImGui::LogFinish();
+        result.copied_notice = tr("Copied visible log lines");
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr("Copy all visible (filtered) lines"));
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(log_count == 0);
+    if (ImGui::Button(tr("Clear"))) {
+        result.clear_requested = true;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, t.bg_inset);
+    ImGui::BeginChild("##ConsoleRows", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
     if (filtered_n == 0) {
-        (void)draw_empty_state(fonts, tr("No messages"));
+        (void)draw_empty_state(fonts, log_count == 0 ? tr("No messages") : tr("No messages match the filters"));
         ImGui::EndChild();
-        return;
+        ImGui::PopStyleColor();
+        return result;
     }
 
     if (fonts.mono != nullptr) {
@@ -80,16 +142,19 @@ void TimelineConsole::draw_console_tab(std::span<const LogRecord> logs, size_t l
     clipper.Begin(static_cast<int>(filtered_n));
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            const LogRecord& rec = logs[s_indices[static_cast<size_t>(row)]];
+            const LogRecord& rec = logs[filtered_rows_[static_cast<size_t>(row)]];
             const ImVec4 col = (rec.level == LogLevel::Error)
                                    ? t.status_error
                                    : (rec.level == LogLevel::Warn ? t.status_warn : t.text_secondary);
-            char line[360]{};
-            std::snprintf(line, sizeof(line), "[%s] %s", rec.category, rec.message);
+            char line[384]{};
+            std::snprintf(line, sizeof(line), "%s  [%s] %s##log%d", level_tag(rec.level), rec.category, rec.message,
+                          row);
             ImGui::PushStyleColor(ImGuiCol_Text, col);
             if (ImGui::Selectable(line, false)) {
-                ImGui::SetClipboardText(line);
-                out_copied_notice = tr("Copied log line");
+                char clip[360]{};
+                std::snprintf(clip, sizeof(clip), "[%s] %s", rec.category, rec.message);
+                ImGui::SetClipboardText(clip);
+                result.copied_notice = tr("Copied log line");
             }
             ImGui::PopStyleColor();
         }
@@ -101,20 +166,22 @@ void TimelineConsole::draw_console_tab(std::span<const LogRecord> logs, size_t l
         ImGui::PopFont();
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
+    return result;
 }
 
-void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts,
-                                           StudioActions& actions) {
+void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts) {
     const PrecisionDarkTokens& t = tokens();
+    const float scale = ImGui::GetFontSize() / std::max(1.0f, t.type_body_px);
     if (ImGui::BeginTable("##ExprMatrix", 4,
                           ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn(tr("Hotkey"), ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn(tr("Expression"), ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn(tr("Hotkey"), ImGuiTableColumnFlags_WidthFixed, 64.0f * scale);
+        ImGui::TableSetupColumn(tr("Expression"), ImGuiTableColumnFlags_WidthFixed, 150.0f * scale);
         ImGui::TableSetupColumn(tr("Live Weight"), ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn(tr("Trigger"), ImGuiTableColumnFlags_WidthFixed, 92.0f);
+        ImGui::TableSetupColumn(tr("Trigger"), ImGuiTableColumnFlags_WidthFixed, 92.0f * scale);
         ImGui::TableHeadersRow();
 
-        for (size_t i = 0; i < expressions.size() && i < 8; ++i) {
+        for (size_t i = 0; i < expressions.size() && i < StudioActions::kQuickExpressionSlots; ++i) {
             ExpressionSlotInfo& ex = expressions[i];
             ImGui::PushID(static_cast<int>(ex.slot));
             ImGui::TableNextRow();
@@ -122,25 +189,29 @@ void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> express
             if (fonts.mono != nullptr) {
                 ImGui::PushFont(fonts.mono);
             }
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(t.text_secondary, "%s", ex.hotkey.data());
             if (fonts.mono != nullptr) {
                 ImGui::PopFont();
             }
 
             ImGui::TableSetColumnIndex(1);
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(t.text_primary, "%s", ex.name.data());
 
             ImGui::TableSetColumnIndex(2);
-            ImGui::ProgressBar(std::clamp(ex.current_weight, 0.0f, 1.0f), ImVec2(-1.0f, 14.0f));
+            char pct[16]{};
+            std::snprintf(pct, sizeof(pct), "%.0f%%", static_cast<double>(ex.current_weight * 100.0f));
+            ImGui::ProgressBar(std::clamp(ex.current_weight, 0.0f, 1.0f), ImVec2(-FLT_MIN, 0.0f), pct);
 
             ImGui::TableSetColumnIndex(3);
-            ImGui::PushStyleColor(ImGuiCol_Button, ex.triggered_override ? t.accent_button : t.bg_raised);
-            if (ImGui::SmallButton(ex.triggered_override ? tr("Release") : tr("Fire"))) {
-                actions.request_trigger_expression = true;
-                actions.expression_slot = static_cast<int32_t>(ex.slot);
-                actions.expression_weight = ex.triggered_override ? 0.0f : 1.0f;
+            const bool latched = ex.triggered_override;
+            ImGui::PushStyleColor(ImGuiCol_Button, latched ? t.accent_button : t.bg_raised);
+            ImGui::PushStyleColor(ImGuiCol_Text, latched ? t.text_on_accent : t.text_primary);
+            if (ImGui::Button(latched ? tr("Release") : tr("Latch"), ImVec2(-FLT_MIN, 0.0f))) {
+                ex.triggered_override = !ex.triggered_override;
             }
-            ImGui::PopStyleColor();
+            ImGui::PopStyleColor(2);
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -152,57 +223,64 @@ void TimelineConsole::draw_timeline_tab(const TelemetrySnapshot& telemetry, cons
                                         const UiFontSet& fonts) {
     const PrecisionDarkTokens& t = tokens();
 
-    bool paused = params.get_bool(ParamId::AppTelemetryPaused);
+    const bool paused = params.get_bool(ParamId::AppTelemetryPaused);
     if (ImGui::SmallButton(paused ? icons::kPlay : icons::kPause)) {
         (void)params.set(ParamId::AppTelemetryPaused, paused ? 0.0 : 1.0);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", paused ? tr("Resume live capture") : tr("Freeze the timeline for inspection"));
     }
     ImGui::SameLine();
     if (fonts.mono != nullptr) {
         ImGui::PushFont(fonts.mono);
     }
-    ImGui::TextColored(t.text_secondary,
-                       "T1 NPU %.2f ms  |  T2 Sim %.2f ms  |  T3 GPU %.2f ms  |  M2P p50 %.2f / p95 %.2f ms",
-                       static_cast<double>(tracking.inference_ms), static_cast<double>(telemetry.sim.latest_ms),
-                       static_cast<double>(render_view.total_gpu_ms), static_cast<double>(telemetry.m2p.p50_ms),
+    const size_t last = (write_idx_ + kPlotHistory - 1U) % kPlotHistory;
+    ImGui::TextColored(t.viz_t1, "T1 NPU %.2f", static_cast<double>(tracking.inference_ms));
+    ImGui::SameLine();
+    ImGui::TextColored(t.viz_t2, "T2 Sim %.2f", static_cast<double>(telemetry.sim.latest_ms));
+    ImGui::SameLine();
+    ImGui::TextColored(t.viz_t3, "T3 GPU %.2f", static_cast<double>(render_view.total_gpu_ms));
+    ImGui::SameLine();
+    ImGui::TextColored(t.viz_t4, "T4 Out %.2f", static_cast<double>(sample_count_ > 0 ? hist_t4_[last] : 0.0f));
+    ImGui::SameLine();
+    ImGui::TextColored(t.text_secondary, "| M2P p50 %.2f / p95 %.2f ms", static_cast<double>(telemetry.m2p.p50_ms),
                        static_cast<double>(telemetry.m2p.p95_ms));
     if (fonts.mono != nullptr) {
         ImGui::PopFont();
     }
 
-    if (ImPlot::GetCurrentContext() != nullptr) {
-        ImPlot::PushStyleColor(ImPlotCol_PlotBg, t.bg_inset);
-        ImPlot::PushStyleColor(ImPlotCol_FrameBg, t.bg_panel);
-        if (ImPlot::BeginPlot("##M2PTimelinePlot", ImVec2(-1.0f, -1.0f), ImPlotFlags_NoTitle | ImPlotFlags_NoMenus)) {
-            ImPlot::SetupAxes(nullptr, "ms", ImPlotAxisFlags_NoTickLabels, ImPlotAxisFlags_AutoFit);
-            ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, static_cast<double>(kPlotHistory - 1), ImPlotCond_Always);
-            ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 24.0, ImPlotCond_Once);
-
-            const int off = static_cast<int>(write_idx_ % kPlotHistory);
-            ImPlot::PushStyleColor(ImPlotCol_Line, t.viz_t1);
-            ImPlot::PlotLine("T1 NPU", hist_t1_.data(), static_cast<int>(kPlotHistory), 1.0, 0.0, 0, off);
-            ImPlot::PopStyleColor();
-
-            ImPlot::PushStyleColor(ImPlotCol_Line, t.viz_t2);
-            ImPlot::PlotLine("T2 Sim", hist_t2_.data(), static_cast<int>(kPlotHistory), 1.0, 0.0, 0, off);
-            ImPlot::PopStyleColor();
-
-            ImPlot::PushStyleColor(ImPlotCol_Line, t.viz_t3);
-            ImPlot::PlotLine("T3 Render", hist_t3_.data(), static_cast<int>(kPlotHistory), 1.0, 0.0, 0, off);
-            ImPlot::PopStyleColor();
-
-            ImPlot::PushStyleColor(ImPlotCol_Line, t.viz_t4);
-            ImPlot::PlotLine("M2P Total", hist_m2p_.data(), static_cast<int>(kPlotHistory), 1.0, 0.0, 0, off);
-            ImPlot::PopStyleColor();
-
-            double budget_y = 20.0;
-            ImPlot::PushStyleColor(ImPlotCol_Line, t.status_error);
-            ImPlot::PlotInfLines("20 ms Budget", &budget_y, 1, ImPlotInfLinesFlags_Horizontal);
-            ImPlot::PopStyleColor();
-
-            ImPlot::EndPlot();
-        }
-        ImPlot::PopStyleColor(2);
+    if (ImPlot::GetCurrentContext() == nullptr) {
+        return;
     }
+    ImPlot::PushStyleColor(ImPlotCol_PlotBg, t.bg_inset);
+    ImPlot::PushStyleColor(ImPlotCol_FrameBg, t.bg_panel);
+    ImPlot::PushStyleColor(ImPlotCol_LegendBg, t.bg_overlay);
+    if (ImPlot::BeginPlot("##M2PTimelinePlot", ImVec2(-1.0f, -1.0f), ImPlotFlags_NoTitle | ImPlotFlags_NoMenus)) {
+        ImPlot::SetupAxes(nullptr, "ms", ImPlotAxisFlags_NoTickLabels, ImPlotAxisFlags_None);
+        ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, static_cast<double>(kPlotHistory - 1), ImPlotCond_Always);
+        ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, 24.0, ImPlotCond_Once);
+        ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_Horizontal);
+
+        const int count = static_cast<int>(kPlotHistory);
+        const int off = static_cast<int>(write_idx_ % kPlotHistory);
+        const auto line = [&](const char* name, const ImVec4& col, const std::array<float, kPlotHistory>& data) {
+            ImPlot::PushStyleColor(ImPlotCol_Line, col);
+            ImPlot::PlotLine(name, data.data(), count, 1.0, 0.0, 0, off);
+            ImPlot::PopStyleColor();
+        };
+        line("T1 NPU", t.viz_t1, hist_t1_);
+        line("T2 Sim/IK", t.viz_t2, hist_t2_);
+        line("T3 GPU", t.viz_t3, hist_t3_);
+        line("T4 Output", t.viz_t4, hist_t4_);
+        line("M2P Total", t.text_secondary, hist_m2p_);
+
+        const double budget_y = 20.0;
+        ImPlot::PushStyleColor(ImPlotCol_Line, t.status_error);
+        ImPlot::PlotInfLines("20 ms Budget", &budget_y, 1, ImPlotInfLinesFlags_Horizontal);
+        ImPlot::PopStyleColor();
+        ImPlot::EndPlot();
+    }
+    ImPlot::PopStyleColor(3);
 }
 
 } // namespace aether::ui

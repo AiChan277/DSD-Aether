@@ -16,7 +16,8 @@ mod types;
 use types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
-    AetherGraphPlanStats, AetherHostCommand, AetherHostConfig, AetherHostEvent, AetherJointDesc,
+    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
+    AetherHostEvent, AetherJointDesc,
     AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
     AetherRuntimeConfig, AetherSpringJointDesc, AetherSubmeshDesc, AetherTextureDesc,
     AetherTrackingFrame, AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
@@ -462,6 +463,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             plugin_count,
             node_eval_us,
             node_live_values
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherGraphTelemetryReadout,
+        [
+            struct_size,
+            active_node_count,
+            pin_readout_count,
+            valid,
+            eval_sequence,
+            total_eval_ns,
+            node_ids,
+            node_eval_ns,
+            pin_node_ids,
+            pin_values,
+            pin_indices,
+            pin_kinds,
+            _reserved_tail
         ]
     );
 

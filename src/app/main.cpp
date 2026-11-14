@@ -1,10 +1,21 @@
 #include "app/application.hpp"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
+
 #include <cstdlib>
 #include <cstring>
 
 int main(int argc, char** argv) {
     try {
+#if defined(_WIN32)
+        (void)::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        (void)::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
         aether::app::AppLaunchOptions opts{};
         for (int i = 1; i < argc; ++i) {
             if (std::strcmp(argv[i], "--smoke-frames") == 0 && (i + 1) < argc) {

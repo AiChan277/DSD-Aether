@@ -48,6 +48,10 @@ class alignas(64) SimEngine {
     [[nodiscard]] const VisibilityFirstSolver& visibility_solver() const noexcept { return vis_solver_; }
     [[nodiscard]] const FilteredTrackingState& last_predicted() const noexcept { return predicted_state_; }
 
+    void export_spring_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,
+                               SpringSegmentOverlay* out_segs, uint32_t max_segs,
+                               uint32_t& out_seg_count) const noexcept;
+
   private:
     OneEuroPoseBank one_euro_{};
     KalmanPosePredictor kalman_{};

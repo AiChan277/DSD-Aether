@@ -1,3 +1,4 @@
+#include "animation/spring_bone.hpp"
 #include "core/hot_path_guard.hpp"
 #include "flip_metric.hpp"
 #include "renderer/npr_renderer.hpp"
@@ -137,7 +138,7 @@ TEST_CASE("Sync2 read-only D32_S8 stencil, 14 shading debug views, CVD heatmap, 
         renderer.graph().readback_image_rgba8(outs.orbit_orb_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 128, 128);
     REQUIRE(orb_px.has_value());
     int non_zero_orb = 0;
-    for (size_t i = 0; i < 128 * 128; ++i) {
+    for (size_t i = 0; i < static_cast<size_t>(128) * 128U; ++i) {
         if (orb_px.value()[i * 4 + 3] > 200) {
             ++non_zero_orb;
         }
@@ -245,7 +246,7 @@ TEST_CASE("Optical Invariant 2: 0-360 deg SDF face shadow sweep is smooth and sy
     aether::test::SyntheticMeshSpec spec;
     // Build a symmetric 64x64 linear-ramp face SDF map (tex_desc 0)
     constexpr uint32_t kSdfRes = 64;
-    spec.tex_pixels.resize(kSdfRes * kSdfRes * 4U);
+    spec.tex_pixels.resize(static_cast<size_t>(kSdfRes) * kSdfRes * 4U);
     for (uint32_t y = 0; y < kSdfRes; ++y) {
         for (uint32_t x = 0; x < kSdfRes; ++x) {
             const uint8_t val = static_cast<uint8_t>(std::clamp(static_cast<int>(x * 255 / (kSdfRes - 1)), 0, 255));
@@ -520,7 +521,7 @@ TEST_CASE("Optical Invariant 5: Premultiplied glow matches analytical composite 
 
     // 1) Read premultiplied OUT_BGRA8 rendered over transparent black
     const auto premul_px = render_synthetic_once(*rhi, spec, 128, 128, cam, rig, false, false, true);
-    const size_t center = (64U * 128U + 64U) * 4U;
+    const size_t center = (static_cast<size_t>(64) * 128U + 64U) * 4U;
     const uint8_t pr = premul_px[center + 0];
     const uint8_t pg = premul_px[center + 1];
     const uint8_t pb = premul_px[center + 2];
@@ -583,7 +584,7 @@ TEST_CASE("OfflineSdfGenerator bakes monotonic symmetric UV R8 SDF and uploads c
     REQUIRE(out.has_value());
     CHECK(out.value().width == 64);
     CHECK(out.value().height == 64);
-    CHECK(out.value().r8_pixels.size() == 64U * 64U);
+    CHECK(out.value().r8_pixels.size() == static_cast<size_t>(64) * 64U);
     CHECK(out.value().r8_pixels[32U * 64U + 4U] < out.value().r8_pixels[32U * 64U + 32U]);
     CHECK(out.value().r8_pixels[32U * 64U + 32U] < out.value().r8_pixels[32U * 64U + 59U]);
 }
@@ -682,6 +683,164 @@ TEST_CASE("NprRenderer::bake_and_apply_face_sdf activates live R8 SDF on unflagg
     const double l_front = render_luma(0.0f, 1);
     const double l_back = render_luma(180.0f, 2);
     CHECK(l_front > l_back + 30.0);
+    CHECK(rhi->validation_error_count() == 0);
+    CHECK(rhi->validation_warning_count() == 0);
+
+    renderer.destroy();
+    avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Vulkan wireframe mode, AvatarRoot 3D transform, and Rigging spring-bone collider overlay",
+          "[phase4][effects][wireframe][rigging]") {
+    aether::HotPathGuard::install();
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+
+    aether::test::SyntheticMeshSpec spec;
+    auto mat = aether::test::make_basic_npr_material(0.95f, 0.90f, 0.85f, 1.0f, 0U);
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.35f, -0.35f, 0.0f}, p1[3] = {0.35f, -0.35f, 0.0f};
+    const float p2[3] = {0.35f, 0.35f, 0.0f}, p3[3] = {-0.35f, 0.35f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.0f, 1.0f, 1.0f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+    auto avatar_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(avatar_res.has_value());
+    auto avatar = std::move(avatar_res.value());
+
+    aether::renderer::RendererConfig rcfg{};
+    rcfg.width = 128;
+    rcfg.height = 128;
+    rcfg.enable_rt = false;
+    aether::renderer::NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    CHECK(renderer.wireframe_supported() == rhi->fill_mode_non_solid_supported());
+
+    aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.4f, 0.65f};
+    auto rig = aether::renderer::LightingRig::default_three_point();
+    rig.bg_rgba[0] = 0.0f;
+    rig.bg_rgba[1] = 0.0f;
+    rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+
+    auto render_opts = [&](bool wireframe, float pos_x, float rot_y, float scale, bool colliders,
+                           const aether::animation::SpringColliderOverlay* cols, uint32_t col_cnt,
+                           const aether::animation::SpringSegmentOverlay* segs, uint32_t seg_cnt,
+                           uint64_t fidx) -> std::vector<uint8_t> {
+        aether::renderer::FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.frame_index = fidx;
+        req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
+        req.rt_enabled = false;
+        req.premul_alpha = false;
+        req.non_alpha_bg_rgb = {0.0f, 0.0f, 0.0f};
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.render_csm_shadow = false;
+        req.outline_width_scale = 0.0f;
+        req.wireframe = wireframe;
+        req.show_rig_colliders = colliders;
+        req.avatar_pos = {pos_x, 0.0f, 0.0f};
+        req.avatar_rot_y_deg = rot_y;
+        req.avatar_scale = scale;
+        req.spring_colliders = cols;
+        req.spring_collider_count = col_cnt;
+        req.spring_segments = segs;
+        req.spring_segment_count = seg_cnt;
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+        const auto outs = renderer.graph().outputs();
+        auto px = renderer.graph().readback_image_rgba8(outs.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                        128, 128);
+        REQUIRE(px.has_value());
+        return std::move(px.value());
+    };
+
+    // 1. Solid vs Wireframe mode
+    const auto px_solid = render_opts(false, 0.0f, 0.0f, 1.0f, false, nullptr, 0, nullptr, 0, 1);
+    const auto px_wire = render_opts(true, 0.0f, 0.0f, 1.0f, false, nullptr, 0, nullptr, 0, 2);
+    auto count_lit = [](const std::vector<uint8_t>& px) {
+        int cnt = 0;
+        for (size_t i = 0; i < static_cast<size_t>(128) * 128U; ++i) {
+            const uint8_t r = px[i * 4U + 0U];
+            const uint8_t g = px[i * 4U + 1U];
+            const uint8_t b = px[i * 4U + 2U];
+            if (r > 24U || g > 24U || b > 24U) {
+                ++cnt;
+            }
+        }
+        return cnt;
+    };
+    const int lit_solid = count_lit(px_solid);
+    const int lit_wire = count_lit(px_wire);
+    INFO("Solid lit px=" << lit_solid << " Wireframe lit px=" << lit_wire);
+    CHECK(lit_solid > 1200);
+    if (renderer.wireframe_supported()) {
+        CHECK(lit_wire > 40);
+        CHECK(lit_wire < static_cast<int>(static_cast<double>(lit_solid) * 0.75));
+    }
+
+    // 2. AvatarRoot 3D transform shifts rendered quad horizontally
+    const auto px_xform = render_opts(false, 0.28f, 30.0f, 1.1f, false, nullptr, 0, nullptr, 0, 3);
+    auto x_centroid = [](const std::vector<uint8_t>& px) {
+        double wx = 0.0;
+        double wsum = 0.0;
+        for (uint32_t y = 0; y < 128U; ++y) {
+            for (uint32_t x = 0; x < 128U; ++x) {
+                const size_t i = (static_cast<size_t>(y) * 128U + x) * 4U;
+                const double lum = static_cast<double>(px[i] + px[i + 1] + px[i + 2]);
+                if (lum > 40.0) {
+                    wx += static_cast<double>(x) * lum;
+                    wsum += lum;
+                }
+            }
+        }
+        return (wsum > 1.0) ? (wx / wsum) : 64.0;
+    };
+    const double cx_base = x_centroid(px_solid);
+    const double cx_xform = x_centroid(px_xform);
+    INFO("Centroid base=" << cx_base << " transformed=" << cx_xform);
+    CHECK(cx_xform > cx_base + 12.0);
+
+    // 3. Rigging Spring-Bone collider overlay renders Cyan (rest) and Orange/Red (contact)
+    std::array<aether::animation::SpringColliderOverlay, 2> cols{{
+        {{-0.20f, 0.0f, 0.0f}, 0.16f, {0.0f, 0.0f, 0.0f}, 0U, 0U, {}},
+        {{0.20f, -0.10f, 0.0f}, 0.11f, {0.20f, 0.10f, 0.0f}, 1U, 1U, {}},
+    }};
+
+    std::array<aether::animation::SpringSegmentOverlay, 2> segs{{
+        {{-0.20f, 0.18f, 0.0f}, 0.015f, {-0.20f, 0.28f, 0.0f}, 0U, {}},
+        {{0.20f, 0.12f, 0.0f}, 0.015f, {0.20f, 0.24f, 0.0f}, 1U, {}},
+    }};
+
+    const auto px_col = render_opts(false, 0.0f, 0.0f, 1.0f, true, cols.data(), 2, segs.data(), 2, 4);
+    int cyan_left = 0;
+    int orange_right = 0;
+    for (uint32_t y = 0; y < 128U; ++y) {
+        for (uint32_t x = 0; x < 128U; ++x) {
+            const size_t i = (static_cast<size_t>(y) * 128U + x) * 4U;
+            const int r = px_col[i + 0U];
+            const int g = px_col[i + 1U];
+            const int b = px_col[i + 2U];
+            if (x < 64U && b > r + 40 && g > r + 30) {
+                ++cyan_left;
+            }
+            if (x >= 64U && r > b + 40 && r > g + 15) {
+                ++orange_right;
+            }
+        }
+    }
+    INFO("Cyan rest collider px=" << cyan_left << " Orange contact collider px=" << orange_right);
+    CHECK(cyan_left >= 15);
+    CHECK(orange_right >= 15);
     CHECK(rhi->validation_error_count() == 0);
     CHECK(rhi->validation_warning_count() == 0);
 

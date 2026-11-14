@@ -47,6 +47,7 @@ include = [
     "AetherHostCommand",
     "AetherHostEvent",
     "AetherGraphPlanStats",
+    "AetherGraphTelemetryReadout",
     "AetherPlanOpaque",
     "AetherPlanHandle",
     "AetherTrackingFrame",

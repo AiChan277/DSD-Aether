@@ -1,57 +1,57 @@
-# Precision Dark Design Tokens (`AETHER-TS-001` §12.3)
+# Studio Design Tokens (Broadcast Overhaul — DaVinci Resolve 19 surfaces + UE5 Blueprint graph)
 
-Single source of truth for all colours, typography, spacing, sizing, and radii. Reflected directly in `src/ui/theme/tokens.hpp` and `src/ui/theme/precision_dark.cpp`. Panel code MUST NOT contain literal colours (`REQ-UI-001`).
+Single source of truth for all colours, typography, spacing, sizing, and radii: `src/ui/theme/tokens.hpp`
+(applied to ImGui by `src/ui/theme/precision_dark.cpp`). Panel code MUST NOT contain literal colours —
+`tools/check_gates.py` fails the build on `IM_COL32(` / `hex_rgba(` / `hex_col32(` outside `tokens.hpp` (`REQ-UI-001`).
 
-## Colour Tokens (§12.3.1)
+## Surface & Semantic Colours
 
-| Token | sRGB Hex | Usage |
+| Token (`tokens.hpp`) | Spec name | sRGB | Usage |
+|---|---|---|---|
+| `bg_app`, `bg_canvas` | BgCanvasDeep | `#0B0D10` | App void, dock gaps, menu/telemetry bars, Node Graph void, viewport backdrop |
+| `bg_panel` | BgPanelSurface | `#14171D` | Dockable panel body |
+| `bg_raised` | BgHeaderSection | `#1C2029` | Collapsible section headers, tab bars, buttons |
+| `bg_inset` | BgControlWell | `#0F1217` | Inputs, scrub sliders, combo wells, search |
+| `bg_hover` | BgControlHover | `#232936` | Hovered buttons, combos, scrubbers, expression buttons |
+| `bg_well` | — | `#0E1015` | Recessed Outliner `##SceneTreeWell` |
+| `bg_selected` | — | `#1A2B4A` | Selected rows / latched expressions |
+| `border_default` | BorderHairline | `#262B36` | 1 px structural borders, table rows |
+| `accent` | AccentPrimary | `#2563EB` | Active mode pill, slider fill, focus border |
+| `status_live` | AccentBroadcastLive | `#DC2626` | `● LIVE` tally |
+| `status_ok` | StatusHealthyGreen | `#10B981` | Active outputs, NPU dot, in-budget timings |
+| `status_warn` | StatusStandbyAmber | `#F59E0B` | Idle outputs, modified-param dot |
+| `status_off` | — | `#4B5563` | `Off` output pill |
+| `text_primary` / `text_secondary` | TextPrimary / TextMuted | `#E2E8F0` / `#8B95A5` | Values & headers / labels, inactive tabs |
+| `text_tertiary` | — | `#7A8496` | Units, placeholders, metadata |
+
+## Node Graph (UE5 Blueprint)
+
+| Token | Value | Usage |
 |---|---|---|
-| `bg.app` | `#111318` | Window and dockspace background, dock gaps, menu bar, telemetry bar |
-| `bg.panel` | `#181B22` | Panel surface, active tab |
-| `bg.raised` | `#1F232C` | Buttons, popovers, menus, node title, table header |
-| `bg.overlay` | `#252A34` | Tooltips, drag previews |
-| `bg.inset` | `#0F1115` | Input fields, sliders, segmented control track |
-| `bg.hover` | `#232834` | Row hover |
-| `bg.selected` | `#1B2A45` | Selected row (with 2 px accent left bar) |
-| `bg.canvas` | `#13151A` | Node canvas background (16 px dot grid in `#262B36`) |
-| `border.default` | `#262B36` | Hard 1 px borders: fields, popovers, panel separators |
-| `border.subtle` | `#1F232C` | Row and section dividers |
-| `border.strong` | `#333A48` | Button and popup borders, hovered fields |
-| `text.primary` | `#E3E6EB` | Values, names, titles (contrast 13.8:1 on `bg.panel`) |
-| `text.secondary` | `#A0A7B4` | Property labels, menu items, inactive values (contrast 7.1:1) |
-| `text.tertiary` | `#7D8494` | Units, placeholders, metadata, inactive tabs (contrast 4.6:1) |
-| `text.disabled` | `#4B515D` | Disabled controls only |
-| `accent` | `#3B82F6` | Selection, focus ring, slider fill, active toggles, focused-tab overline |
-| `accent.hover` | `#5B96F7` | Accent hover |
-| `accent.pressed` | `#2D6FDB` | Accent pressed |
-| `accent.button` | `#2563EB` | Primary button fill with `#FFFFFF` text (contrast 5.2:1) |
-| `status.npu` / `status.ok` | `#10B981` | NPU active indicator, healthy state dots |
-| `status.warn` | `#F5A524` | Fallback tier and near-budget |
-| `status.error` | `#F04438` | Over budget, failures |
-| `status.live` | `#E5484D` | ON AIR tally only |
-| `axis.x` / `axis.y` / `axis.z` | `#E5534B` / `#57AB5A` / `#4A8FE7` | Vector field axis letters and gizmo handles |
-| `viz.thread.T1..T4` | `#3987E5` / `#D95926` / `#199E70` / `#C98500` | Telemetry series (T1 Vision, T2 Sim, T3 Render, T4 Output) |
-| `viz.confidence.*` | `#199E70` / `#C98500` / `#3987E5` | Tracked / interpolating / procedural |
-| `checker.a` / `checker.b` | `#15171C` / `#1A1D23` | Viewport 8 px alpha checkerboard (§10.11) |
-| `scrim.modal` | `#08090C` @ 60% | Modal scrim |
-| `scrollbar.thumb` / `hover` | `#2E3440` / `#3A4150` | 8 px scrollbar thumb |
+| `col32_node_body` / `col32_node_border` / `col32_node_border_hover` / `col32_node_selected` | `#13161CEB` / `#2E3545` / `#4B5670` / `#F59E0B` | Node card fill, 1.5 px border, hover, 2 px selected outline |
+| `node_hdr_source` / `solver` / `blend` / `output` | `#881B2B→#3A111A` / `#1D4E89→#112642` / `#0F6B58→#0A332B` / `#5B2182→#2A113D` | 26 px category gradient headers |
+| `col32_pin_types[]` | Float `#38BDF8`, Bool `#FB7185`, Vec3 `#FB923C`, Pose `#F472B6`, Blendshape `#FACC15`, Viseme `#A855F7`, Event `#E2E8F0` | Pin glyphs (hollow = unconnected) and wire colours |
+| `col32_wire_selected` / `col32_wire_shadow` | `#FBBF24` / `#000000` @ 25% | Selected wire (+ halo) / wire shadow spline |
+| geometry | header 26, row 24, footer 18, pin inset 12, label inset 24, inline box 48, pin r 5, hit r 11, snap r 14, wire hit 6.5 | World units × zoom × dpi |
 
-## Typography (§12.3.2)
+## Viewport Overlays
 
-- `type.caption`: Inter 11/14 (400) — units, badges, legend, metadata
-- `type.body`: Inter 12/16 (400) — default UI base size
-- `type.body-strong`: Inter 12/16 (500/600) — tabs, buttons, section headers, node titles
-- `type.title`: Inter 13/18 (600) — inspector object title, dialog titles
-- `type.display`: Inter 20/26 (600) — wizard step heading only
-- `type.mono`: JetBrains Mono 11/14 (400/500) — telemetry, console, param IDs, OSC addresses, key caps
-- Numeric fields use `Inter-Regular-tnum.ttf` / `Inter-SemiBold-tnum.ttf` (`tnum` + `cv11` frozen).
+`col32_hud_bg` `#0B0D10D9` (toolbar pill, tracking HUD, orb readout), Light Orbit Gizmo `col32_orb_fill` `#141820`,
+`col32_orb_ring` `#2E3646`, handles Key `#F59E0B` / Fill `#38BDF8` / Rim `#10B981`.
 
-## Spacing, Sizing & Radius (§12.3.3)
+## Typography
 
-- Base unit: 4 px (steps 2, 4, 6, 8, 12, 16, 24, 32)
-- Control height: 22 px compact (default), 26 px comfortable
-- Property row: 26 px; label column 104 px (min 88, max 140); 8 px right padding
-- Tree row: 22 px; indent 14 px; twisty 14 px
-- Panel padding: 8 px; section inset 22 px; tab bar 28 px; menu bar 32 px; telemetry bar 24 px fixed
-- Radius: 0 panels, 3 controls, 4 popovers/nodes, 6 modals, 999 status pills
-- Borders: 1 px everywhere; dock splitter 2 px (`bg.app`, hover turns `accent`); scrollbar 8 px (no arrows)
+- UI: Inter 13 px × dpi (spec 13.5 px — the FreeType builder rasterizes whole pixel sizes, so the token states the
+  size actually rendered), semibold for titles/node headers; caption 11 px; title 14 px.
+- Numerics: JetBrains Mono 12 px × dpi (spec 12.5 px) for HUDs, telemetry, timings, key badges.
+- Layout code derives its scale as `GetFontSize() / type_body_px`, which equals the effective dpi.
+
+## Spacing, Sizing & Radius (× dpi)
+
+- WindowPadding 10×10, FramePadding 8×5, ItemSpacing 8×6, CellPadding 4×3.
+- FrameRounding 3, ChildRounding 4, PopupRounding 5, node radius 7.
+- Docks: Outliner 275 px (spec), Inspector 335 px (spec 325 — the longest combo value needs ~10 px more to avoid clipping;
+  `studio_ui_test` verifies no Inspector label/combo or Outliner label is clipped at 100/125/150/175% DPI).
+- Inspector property table: label column ≥ 38% (grows to the longest label + 12 px reset-dot slot, max 48%),
+  control column stretches; scrub sliders fill from 0 on bipolar ranges.
+- Scene tree well 190 px; viewport toolbar pill 28 px at client origin + (12, 10).

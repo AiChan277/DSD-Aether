@@ -12,16 +12,16 @@ use std::time::Duration;
 
 use aether_ffi::{
     AETHER_HOST_CMD_SET_GRAPH_JSON, AETHER_HOST_EVT_GRAPH_COMPILED, AETHER_OK,
-    AETHER_THREAD_ROLE_ANY, AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_T2, AETHER_THREAD_ROLE_UI,
-    AetherGraphInputs, AetherGraphOutputs, AetherHostCommand, AetherHostConfig, AetherHostEvent,
-    AetherHostHandle,
+    AETHER_PIN_VALUE_FLOAT, AETHER_THREAD_ROLE_ANY, AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_T2,
+    AETHER_THREAD_ROLE_UI, AetherGraphInputs, AetherGraphOutputs, AetherGraphTelemetryReadout,
+    AetherHostCommand, AetherHostConfig, AetherHostEvent, AetherHostHandle,
 };
 use aether_plugin_host::GraphDocument;
 use aether_plugin_host::graph::model::{GraphEdge, GraphNode};
 use aether_rust_host::{
-    aether_host_create, aether_host_destroy, aether_host_evaluate_active, aether_host_poll_events,
-    aether_host_post_command, aether_set_thread_role, aether_test_alloc_reset,
-    aether_test_thread_alloc_calls,
+    aether_host_create, aether_host_destroy, aether_host_evaluate_active,
+    aether_host_get_telemetry_readout, aether_host_poll_events, aether_host_post_command,
+    aether_set_thread_role, aether_test_alloc_reset, aether_test_thread_alloc_calls,
 };
 
 #[test]
@@ -166,6 +166,26 @@ fn t2_host_evaluate_active_has_zero_allocs_even_across_plan_hotswap()
         "T2 evaluate_active must perform 0 heap allocations/frees"
     );
     assert!((gout.ik_targets[6][1] - 31.5).abs() < 1e-3);
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_UI);
+    let mut readout: AetherGraphTelemetryReadout = unsafe { core::mem::zeroed() };
+    readout.struct_size = size_of::<AetherGraphTelemetryReadout>() as u32;
+    aether_test_alloc_reset();
+    // SAFETY: `host` is live and `readout` is valid aligned writable storage on UI thread.
+    let tel_st = unsafe { aether_host_get_telemetry_readout(host, &mut readout) };
+    let ui_allocs = aether_test_thread_alloc_calls();
+    assert_eq!(tel_st, AETHER_OK);
+    assert_eq!(ui_allocs, 0, "UI telemetry readout must perform 0 allocations");
+    assert_eq!(readout.valid, 1);
+    assert_eq!(readout.active_node_count, 64);
+    let idx63 = readout
+        .pin_node_ids
+        .iter()
+        .take(readout.pin_readout_count as usize)
+        .position(|&nid| nid == 63)
+        .expect("node 63 output pin present");
+    assert_eq!(readout.pin_kinds[idx63], AETHER_PIN_VALUE_FLOAT);
+    assert!((readout.pin_values[idx63][0] - 31.5).abs() < 1e-3);
 
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
     // SAFETY: `host` is live and owned by this test until destruction.

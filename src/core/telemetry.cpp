@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace aether {
 
@@ -13,13 +14,29 @@ void RollingLatencyStats::reset() noexcept {
 }
 
 void RollingLatencyStats::add_sample_ms(float ms) noexcept {
-    const float clamped = ms < 0.0f ? 0.0f : ms;
-    latest_ = clamped;
-    window_[write_cursor_] = clamped;
+    if (!std::isfinite(ms) || ms < 0.0f || ms > 5000.0f) {
+        return;
+    }
+    latest_ = ms;
+    window_[write_cursor_] = ms;
     write_cursor_ = (write_cursor_ + 1U) % kWindowSize;
     if (filled_ < kWindowSize) {
         ++filled_;
     }
+}
+
+bool RollingLatencyStats::add_m2p_sample(uint64_t capture_timestamp_us, uint64_t present_timestamp_us,
+                                         bool tracking_valid) noexcept {
+    if (!tracking_valid || capture_timestamp_us == 0ULL || present_timestamp_us <= capture_timestamp_us) {
+        return false;
+    }
+    const uint64_t diff_us = present_timestamp_us - capture_timestamp_us;
+    if (diff_us == 0ULL || diff_us > FrameStamps::kMaxValidM2pUs) {
+        return false;
+    }
+    const float ms = static_cast<float>(diff_us) * 0.001f;
+    add_sample_ms(ms);
+    return true;
 }
 
 LatencySummary RollingLatencyStats::compute_summary() const noexcept {

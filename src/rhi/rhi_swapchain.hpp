@@ -70,6 +70,7 @@ class RhiSwapchain {
     void destroy_swapchain_resources() noexcept;
 
     RhiDevice* device_{nullptr};
+    void* hwnd_{nullptr};
     VkSurfaceKHR surface_{VK_NULL_HANDLE};
     VkSwapchainKHR swapchain_{VK_NULL_HANDLE};
     VkFormat format_{VK_FORMAT_B8G8R8A8_UNORM};

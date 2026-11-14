@@ -267,17 +267,81 @@ bool draw_empty_state(const UiFontSet& fonts, const char* message, const char* a
     ImGui::TextColored(t.text_secondary, "%s", text);
     bool clicked = false;
     if (action_label != nullptr && action_label[0] != '\0') {
-        const float btn_w = std::max(120.0f, ImGui::CalcTextSize(action_label).x + 24.0f);
+        const float scale = ImGui::GetFontSize() / std::max(1.0f, t.type_body_px);
+        const float btn_w = std::max(120.0f * scale, ImGui::CalcTextSize(action_label).x + 24.0f * scale);
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (avail.x - btn_w) * 0.5f));
         ImGui::PushStyleColor(ImGuiCol_Button, t.accent_button);
         ImGui::PushStyleColor(ImGuiCol_Text, t.text_on_accent);
-        if (ImGui::Button(action_label, ImVec2(btn_w, t.control_h_comfy_px))) {
+        if (ImGui::Button(action_label, ImVec2(btn_w, t.control_h_comfy_px * scale))) {
             clicked = true;
         }
         ImGui::PopStyleColor(2);
     }
     if (fonts.body != nullptr) {
         ImGui::PopFont();
+    }
+    return clicked;
+}
+
+ImU32 pill_tone_color(PillTone tone) noexcept {
+    const PrecisionDarkTokens& t = tokens();
+    switch (tone) {
+    case PillTone::Ok:
+        return t.col32_status_ok;
+    case PillTone::Standby:
+        return t.col32_status_warn;
+    case PillTone::Error:
+        return t.col32_status_error;
+    case PillTone::Live:
+        return t.col32_status_live;
+    case PillTone::Off:
+    default:
+        return t.col32_status_off;
+    }
+}
+
+ImVec2 status_pill_size(const char* text) noexcept {
+    const float scale = ImGui::GetFontSize() / std::max(1.0f, tokens().type_body_px);
+    const ImVec2 ts = ImGui::CalcTextSize(text != nullptr ? text : "");
+    return ImVec2(ts.x + 22.0f * scale, ts.y + 4.0f * scale);
+}
+
+void draw_status_pill_at(ImDrawList* dl, ImVec2 pos_min, const char* text, PillTone tone) noexcept {
+    if (dl == nullptr) {
+        return;
+    }
+    const PrecisionDarkTokens& t = tokens();
+    const float scale = ImGui::GetFontSize() / std::max(1.0f, t.type_body_px);
+    const ImVec2 sz = status_pill_size(text);
+    const ImVec2 pos_max(pos_min.x + sz.x, pos_min.y + sz.y);
+    const ImU32 col = pill_tone_color(tone);
+    dl->AddRectFilled(pos_min, pos_max, col32_with_alpha(col, 0x2E), sz.y * 0.5f);
+    dl->AddRect(pos_min, pos_max, col32_with_alpha(col, 0x80), sz.y * 0.5f, 0, 1.0f);
+    dl->AddCircleFilled(ImVec2(pos_min.x + 8.0f * scale, pos_min.y + sz.y * 0.5f), 3.0f * scale, col, 12);
+    dl->AddText(ImVec2(pos_min.x + 15.0f * scale, pos_min.y + 2.0f * scale),
+                tone == PillTone::Off ? t.col32_text_secondary : t.col32_text_primary, text != nullptr ? text : "");
+}
+
+bool ghost_button(const char* label, const char* trailing_icon, ImVec2 size) noexcept {
+    const PrecisionDarkTokens& t = tokens();
+    ImGui::PushStyleColor(ImGuiCol_Button, t.transparent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, t.bg_hover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, t.bg_selected);
+    ImGui::PushStyleColor(ImGuiCol_Border, t.border_strong);
+    ImGui::PushStyleColor(ImGuiCol_Text, t.text_primary);
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
+    if (trailing_icon != nullptr && trailing_icon[0] != '\0') {
+        const ImVec2 bmin = ImGui::GetItemRectMin();
+        const ImVec2 bmax = ImGui::GetItemRectMax();
+        const ImVec2 isz = ImGui::CalcTextSize(trailing_icon);
+        const float pad = ImGui::GetStyle().FramePadding.x;
+        ImGui::GetWindowDrawList()->AddText(ImVec2(bmax.x - pad - isz.x, bmin.y + (bmax.y - bmin.y - isz.y) * 0.5f),
+                                            ImGui::IsItemHovered() ? t.col32_text_primary : t.col32_text_secondary,
+                                            trailing_icon);
     }
     return clicked;
 }

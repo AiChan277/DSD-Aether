@@ -187,6 +187,16 @@ LRESULT CALLBACK aether_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexc
             ::SetWindowPos(hwnd, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top,
                            SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        RECT cr{};
+        if (::GetClientRect(hwnd, &cr) != FALSE) {
+            const uint32_t cw = static_cast<uint32_t>(std::max<LONG>(0L, cr.right - cr.left));
+            const uint32_t ch = static_cast<uint32_t>(std::max<LONG>(0L, cr.bottom - cr.top));
+            if (cw > 0U && ch > 0U) {
+                shared->pending_w.store(cw, std::memory_order_release);
+                shared->pending_h.store(ch, std::memory_order_release);
+                shared->resize_pending.store(true, std::memory_order_release);
+            }
+        }
         return 0;
     }
     case WM_DROPFILES: {
@@ -365,6 +375,46 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         rm.rest_local_positions[b] = world[b] - world[pi];
         rm.bone_lengths[b] = std::max(animation::length(rm.rest_local_positions[b]), 0.02f);
     }
+
+    uint32_t custom_cnt = 0;
+    for (const auto& col : avatar.colliders) {
+        if (custom_cnt >= rm.custom_colliders.size()) {
+            break;
+        }
+        uint16_t hb = AETHER_BONE_HIPS;
+        std::array<float, 3> jr{0.0f, 0.0f, 0.0f};
+        if (col.joint_index < avatar.joints.size()) {
+            jr = avatar.joint_rest_world_pos[col.joint_index];
+            uint32_t j = col.joint_index;
+            for (size_t steps = 0; steps < avatar.joints.size() && j < avatar.joints.size(); ++steps) {
+                const uint16_t candidate = avatar.joints[j].humanoid_bone;
+                if (candidate < AETHER_HUMANOID_BONE_COUNT) {
+                    hb = candidate;
+                    break;
+                }
+                const int32_t p_idx = avatar.joints[j].parent_index;
+                if (p_idx < 0 || static_cast<size_t>(p_idx) >= avatar.joints.size()) {
+                    break;
+                }
+                j = static_cast<uint32_t>(p_idx);
+            }
+        }
+        auto& dst = rm.custom_colliders[custom_cnt++];
+        dst.attached_bone = static_cast<int32_t>(hb);
+        dst.shape = (col.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE) ? 1U : 0U;
+        dst.radius = std::clamp(col.radius, 0.01f, 0.50f);
+        dst.local_a = {
+            jr[0] + col.offset[0] - world[hb].x,
+            jr[1] + col.offset[1] - world[hb].y,
+            jr[2] + col.offset[2] - world[hb].z,
+        };
+        dst.local_b = {
+            jr[0] + col.tail[0] - world[hb].x,
+            jr[1] + col.tail[1] - world[hb].y,
+            jr[2] + col.tail[2] - world[hb].z,
+        };
+    }
+    rm.custom_collider_count = custom_cnt;
     rm.valid = true;
     return rm;
 }
@@ -735,6 +785,12 @@ bool ends_with_icase(std::string_view hay, std::string_view suffix) noexcept {
 } // namespace
 
 int run_application(const AppLaunchOptions& opts) {
+#if defined(_WIN32)
+    (void)::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    (void)::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    ImGui_ImplWin32_EnableDpiAwareness();
+#endif
+
     HotPathGuard::install();
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
 
@@ -888,6 +944,9 @@ int run_application(const AppLaunchOptions& opts) {
 
     // Dedicated T3 (Render + UI) thread owning Swapchain, ImGui, and Vulkan presentation.
     std::thread t3_thread([&]() {
+#if defined(_WIN32)
+        (void)::SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+#endif
         aether_set_thread_role(AETHER_THREAD_ROLE_UI);
         (void)apply_thread_placement(ThreadRole::RenderT3, hw.cpu);
 
@@ -1358,6 +1417,8 @@ int run_application(const AppLaunchOptions& opts) {
                         host_status.error_node_id = pstats.error_node_id;
                     }
                 }
+                host_status.telemetry.struct_size = static_cast<uint32_t>(sizeof(AetherGraphTelemetryReadout));
+                (void)aether_host_get_telemetry_readout(plugin_host, &host_status.telemetry);
             }
             if (need_plugin_sync || (rendered_frames % 60ULL) == 0ULL) {
                 need_plugin_sync = false;
@@ -1399,13 +1460,15 @@ int run_application(const AppLaunchOptions& opts) {
                               studio_actions.pending_graph_json.c_str());
                 studio_actions.pending_graph_json.clear();
             }
-            if (studio_actions.request_trigger_expression) {
-                studio_actions.request_trigger_expression = false;
-                if (studio_actions.expression_slot >= 0) {
-                    post_host_cmd(plugin_host, AETHER_HOST_CMD_TRIGGER_EXPRESSION,
-                                  static_cast<uint64_t>(studio_actions.expression_slot),
-                                  studio_actions.expression_weight);
+            if (studio_actions.expression_dirty_mask != 0) {
+                // Hermite-ramped quick-expression weights (UI interpolates; host applies as overrides).
+                for (size_t slot = 0; slot < ui::StudioActions::kQuickExpressionSlots; ++slot) {
+                    if ((studio_actions.expression_dirty_mask & (1u << slot)) != 0) {
+                        post_host_cmd(plugin_host, AETHER_HOST_CMD_TRIGGER_EXPRESSION, static_cast<uint64_t>(slot),
+                                      studio_actions.expression_weights[slot]);
+                    }
                 }
+                studio_actions.expression_dirty_mask = 0;
             }
             if (studio_actions.request_plugin_consent_reply) {
                 studio_actions.request_plugin_consent_reply = false;
@@ -1567,11 +1630,12 @@ int run_application(const AppLaunchOptions& opts) {
                 vp_actions.request_ep_override = -99;
             }
             if (vp_actions.request_denoiser_apply) {
-                static constexpr renderer::DenoiserKind kUiToDenoiserKind[5] = {
-                    renderer::DenoiserKind::Auto, renderer::DenoiserKind::Optix,    renderer::DenoiserKind::FfxCompute,
-                    renderer::DenoiserKind::Oidn, renderer::DenoiserKind::SvgfLite,
+                // Index order matches `render.denoiser` enum labels in ui/params/param_registry.hpp.
+                static constexpr renderer::DenoiserKind kUiToDenoiserKind[6] = {
+                    renderer::DenoiserKind::Auto, renderer::DenoiserKind::SvgfLite,   renderer::DenoiserKind::NrdSigma,
+                    renderer::DenoiserKind::Oidn, renderer::DenoiserKind::FfxCompute, renderer::DenoiserKind::Optix,
                 };
-                const auto kind = kUiToDenoiserKind[std::min<uint8_t>(vp_actions.denoiser_kind, 4)];
+                const auto kind = kUiToDenoiserKind[std::min<uint8_t>(vp_actions.denoiser_kind, 5)];
                 (void)npr_renderer.graph().denoiser().select_backend(kind);
                 vp_actions.request_denoiser_apply = false;
             }
@@ -1579,6 +1643,10 @@ int run_application(const AppLaunchOptions& opts) {
                 auto& rig = npr_renderer.lighting();
                 rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
                 rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
+                rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
+                rig.lights[1].orbit_elevation_deg = vp_actions.fill_elevation_deg;
+                rig.lights[2].orbit_azimuth_deg = vp_actions.rim_azimuth_deg;
+                rig.lights[2].orbit_elevation_deg = vp_actions.rim_elevation_deg;
                 rig.lights[0].intensity = vp_actions.key_intensity;
                 rig.lights[1].intensity = vp_actions.fill_intensity;
                 rig.lights[2].intensity = vp_actions.rim_intensity;
@@ -1611,22 +1679,39 @@ int run_application(const AppLaunchOptions& opts) {
                 camera = renderer::fit_camera_to_avatar(*current_avatar);
                 vp_actions.reset_camera = false;
             }
+            if (vp_actions.request_focal_mm > 0.0f) {
+                // Focal length on a 24 mm-high sensor; dolly to keep the subject's framed size constant.
+                const float new_fovy = 2.0f * std::atan(12.0f / std::max(8.0f, vp_actions.request_focal_mm));
+                camera.distance = std::clamp(
+                    camera.distance * std::tan(camera.fovy_rad * 0.5f) / std::tan(new_fovy * 0.5f), 0.25f, 60.0f);
+                camera.fovy_rad = new_fovy;
+                vp_actions.request_focal_mm = 0.0f;
+            }
             camera.yaw_rad += vp_actions.orbit_yaw_delta;
             camera.pitch_rad = std::clamp(camera.pitch_rad + vp_actions.orbit_pitch_delta, -1.45f, 1.45f);
-            camera.distance = std::clamp(camera.distance + vp_actions.zoom_delta, 0.25f, 25.0f);
-            camera.target_x += vp_actions.pan_dx * std::cos(camera.yaw_rad);
-            camera.target_z -= vp_actions.pan_dx * std::sin(camera.yaw_rad);
-            camera.target_y += vp_actions.pan_dy;
+            camera.distance = std::clamp(camera.distance * std::exp(-vp_actions.zoom_delta), 0.25f, 60.0f);
+            camera.target_x += vp_actions.pan_dx * camera.distance * std::cos(camera.yaw_rad);
+            camera.target_z -= vp_actions.pan_dx * camera.distance * std::sin(camera.yaw_rad);
+            camera.target_y += vp_actions.pan_dy * camera.distance;
             vp_actions.orbit_yaw_delta = 0.0f;
             vp_actions.orbit_pitch_delta = 0.0f;
             vp_actions.pan_dx = 0.0f;
             vp_actions.pan_dy = 0.0f;
             vp_actions.zoom_delta = 0.0f;
 
-            if (shared.resize_pending.exchange(false, std::memory_order_acq_rel)) {
-                const uint32_t nw = shared.pending_w.load(std::memory_order_acquire);
-                const uint32_t nh = shared.pending_h.load(std::memory_order_acquire);
-                if (nw > 0 && nh > 0) {
+            RECT live_cr{};
+            ::GetClientRect(hwnd, &live_cr);
+            const uint32_t live_w =
+                static_cast<uint32_t>(live_cr.right > live_cr.left ? (live_cr.right - live_cr.left) : 0);
+            const uint32_t live_h =
+                static_cast<uint32_t>(live_cr.bottom > live_cr.top ? (live_cr.bottom - live_cr.top) : 0);
+            const bool pending_resize = shared.resize_pending.exchange(false, std::memory_order_acq_rel);
+            if (pending_resize ||
+                (live_w > 0U && live_h > 0U &&
+                 (live_w != swapchain.extent().width || live_h != swapchain.extent().height))) {
+                const uint32_t nw = live_w > 0U ? live_w : shared.pending_w.load(std::memory_order_acquire);
+                const uint32_t nh = live_h > 0U ? live_h : shared.pending_h.load(std::memory_order_acquire);
+                if (nw > 0U && nh > 0U) {
                     (void)swapchain.resize(nw, nh);
                 }
             }
@@ -1820,9 +1905,20 @@ int run_application(const AppLaunchOptions& opts) {
             }
             render_req.show_checkerboard = vp_actions.show_checkerboard;
             render_req.show_skeleton_heatmap = vp_actions.show_skeleton_heatmap;
+            render_req.wireframe = vp_actions.wireframe;
+            render_req.show_rig_colliders = vp_actions.show_rig_colliders;
             render_req.show_orbit_orb = vp_actions.show_orbit_orb;
             render_req.render_csm_shadow = true;
             render_req.outline_width_scale = npr_renderer.lighting().outline_width_scale;
+            render_req.avatar_pos = vp_actions.avatar_pos;
+            render_req.avatar_rot_y_deg = vp_actions.avatar_rot_y_deg;
+            render_req.avatar_scale = vp_actions.avatar_scale;
+            if (skin_snap.frame_sequence != 0ULL) {
+                render_req.spring_colliders = skin_snap.spring_colliders.data();
+                render_req.spring_collider_count = skin_snap.spring_collider_count;
+                render_req.spring_segments = skin_snap.spring_segments.data();
+                render_req.spring_segment_count = skin_snap.spring_segment_count;
+            }
             if (active_backend == renderer::RenderBackend::DirectX11 && current_avatar != nullptr) {
                 render_req.rt_enabled = false;
                 if (dx11_bridge.render(*current_avatar, npr_renderer.lighting(), camera)) {
@@ -1856,7 +1952,27 @@ int run_application(const AppLaunchOptions& opts) {
             avatar_view.orbit_orb_texture = orb_tex_set;
             avatar_view.viewport_w = fg_out.width;
             avatar_view.viewport_h = fg_out.height;
-            avatar_view.wireframe_supported = false;
+            avatar_view.wireframe_supported =
+                (active_backend == renderer::RenderBackend::Vulkan) && npr_renderer.wireframe_supported();
+            {
+                const float cp = std::cos(camera.pitch_rad);
+                const float sp = std::sin(camera.pitch_rad);
+                const float cy = std::cos(camera.yaw_rad);
+                const float sy = std::sin(camera.yaw_rad);
+                avatar_view.camera_eye = {
+                    camera.target_x + camera.distance * cp * sy,
+                    camera.target_y + camera.distance * sp,
+                    camera.target_z + camera.distance * cp * cy,
+                };
+                avatar_view.camera_target = {camera.target_x, camera.target_y, camera.target_z};
+                avatar_view.camera_fovy_rad = camera.fovy_rad;
+                avatar_view.has_camera = true;
+                if (current_avatar != nullptr) {
+                    const float min_y = current_avatar->desc.aabb_min[1];
+                    const float max_y = current_avatar->desc.aabb_max[1];
+                    avatar_view.gizmo_pivot_y = min_y + (max_y - min_y) * 0.56f;
+                }
+            }
             const auto job_state = asset_job.state();
             avatar_view.is_loading = (job_state == renderer::AssetJobState::Loading);
             avatar_view.load_progress = avatar_view.is_loading ? asset_job.progress() : 0.0f;
@@ -1953,6 +2069,11 @@ int run_application(const AppLaunchOptions& opts) {
                 const uint64_t ui_begin = now_us();
                 ImGui_ImplVulkan_NewFrame();
                 ImGui_ImplWin32_NewFrame();
+                if (frame.extent.width > 0U && frame.extent.height > 0U) {
+                    io.DisplaySize = ImVec2(static_cast<float>(frame.extent.width),
+                                            static_cast<float>(frame.extent.height));
+                    io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+                }
 
                 {
                     AETHER_HOT_PATH_SCOPE;
@@ -2062,6 +2183,10 @@ int run_application(const AppLaunchOptions& opts) {
             }
 
             const uint64_t t3_submit_done_us = now_us();
+            const bool has_valid_tracking_frame = !host_status.tracking_paused &&
+                                                  (skin_snap.frame_sequence != 0ULL) &&
+                                                  (skin_snap.t1_capture_us != 0ULL) &&
+                                                  ((skin_snap.frame.tracking_valid_flags & 0x07u) != 0u);
             if (has_avatar_ready && tl_val > 0ULL) {
                 const auto gout = npr_renderer.graph().outputs();
                 output::OutputRingSlot out_slot{};
@@ -2077,8 +2202,8 @@ int run_application(const AppLaunchOptions& opts) {
                 out_slot.nv12_y_image = gout.nv12_y_image;
                 out_slot.nv12_uv_image = gout.nv12_uv_image;
                 out_slot.has_bottom_up = render_req.need_bottom_up;
-                out_slot.tracking_active = (skin_snap.frame.tracking_valid_flags & 0x01u) != 0u;
-                out_slot.t1_capture_us = skin_snap.t1_capture_us;
+                out_slot.tracking_active = has_valid_tracking_frame;
+                out_slot.t1_capture_us = has_valid_tracking_frame ? skin_snap.t1_capture_us : 0ULL;
                 out_slot.t2_start_us = skin_snap.t2_start_us;
                 out_slot.t2_done_us = skin_snap.t2_done_us;
                 out_slot.t3_start_us = t3_start;
@@ -2090,7 +2215,8 @@ int run_application(const AppLaunchOptions& opts) {
             } else {
                 OutputWorkItem out_item{};
                 out_item.frame_sequence = skin_snap.frame_sequence;
-                out_item.t1_capture_us = skin_snap.t1_capture_us;
+                out_item.tracking_active = has_valid_tracking_frame;
+                out_item.t1_capture_us = has_valid_tracking_frame ? skin_snap.t1_capture_us : 0ULL;
                 out_item.t2_start_us = skin_snap.t2_start_us;
                 out_item.t2_done_us = skin_snap.t2_done_us;
                 out_item.t3_start_us = t3_start;

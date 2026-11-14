@@ -44,6 +44,14 @@ void imgui_arena_free_cb(void* ptr, void* user_data) noexcept {
     }
 }
 
+void* imgui_default_alloc_cb(size_t sz, void* /*user_data*/) noexcept {
+    return std::malloc(sz == 0 ? 1U : sz);
+}
+
+void imgui_default_free_cb(void* ptr, void* /*user_data*/) noexcept {
+    std::free(ptr);
+}
+
 void merge_icons_and_cjk(ImGuiIO& io, float px_size, float scale, const std::string& icon_font_path,
                          const std::string& jp_font_path, bool include_jp) {
     static const ImWchar kIconRanges[] = {
@@ -205,6 +213,11 @@ bool install_imgui_arena(ImGuiArenaAllocator& arena) noexcept {
     return true;
 }
 
+void restore_default_imgui_allocator() noexcept {
+    ImGui::SetAllocatorFunctions(&imgui_default_alloc_cb, &imgui_default_free_cb, nullptr);
+    ImGuiFreeType::SetAllocatorFunctions(&imgui_default_alloc_cb, &imgui_default_free_cb, nullptr);
+}
+
 void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_contrast) noexcept {
     set_high_contrast_theme(high_contrast);
     const PrecisionDarkTokens& t = tokens();
@@ -212,13 +225,16 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
 
     style = ImGuiStyle{};
 
+    // §2.2 global geometry metrics (scaled below by ScaleAllSizes(dpi))
     style.WindowPadding = ImVec2(t.panel_pad_px, t.panel_pad_px);
-    style.FramePadding = ImVec2(t.panel_pad_px, 3.0f);
-    style.ItemSpacing = ImVec2(t.panel_pad_px, t.unit_px);
-    style.ItemInnerSpacing = ImVec2(t.unit_px, t.unit_px);
+    style.FramePadding = ImVec2(t.frame_pad_x_px, t.frame_pad_y_px);
+    style.ItemSpacing = ImVec2(t.item_spacing_x_px, t.item_spacing_y_px);
+    style.ItemInnerSpacing = ImVec2(6.0f, t.unit_px);
+    style.CellPadding = ImVec2(4.0f, 3.0f);
     style.IndentSpacing = 14.0f;
     style.ScrollbarSize = t.scrollbar_px;
     style.GrabMinSize = 8.0f;
+    style.SeparatorTextBorderSize = 1.0f;
 
     const float border_px = hairline_px(scale);
     style.WindowBorderSize = border_px;
@@ -228,12 +244,13 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
     style.TabBorderSize = 0.0f;
 
     style.WindowRounding = t.radius_panel_px;
-    style.ChildRounding = t.radius_panel_px;
+    style.ChildRounding = t.radius_child_px;
     style.FrameRounding = t.radius_control_px;
     style.PopupRounding = t.radius_popover_px;
     style.ScrollbarRounding = t.radius_popover_px;
     style.GrabRounding = 2.0f;
-    style.TabRounding = t.radius_panel_px;
+    style.TabRounding = t.radius_control_px;
+    style.WindowMinSize = ImVec2(64.0f, 48.0f);
 
     style.DockingSeparatorSize = t.splitter_px;
     style.WindowMenuButtonPosition = ImGuiDir_None;
@@ -256,11 +273,7 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
 
     c[ImGuiCol_FrameBg] = t.bg_inset;
     c[ImGuiCol_FrameBgHovered] = t.bg_hover;
-    c[ImGuiCol_FrameBgActive] = t.bg_selected;
-
-    c[ImGuiCol_TitleBg] = t.bg_app;
-    c[ImGuiCol_TitleBgActive] = t.bg_app;
-    c[ImGuiCol_TitleBgCollapsed] = t.bg_app;
+    c[ImGuiCol_FrameBgActive] = t.bg_hover;
 
     c[ImGuiCol_MenuBarBg] = t.bg_app;
     c[ImGuiCol_ScrollbarBg] = t.bg_panel;
@@ -276,9 +289,10 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
     c[ImGuiCol_ButtonHovered] = t.bg_hover;
     c[ImGuiCol_ButtonActive] = t.accent_pressed;
 
-    c[ImGuiCol_Header] = t.bg_selected;
+    // Collapsing section headers use BgHeaderSection; selectable rows reuse Header* via PushStyleColor.
+    c[ImGuiCol_Header] = t.bg_raised;
     c[ImGuiCol_HeaderHovered] = t.bg_hover;
-    c[ImGuiCol_HeaderActive] = t.accent_pressed;
+    c[ImGuiCol_HeaderActive] = t.bg_selected;
 
     c[ImGuiCol_Separator] = t.border_default;
     c[ImGuiCol_SeparatorHovered] = t.accent;
@@ -288,13 +302,16 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
     c[ImGuiCol_ResizeGripHovered] = t.accent;
     c[ImGuiCol_ResizeGripActive] = t.accent_pressed;
 
-    c[ImGuiCol_Tab] = t.bg_app;
+    c[ImGuiCol_Tab] = t.bg_raised;
     c[ImGuiCol_TabHovered] = t.bg_hover;
     c[ImGuiCol_TabSelected] = t.bg_panel;
     c[ImGuiCol_TabSelectedOverline] = t.accent;
-    c[ImGuiCol_TabDimmed] = t.bg_app;
+    c[ImGuiCol_TabDimmed] = t.bg_raised;
     c[ImGuiCol_TabDimmedSelected] = t.bg_panel;
     c[ImGuiCol_TabDimmedSelectedOverline] = t.border_strong;
+    c[ImGuiCol_TitleBg] = t.bg_raised;
+    c[ImGuiCol_TitleBgActive] = t.bg_raised;
+    c[ImGuiCol_TitleBgCollapsed] = t.bg_raised;
 
     c[ImGuiCol_DockingPreview] = t.docking_preview;
     c[ImGuiCol_DockingEmptyBg] = t.bg_app;
@@ -311,8 +328,17 @@ void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale, bool high_co
     c[ImGuiCol_NavCursor] = t.accent;
 }
 
+namespace {
+uint32_t g_font_generation = 0;
+} // namespace
+
+uint32_t ui_font_generation() noexcept {
+    return g_font_generation;
+}
+
 UiFontSet load_precision_dark_fonts(const RuntimePaths& paths, float dpi_scale) {
     UiFontSet out{};
+    ++g_font_generation;
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
     io.Fonts->FontBuilderIO = ImGuiFreeType::GetBuilderForFreeType();
@@ -333,6 +359,8 @@ UiFontSet load_precision_dark_fonts(const RuntimePaths& paths, float dpi_scale) 
     cfg.PixelSnapH = true;
     cfg.FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LightHinting;
 
+    // Whole-pixel sizes: the FreeType builder truncates fractional sizes, so rounding here keeps the
+    // rendered size (and every `font_size / type_body_px` layout scale) predictable at any dpi.
     std::error_code ec;
     if (std::filesystem::exists(inter_regular, ec)) {
         const float body_px = std::round(t.type_body_px * scale);

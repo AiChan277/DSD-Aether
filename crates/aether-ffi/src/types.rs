@@ -638,3 +638,35 @@ pub struct AetherGraphPlanStats {
     /// Per-node primary live scalar value for pin/badge inspection (`0..active_node_count`).
     pub node_live_values: [f32; 256],
 }
+
+/// 64-byte aligned live per-node timing and per-output-pin value snapshot for Studio Z4 inspection (`§7.2`).
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub struct AetherGraphTelemetryReadout {
+    /// Expected `sizeof(AetherGraphTelemetryReadout)` filled by caller.
+    pub struct_size: u32,
+    /// Valid slot count in `node_ids` and `node_eval_ns` (`<= 256`).
+    pub active_node_count: u32,
+    /// Valid slot count in `pin_*` arrays (`<= 384`).
+    pub pin_readout_count: u32,
+    /// Non-zero once at least one graph evaluation tick has populated this snapshot.
+    pub valid: u32,
+    /// Monotonic evaluation tick counter.
+    pub eval_sequence: u64,
+    /// Total evaluation duration of the latest graph tick (nanoseconds).
+    pub total_eval_ns: u64,
+    /// Graph node IDs corresponding slot-for-slot to `node_eval_ns`.
+    pub node_ids: [u64; 256],
+    /// Per-node execution duration in nanoseconds.
+    pub node_eval_ns: [u32; 256],
+    /// Owning node ID for each output pin readout slot.
+    pub pin_node_ids: [u64; 384],
+    /// Four-lane summary payload (`[scalar, ...]`, `[x, y, z, w]`, `[rms_db, voiced, f1, f2]`, etc.).
+    pub pin_values: [[f32; 4]; 384],
+    /// Zero-based output pin index on `pin_node_ids[i]`.
+    pub pin_indices: [u8; 384],
+    /// Value classification tag (`AETHER_PIN_VALUE_*`).
+    pub pin_kinds: [u8; 384],
+    /// Explicit padding to maintain a 64-byte multiple (`13120` bytes total).
+    pub _reserved_tail: [u64; 4],
+}

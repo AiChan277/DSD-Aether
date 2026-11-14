@@ -57,6 +57,11 @@ struct DevShellAvatarView {
     double fill_ms{0.0};
     double gpu_upload_ms{0.0};
     bool wireframe_supported{false};
+    bool has_camera{false};
+    std::array<float, 3> camera_eye{0.716f, 1.110f, 1.961f};
+    std::array<float, 3> camera_target{0.0f, 0.90f, 0.0f};
+    float camera_fovy_rad{0.62f};
+    float gizmo_pivot_y{0.90f};
 };
 
 struct DevShellTrackingView {
@@ -172,15 +177,17 @@ struct DevShellOutputView {
 struct DevShellViewportActions {
     uint32_t desired_vp_w{960};
     uint32_t desired_vp_h{640};
-    float orbit_yaw_delta{0.0f};
-    float orbit_pitch_delta{0.0f};
-    float pan_dx{0.0f};
+    float orbit_yaw_delta{0.0f};   // radians, accumulated since last T3 frame
+    float orbit_pitch_delta{0.0f}; // radians
+    float pan_dx{0.0f};            // world units, scaled by camera distance on T3
     float pan_dy{0.0f};
-    float zoom_delta{0.0f};
+    float zoom_delta{0.0f};       // log-distance step: distance *= exp(-zoom_delta) (wheel up = closer)
+    float request_focal_mm{0.0f}; // > 0: apply focal length (24 mm sensor), keeping subject framing
     bool reset_camera{false};
     bool show_bones{true};
     bool wireframe{false};
     bool show_skeleton_heatmap{false};
+    bool show_rig_colliders{false};
     bool show_checkerboard{true};
     bool show_orbit_orb{true};
     bool rt_enabled{true};
@@ -189,12 +196,19 @@ struct DevShellViewportActions {
     uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11 (applied by T3 when it differs from the active one)
     float key_azimuth_deg{32.0f};
     float key_elevation_deg{26.0f};
+    float fill_azimuth_deg{-52.0f}; // Fill / Rim orbit rigidly with the key (ui::LightRigOffsets)
+    float fill_elevation_deg{12.0f};
+    float rim_azimuth_deg{148.0f};
+    float rim_elevation_deg{22.0f};
     float key_intensity{1.85f};
     float fill_intensity{0.55f};
     float rim_intensity{1.15f};
     float live2d_flatness{0.75f};
     float bloom_intensity{0.28f};
     float outline_scale{1.0f};
+    std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
+    float avatar_rot_y_deg{0.0f};
+    float avatar_scale{1.0f};
     bool lighting_dirty{false};
     bool request_bake_face_sdf{false};
     bool request_denoiser_apply{false};

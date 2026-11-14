@@ -41,7 +41,8 @@ use aether_ffi::{
     AETHER_HOST_EVT_HOTKEY_EVENT, AETHER_HOST_EVT_OSC_PARAM, AETHER_HOST_EVT_PLUGIN_CONSENT_REQ,
     AETHER_HOST_EVT_PLUGIN_LOADED, AETHER_HOST_EVT_PLUGIN_TRAP, AETHER_HOST_EVT_PROJECT_LOADED,
     AETHER_HOST_EVT_PROJECT_SAVED, AETHER_HOST_FLAG_OSC_BIND_ANY, AETHER_HOST_FLAG_WS_ENABLED,
-    AetherGraphOutputs, AetherGraphPlanStats, AetherHostCommand, AetherHostConfig, AetherHostEvent,
+    AetherGraphOutputs, AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand,
+    AetherHostConfig, AetherHostEvent,
 };
 use futures_util::future::{Either, select};
 use serde::Serialize;
@@ -841,6 +842,15 @@ impl PluginHost {
             lim,
             self.plugin_count.load(Ordering::Acquire),
         );
+        Ok(())
+    }
+
+    /// Populates 64-byte aligned per-node nanosecond timings and output pin values without allocating (`§7.2`).
+    pub fn get_telemetry_readout(
+        &self,
+        out: &mut AetherGraphTelemetryReadout,
+    ) -> Result<(), HostError> {
+        self.exchange.fill_telemetry_readout(out);
         Ok(())
     }
 

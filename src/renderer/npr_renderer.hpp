@@ -68,6 +68,7 @@ class NprRenderer {
     [[nodiscard]] LightingRig& lighting() noexcept { return lighting_; }
     [[nodiscard]] const LightingRig& lighting() const noexcept { return lighting_; }
     [[nodiscard]] uint64_t frame_timeline_value() const noexcept { return timeline_counter_; }
+    [[nodiscard]] bool wireframe_supported() const noexcept { return graph_.wireframe_supported(); }
 
   private:
     struct CriticalCmdSlot {

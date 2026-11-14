@@ -22,8 +22,18 @@ struct FrameStamps {
     uint64_t render_gpu_us{0};
     uint64_t hot_path_violations{0};
 
+    static constexpr uint64_t kMaxValidM2pUs = 5'000'000ULL; // 5000 ms sanity bound
+
+    [[nodiscard]] bool has_valid_m2p() const noexcept {
+        if (t1_capture_us == 0ULL || t4_output_us <= t1_capture_us) {
+            return false;
+        }
+        const uint64_t diff_us = t4_output_us - t1_capture_us;
+        return diff_us <= kMaxValidM2pUs;
+    }
+
     [[nodiscard]] float motion_to_photon_ms() const noexcept {
-        if (t4_output_us <= t1_capture_us) {
+        if (!has_valid_m2p()) {
             return 0.0f;
         }
         return static_cast<float>(t4_output_us - t1_capture_us) * 0.001f;
@@ -64,6 +74,8 @@ class RollingLatencyStats {
 
     void reset() noexcept;
     void add_sample_ms(float ms) noexcept;
+    bool add_m2p_sample(uint64_t capture_timestamp_us, uint64_t present_timestamp_us,
+                        bool tracking_valid = true) noexcept;
     [[nodiscard]] LatencySummary compute_summary() const noexcept;
 
   private:

@@ -20,6 +20,8 @@ enum class TopMenuAction : uint8_t {
     SaveProjectAs,
     ImportAvatar,
     ResetLayout,
+    Undo,
+    Redo,
 };
 
 /**
@@ -28,9 +30,9 @@ enum class TopMenuAction : uint8_t {
  */
 class TelemetryBar {
   public:
-    TopMenuAction draw_top_bar(StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi, bool ffi_layout_ok,
-                               const StudioHostStatus& host_status, const UndoStack& undo, const UiFontSet& fonts,
-                               float dpi_scale, StudioActions& actions);
+    TopMenuAction draw_top_bar(double now_s, StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi,
+                               bool ffi_layout_ok, const StudioHostStatus& host_status, const UndoStack& undo,
+                               const UiFontSet& fonts, float dpi_scale, StudioActions& actions);
 
     void draw_bottom_bar(double now_s, const TelemetrySnapshot& telemetry, const ImGuiArenaAllocator& arena,
                          const rhi::RhiDevice& rhi, const DevShellTrackingView& tracking,
@@ -38,6 +40,7 @@ class TelemetryBar {
                          const UiFontSet& fonts, float dpi_scale);
 
   private:
+    double on_air_since_s_{-1.0};
     double last_sample_s_{-1.0};
     double over_budget_since_s_{-1.0};
     double ok_since_s_{0.0};
@@ -47,7 +50,7 @@ class TelemetryBar {
     std::array<char, 64> t2_buf_{"T2: --"};
     std::array<char, 64> t3_buf_{"T3: --"};
     std::array<char, 64> t4_buf_{"T4: --"};
-    std::array<char, 64> m2p_buf_{"M2P: --"};
+    std::array<char, 64> m2p_buf_{"M2P -- / -- ms"};
     std::array<char, 64> dsp_buf_{"DSP: --"};
     std::array<char, 64> ui_buf_{"UI: --"};
 };

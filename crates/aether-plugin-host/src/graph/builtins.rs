@@ -187,7 +187,7 @@ pub fn resolve_ports(kind: NodeKind, node: &GraphNode) -> Vec<ResolvedPort> {
             p_out("ep_id", ValueType::Float),
         ],
         NodeKind::DspAudio => vec![
-            p_out("visemes", ValueType::VisemeSet),
+            p_out("audio", ValueType::AudioFrame),
             p_out("rms_db", ValueType::Float),
             p_out("voice_active", ValueType::Bool),
         ],
@@ -236,9 +236,9 @@ pub fn resolve_ports(kind: NodeKind, node: &GraphNode) -> Vec<ResolvedPort> {
         ],
 
         NodeKind::FormantLipSync => vec![
-            p_in("visemes", ValueType::VisemeSet),
+            p_in("audio", ValueType::AudioFrame),
             p_in("gain", ValueType::Float),
-            p_out("expressions", ValueType::ExprSet),
+            p_out("visemes", ValueType::VisemeSet),
         ],
         NodeKind::ExpressionTrigger => vec![
             p_in("trigger", ValueType::Event),

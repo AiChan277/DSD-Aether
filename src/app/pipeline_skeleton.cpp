@@ -481,6 +481,10 @@ void PipelineSkeleton::t2_entry() {
             SkinningSnapshot& snap = skinning_buffer_.staging();
             if (sim_engine_) {
                 sim_engine_->tick(latest_pose, dsp_pkt, graph_out, t2_start, -1.0f, sim_cfg, snap.frame);
+                sim_engine_->export_spring_overlay(
+                    snap.spring_colliders.data(), static_cast<uint32_t>(snap.spring_colliders.size()),
+                    snap.spring_collider_count, snap.spring_segments.data(),
+                    static_cast<uint32_t>(snap.spring_segments.size()), snap.spring_segment_count);
             }
             const uint64_t t2_done = now_us();
             snap.frame.sim_tick_ms = static_cast<float>(t2_done - t2_start) * 0.001f;
@@ -533,7 +537,7 @@ void PipelineSkeleton::t4_entry() {
 
     auto record_telemetry = [&](uint64_t frame_sequence, uint64_t t1_capture_us, uint64_t t2_start_us,
                                 uint64_t t2_done_us, uint64_t t3_start_us, uint64_t t3_submit_us, uint64_t done_us,
-                                uint64_t ui_cpu_us) noexcept {
+                                uint64_t ui_cpu_us, bool tracking_active) noexcept {
         const uint64_t total_t4 = t4_frames_.fetch_add(1, std::memory_order_acq_rel) + 1ULL;
 
         FrameStamps stamps{};
@@ -547,7 +551,8 @@ void PipelineSkeleton::t4_entry() {
         stamps.ui_cpu_us = ui_cpu_us;
         stamps.hot_path_violations = HotPathGuard::total_violations();
 
-        m2p_stats.add_sample_ms(stamps.motion_to_photon_ms());
+        const bool valid_m2p = tracking_active && (frame_sequence != 0ULL);
+        (void)m2p_stats.add_m2p_sample(t1_capture_us, done_us, valid_m2p);
         sim_stats.add_sample_ms(stamps.sim_ms());
         render_stats.add_sample_ms(stamps.render_cpu_ms());
         ui_stats.add_sample_ms(stamps.ui_cpu_ms());
@@ -607,7 +612,7 @@ void PipelineSkeleton::t4_entry() {
                 done_us = now_us();
             }
             record_telemetry(slot.frame_sequence, slot.t1_capture_us, slot.t2_start_us, slot.t2_done_us,
-                             slot.t3_start_us, slot.t3_submit_us, done_us, slot.ui_cpu_us);
+                             slot.t3_start_us, slot.t3_submit_us, done_us, slot.ui_cpu_us, slot.tracking_active);
             pending_output_slots_.fetch_sub(1u, std::memory_order_acq_rel);
         }
 
@@ -615,7 +620,7 @@ void PipelineSkeleton::t4_entry() {
         while (output_ring_.try_pop(work)) {
             const uint64_t done_us = now_us();
             record_telemetry(work.frame_sequence, work.t1_capture_us, work.t2_start_us, work.t2_done_us,
-                             work.t3_start_us, work.t3_submit_us, done_us, work.ui_cpu_us);
+                             work.t3_start_us, work.t3_submit_us, done_us, work.ui_cpu_us, work.tracking_active);
         }
     }
 

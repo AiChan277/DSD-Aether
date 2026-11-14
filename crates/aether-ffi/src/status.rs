@@ -269,3 +269,28 @@ pub const AETHER_HOST_EVT_GRAPH_BUDGET_WARN: u32 = 11;
 
 /// Maximum per-node live stats slots exposed by `AetherGraphPlanStats`.
 pub const AETHER_GRAPH_MAX_DEBUG_NODES: usize = 256;
+/// Maximum per-output-pin live readout slots exposed by `AetherGraphTelemetryReadout`.
+pub const AETHER_GRAPH_MAX_DEBUG_PINS: usize = 384;
+
+/// Compact live pin summary value kind: empty / unavailable.
+pub const AETHER_PIN_VALUE_INVALID: u8 = 0;
+/// Compact live pin summary value kind: scalar float (`[val, 0, 0, 0]`).
+pub const AETHER_PIN_VALUE_FLOAT: u8 = 1;
+/// Compact live pin summary value kind: boolean (`[0.0 | 1.0, 0, 0, 0]`).
+pub const AETHER_PIN_VALUE_BOOL: u8 = 2;
+/// Compact live pin summary value kind: vec3 (`[x, y, z, 0]`).
+pub const AETHER_PIN_VALUE_VEC3: u8 = 3;
+/// Compact live pin summary value kind: quat / color (`[x, y, z, w]`).
+pub const AETHER_PIN_VALUE_QUAT: u8 = 4;
+/// Compact live pin summary value kind: transform (`[px, py, pz, scale]`).
+pub const AETHER_PIN_VALUE_TRANSFORM: u8 = 5;
+/// Compact live pin summary value kind: pose stream (`[head_x, head_y, head_z, root_conf]`).
+pub const AETHER_PIN_VALUE_POSE: u8 = 6;
+/// Compact live pin summary value kind: expression set (`[max_w, active_count, jaw_open, blink_l]`).
+pub const AETHER_PIN_VALUE_EXPR: u8 = 7;
+/// Compact live pin summary value kind: 5-viseme set (`[max_w, dominant_idx, sum, a_w]`).
+pub const AETHER_PIN_VALUE_VISEME: u8 = 8;
+/// Compact live pin summary value kind: DSP audio frame (`[rms_db, voiced, f1_hz, f2_hz]`).
+pub const AETHER_PIN_VALUE_AUDIO: u8 = 9;
+/// Compact live pin summary value kind: trigger event counter (`[fired, 0, 0, 0]`).
+pub const AETHER_PIN_VALUE_EVENT: u8 = 10;

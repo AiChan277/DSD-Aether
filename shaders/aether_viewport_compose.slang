@@ -58,12 +58,21 @@ HeatmapVsOut vs_heatmap(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     float len = max(length(delta), 1e-4);
     float2 dir = delta / len;
     float2 perp = float2(-dir.y, dir.x);
-    float width_px = max(b.p0_ndc_weight.w, 3.0);
+    uint cat = uint(b.p1_ndc_pad.z);
+    float min_w = (cat >= 3u) ? 1.5 : 3.0;
+    float width_px = max(b.p0_ndc_weight.w, min_w);
     float2 ndc_offset = perp * (c.y * width_px * fg.viewport_size.zw);
 
     o.clip_pos = float4(lerp(p0, p1, c.x) + ndc_offset, 0.0, 1.0);
-    uint cat = uint(b.p1_ndc_pad.z);
-    if (cat >= 2u) {
+    if (cat >= 6u) {
+        o.color = float4(251.0 / 255.0, 146.0 / 255.0, 60.0 / 255.0, 1.0); // Spring chain active contact (#FB923C)
+    } else if (cat == 5u) {
+        o.color = float4(56.0 / 255.0, 189.0 / 255.0, 248.0 / 255.0, 0.92); // Spring chain rest (#38BDF8)
+    } else if (cat == 4u) {
+        o.color = float4(249.0 / 255.0, 115.0 / 255.0, 22.0 / 255.0, 1.0); // Collider contact Orange/Red (#F97316)
+    } else if (cat == 3u) {
+        o.color = float4(6.0 / 255.0, 182.0 / 255.0, 212.0 / 255.0, 1.0); // Collider rest Cyan (#06B6D4)
+    } else if (cat == 2u) {
         o.color = float4(57.0 / 255.0, 135.0 / 255.0, 229.0 / 255.0, 1.0); // #3987E5
     } else if (cat == 1u) {
         o.color = float4(201.0 / 255.0, 133.0 / 255.0, 0.0 / 255.0, 1.0); // #C98500
@@ -81,7 +90,7 @@ float4 ps_heatmap(HeatmapVsOut i) : SV_Target0 {
         if (frac(i.edge_uv.x * 6.0) > 0.62) {
             discard;
         }
-    } else if (i.category >= 2u) {
+    } else if (i.category == 2u) {
         if (frac(i.edge_uv.x * 12.0) > 0.42) {
             discard;
         }

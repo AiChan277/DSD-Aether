@@ -223,4 +223,10 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
     out_skinning.stamps.t1_capture_us = raw_tracking.capture_timestamp_us;
 }
 
+void SimEngine::export_spring_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,
+                                      SpringSegmentOverlay* out_segs, uint32_t max_segs,
+                                      uint32_t& out_seg_count) const noexcept {
+    spring_.export_overlay(out_cols, max_cols, out_col_count, out_segs, max_segs, out_seg_count, bone_pos_ws_);
+}
+
 } // namespace aether::animation

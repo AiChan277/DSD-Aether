@@ -235,7 +235,8 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
             } else if (step_ == 1) {
                 const std::array<const char*, 5> ep_names = {"Auto", "Tier 1 NPU (OpenVINO)", "Tier 2A dGPU (DirectML)",
                                                              "Tier 2B iGPU (DirectML)", "Tier 3 CPU"};
-                const std::array<const char*, 5> dn_names = {"Auto", "Built-in SVGF-Lite", "NRD", "OIDN", "FidelityFX"};
+                const std::array<const char*, 6> dn_names = {"Auto",           "Built-in SVGF-Lite", "NVIDIA NRD SIGMA",
+                                                             "Intel OIDN XMX", "AMD FidelityFX",     "NVIDIA OptiX"};
                 const std::array<const char*, 4> res_names = {"1280x720", "1920x1080", "2560x1440", "3840x2160"};
 
                 ImGui::TextColored(t.text_primary, "%s", tr("Recommended Live Configuration:"));

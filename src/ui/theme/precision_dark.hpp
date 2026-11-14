@@ -71,12 +71,18 @@ struct UiFontSet {
 /** Installs custom ImGui allocator callbacks before `ImGui::CreateContext()`. */
 bool install_imgui_arena(ImGuiArenaAllocator& arena) noexcept;
 
+/** Restores standard CRT `malloc`/`free` callbacks after `ImGui::DestroyContext()`. */
+void restore_default_imgui_allocator() noexcept;
+
 /** Applies Precision Dark visual style tokens cleanly onto `style` (`high_contrast` & `dpi_scale` safe to reapply). */
 void apply_precision_dark_style(ImGuiStyle& style, float dpi_scale = 1.0f, bool high_contrast = false) noexcept;
 
 /** Loads `Inter-*-tnum.ttf` + `JetBrainsMono-Regular.ttf` + merged `AetherIcons-Regular.ttf` + `NotoSansJP-Subset.ttf`.
  */
 UiFontSet load_precision_dark_fonts(const RuntimePaths& paths, float dpi_scale = 1.0f);
+
+/** Incremented by every `load_precision_dark_fonts()` call; text-metric caches key on it. */
+[[nodiscard]] uint32_t ui_font_generation() noexcept;
 
 /** Draws subtle multi-layer elevation shadow for popovers/modals/palette (`§12.3.4`). */
 void draw_elevation_shadow(ImDrawList* draw_list, ImVec2 p_min, ImVec2 p_max, float rounding) noexcept;

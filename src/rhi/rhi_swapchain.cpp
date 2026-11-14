@@ -51,6 +51,16 @@ RhiSwapchain::~RhiSwapchain() {
 
 Expected<void> RhiSwapchain::init(RhiDevice& device, void* hinstance, void* hwnd, uint32_t width, uint32_t height) {
     device_ = &device;
+    hwnd_ = hwnd;
+#if defined(_WIN32)
+    if (hwnd_ != nullptr && (width == 0U || height == 0U)) {
+        RECT cr{};
+        if (::GetClientRect(static_cast<HWND>(hwnd_), &cr) != FALSE) {
+            width = static_cast<uint32_t>(std::max<LONG>(0L, cr.right - cr.left));
+            height = static_cast<uint32_t>(std::max<LONG>(0L, cr.bottom - cr.top));
+        }
+    }
+#endif
     desired_w_ = width > 0 ? width : 1280U;
     desired_h_ = height > 0 ? height : 720U;
 
@@ -177,11 +187,30 @@ Expected<void> RhiSwapchain::recreate_swapchain_only(uint32_t width, uint32_t he
     color_space_ = chosen_fmt.colorSpace;
     present_mode_ = choose_present_mode(modes);
 
-    if (caps.currentExtent.width != UINT32_MAX) {
-        extent_ = caps.currentExtent;
-    } else {
+#if defined(_WIN32)
+    if (hwnd_ != nullptr) {
+        RECT cr{};
+        if (::GetClientRect(static_cast<HWND>(hwnd_), &cr) != FALSE) {
+            const uint32_t phys_w = static_cast<uint32_t>(std::max<LONG>(0L, cr.right - cr.left));
+            const uint32_t phys_h = static_cast<uint32_t>(std::max<LONG>(0L, cr.bottom - cr.top));
+            if (phys_w > 0U && phys_h > 0U) {
+                width = phys_w;
+                height = phys_h;
+                desired_w_ = phys_w;
+                desired_h_ = phys_h;
+            }
+        }
+    }
+#endif
+
+    if (width > 0U && height > 0U) {
         extent_.width = std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width);
         extent_.height = std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height);
+    } else if (caps.currentExtent.width != UINT32_MAX) {
+        extent_ = caps.currentExtent;
+    } else {
+        extent_.width = std::clamp(desired_w_, caps.minImageExtent.width, caps.maxImageExtent.width);
+        extent_.height = std::clamp(desired_h_, caps.minImageExtent.height, caps.maxImageExtent.height);
     }
 
     uint32_t req_images = caps.minImageCount + 1U;
@@ -321,11 +350,23 @@ void RhiSwapchain::begin_swapchain_pass(const AcquiredFrame& frame, const float 
     color_att.clearValue.color.float32[3] = clear_rgba[3];
 
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = VkRect2D{{0, 0}, extent_};
+    ri.renderArea = VkRect2D{{0, 0}, frame.extent};
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &color_att;
     vkCmdBeginRendering(frame.cmd, &ri);
+
+    VkViewport vp{};
+    vp.x = 0.0f;
+    vp.y = 0.0f;
+    vp.width = static_cast<float>(frame.extent.width);
+    vp.height = static_cast<float>(frame.extent.height);
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(frame.cmd, 0, 1, &vp);
+
+    VkRect2D scissor{{0, 0}, frame.extent};
+    vkCmdSetScissor(frame.cmd, 0, 1, &scissor);
 }
 
 Expected<AcquiredFrame> RhiSwapchain::begin_frame(const float clear_rgba[4]) {

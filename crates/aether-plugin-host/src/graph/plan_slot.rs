@@ -3,9 +3,12 @@
 #![allow(unsafe_code)]
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use aether_ffi::{AETHER_GRAPH_MAX_DEBUG_NODES, AETHER_INVALID_INDEX, AetherGraphPlanStats};
+use aether_ffi::{
+    AETHER_GRAPH_MAX_DEBUG_NODES, AETHER_GRAPH_MAX_DEBUG_PINS, AETHER_INVALID_INDEX,
+    AETHER_PIN_VALUE_INVALID, AetherGraphPlanStats, AetherGraphTelemetryReadout,
+};
 
 use crate::graph::compiler::CompiledGraphPlan;
 
@@ -32,8 +35,16 @@ pub struct PlanExchange {
     budget_warn: AtomicU32,
     consecutive_over_budget: AtomicU32,
     eval_count: AtomicU64,
+    total_eval_ns: AtomicU64,
+    node_ids: [AtomicU64; AETHER_GRAPH_MAX_DEBUG_NODES],
+    node_eval_ns: [AtomicU32; AETHER_GRAPH_MAX_DEBUG_NODES],
     node_eval_us_bits: [AtomicU32; AETHER_GRAPH_MAX_DEBUG_NODES],
     node_live_val_bits: [AtomicU32; AETHER_GRAPH_MAX_DEBUG_NODES],
+    pin_readout_count: AtomicU32,
+    pin_node_ids: [AtomicU64; AETHER_GRAPH_MAX_DEBUG_PINS],
+    pin_indices: [AtomicU8; AETHER_GRAPH_MAX_DEBUG_PINS],
+    pin_kinds: [AtomicU8; AETHER_GRAPH_MAX_DEBUG_PINS],
+    pin_values_bits: [[AtomicU32; 4]; AETHER_GRAPH_MAX_DEBUG_PINS],
 }
 
 impl PlanExchange {
@@ -57,8 +68,23 @@ impl PlanExchange {
             budget_warn: AtomicU32::new(0),
             consecutive_over_budget: AtomicU32::new(0),
             eval_count: AtomicU64::new(0),
+            total_eval_ns: AtomicU64::new(0),
+            node_ids: core::array::from_fn(|_| AtomicU64::new(0)),
+            node_eval_ns: core::array::from_fn(|_| AtomicU32::new(0)),
             node_eval_us_bits: core::array::from_fn(|_| AtomicU32::new(0)),
             node_live_val_bits: core::array::from_fn(|_| AtomicU32::new(0)),
+            pin_readout_count: AtomicU32::new(0),
+            pin_node_ids: core::array::from_fn(|_| AtomicU64::new(0)),
+            pin_indices: core::array::from_fn(|_| AtomicU8::new(0)),
+            pin_kinds: core::array::from_fn(|_| AtomicU8::new(AETHER_PIN_VALUE_INVALID)),
+            pin_values_bits: core::array::from_fn(|_| {
+                [
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                    AtomicU32::new(0),
+                ]
+            }),
         }
     }
 
@@ -159,14 +185,33 @@ impl PlanExchange {
             let us = f(plan);
 
             let count = plan.node_ids.len().min(AETHER_GRAPH_MAX_DEBUG_NODES);
-            self.active_node_count
-                .store(u32::try_from(count).unwrap_or(0), Ordering::Relaxed);
             for idx in 0..count {
+                self.node_ids[idx].store(plan.node_ids[idx], Ordering::Relaxed);
+                self.node_eval_ns[idx].store(plan.node_eval_ns[idx], Ordering::Relaxed);
                 self.node_eval_us_bits[idx]
                     .store(plan.node_eval_us[idx].to_bits(), Ordering::Relaxed);
                 self.node_live_val_bits[idx]
                     .store(plan.node_live_values[idx].to_bits(), Ordering::Relaxed);
             }
+            self.active_node_count
+                .store(u32::try_from(count).unwrap_or(0), Ordering::Release);
+
+            let pin_count = plan.output_pins.len().min(AETHER_GRAPH_MAX_DEBUG_PINS);
+            for idx in 0..pin_count {
+                let meta = plan.output_pins[idx];
+                self.pin_node_ids[idx].store(meta.node_id, Ordering::Relaxed);
+                self.pin_indices[idx].store(meta.pin_idx, Ordering::Relaxed);
+                self.pin_kinds[idx].store(plan.pin_kinds[idx], Ordering::Relaxed);
+                let vals = plan.pin_values[idx];
+                for lane in 0..4 {
+                    self.pin_values_bits[idx][lane]
+                        .store(vals[lane].to_bits(), Ordering::Relaxed);
+                }
+            }
+            self.pin_readout_count
+                .store(u32::try_from(pin_count).unwrap_or(0), Ordering::Release);
+            self.total_eval_ns
+                .store(plan.last_total_eval_ns, Ordering::Release);
 
             let over = us > 100.0;
             let streak = if over {
@@ -235,6 +280,54 @@ impl PlanExchange {
             out.node_eval_us[idx] = 0.0;
             out.node_live_values[idx] = 0.0;
         }
+    }
+
+    /// Populates `AetherGraphTelemetryReadout` without blocking `T2` or allocating memory (`§7.2`).
+    pub fn fill_telemetry_readout(&self, out: &mut AetherGraphTelemetryReadout) {
+        let eval_seq = self.eval_count.load(Ordering::Acquire);
+        let active_nodes = self.active_node_count.load(Ordering::Acquire);
+        let pin_cnt = self.pin_readout_count.load(Ordering::Acquire);
+        let total_ns = self.total_eval_ns.load(Ordering::Acquire);
+
+        out.struct_size =
+            u32::try_from(core::mem::size_of::<AetherGraphTelemetryReadout>()).unwrap_or(13120);
+        out.active_node_count = active_nodes;
+        out.pin_readout_count = pin_cnt;
+        out.valid = u32::from(eval_seq > 0);
+        out.eval_sequence = eval_seq;
+        out.total_eval_ns = total_ns;
+
+        let n_count = usize::try_from(active_nodes)
+            .unwrap_or(0)
+            .min(AETHER_GRAPH_MAX_DEBUG_NODES);
+        for idx in 0..n_count {
+            out.node_ids[idx] = self.node_ids[idx].load(Ordering::Relaxed);
+            out.node_eval_ns[idx] = self.node_eval_ns[idx].load(Ordering::Relaxed);
+        }
+        for idx in n_count..AETHER_GRAPH_MAX_DEBUG_NODES {
+            out.node_ids[idx] = 0;
+            out.node_eval_ns[idx] = 0;
+        }
+
+        let p_count = usize::try_from(pin_cnt)
+            .unwrap_or(0)
+            .min(AETHER_GRAPH_MAX_DEBUG_PINS);
+        for idx in 0..p_count {
+            out.pin_node_ids[idx] = self.pin_node_ids[idx].load(Ordering::Relaxed);
+            out.pin_indices[idx] = self.pin_indices[idx].load(Ordering::Relaxed);
+            out.pin_kinds[idx] = self.pin_kinds[idx].load(Ordering::Relaxed);
+            for lane in 0..4 {
+                out.pin_values[idx][lane] =
+                    f32::from_bits(self.pin_values_bits[idx][lane].load(Ordering::Relaxed));
+            }
+        }
+        for idx in p_count..AETHER_GRAPH_MAX_DEBUG_PINS {
+            out.pin_node_ids[idx] = 0;
+            out.pin_indices[idx] = 0;
+            out.pin_kinds[idx] = AETHER_PIN_VALUE_INVALID;
+            out.pin_values[idx] = [0.0; 4];
+        }
+        out._reserved_tail = [0; 4];
     }
 }
 

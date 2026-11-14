@@ -56,6 +56,28 @@ struct SpringJointDesc {
     uint32_t collider_mask{0};
 };
 
+/** Zero-alloc collider snapshot for T3 Rigging wireframe overlay (`#06B6D4` rest / `#F97316` contact). */
+inline constexpr uint32_t kMaxOverlayColliders = 32;
+inline constexpr uint32_t kMaxOverlaySpringSegments = kMaxSpringJoints;
+
+struct SpringColliderOverlay {
+    float p0[3]{};
+    float radius{0.0f};
+    float p1[3]{};
+    uint8_t shape{0};      // 0 = sphere, 1 = capsule
+    uint8_t in_contact{0}; // 1 when active collision contact occurred during the last substep
+    uint8_t pad[2]{};
+};
+
+/** Zero-alloc SpringBone chain segment snapshot (head -> tail in avatar model space). */
+struct SpringSegmentOverlay {
+    float head[3]{};
+    float hit_radius{0.015f};
+    float tail[3]{};
+    uint8_t in_contact{0};
+    uint8_t pad[3]{};
+};
+
 /**
  * Cache-lined SoA SpringBone Verlet simulator (`§9.6`, 60/120 Hz fixed sub-step).
  * Dispatches AVX-512 (16-wide), AVX2+FMA (8-wide), or exact scalar fallback (`<= 1e-5 m` parity).
@@ -85,8 +107,16 @@ class alignas(64) SpringBoneSimulator {
 
     [[nodiscard]] uint32_t joint_count() const noexcept { return count_; }
     [[nodiscard]] uint32_t collider_count() const noexcept { return colliders_.count; }
+    [[nodiscard]] bool collider_in_contact(uint32_t idx) const noexcept {
+        return idx < colliders_.count && active_contact_[idx] != 0;
+    }
     [[nodiscard]] SimdPath active_simd_path() const noexcept { return detected_path_; }
     [[nodiscard]] uint32_t teleport_reset_count() const noexcept { return teleport_resets_; }
+
+    /** Exports world/avatar-space collider and physics chain snapshots without heap allocation (`HR-01`). */
+    void export_overlay(SpringColliderOverlay* out_cols, uint32_t max_cols, uint32_t& out_col_count,
+                        SpringSegmentOverlay* out_segs, uint32_t max_segs, uint32_t& out_seg_count,
+                        const std::array<Vec3, kMaxBones>& bone_pos_ws) const noexcept;
 
     // Direct accessors for unit-testing tail position parity:
     [[nodiscard]] Vec3 joint_tail_pos(uint32_t idx) const noexcept {
@@ -107,7 +137,10 @@ class alignas(64) SpringBoneSimulator {
     uint32_t teleport_resets_{0};
     bool state_initialized_{false};
     Vec3 prev_root_pos_{};
+    Vec3 last_center_pos_{};
     SimdPath detected_path_{SimdPath::Scalar};
+    std::array<uint8_t, kMaxSpringColliders> active_contact_{};
+    std::array<uint8_t, kMaxSpringJoints> joint_contact_{};
 
     // SoA joint arrays aligned for 512-bit SIMD loads:
     alignas(64) float curr_x_[kMaxSpringJoints]{};

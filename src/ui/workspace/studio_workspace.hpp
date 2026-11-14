@@ -29,6 +29,11 @@ namespace aether::ui {
  * single-source `ParamStore`, 200-entry `UndoStack`, `KeymapRegistry`, Z1-Z5 modular panels,
  * `Ctrl+K` Command Palette, 5-step Hardware Optimizer Wizard, and non-blocking `ToastStack`.
  */
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 class StudioWorkspace {
   public:
     static constexpr size_t kLogRingDisplayCap = 128;
@@ -88,6 +93,8 @@ class StudioWorkspace {
     void load_mode_layout_ini(StudioMode mode);
     void sync_params_to_actions(StudioActions& actions) noexcept;
     void handle_global_shortcuts(double now_s, StudioActions& actions);
+    void update_expression_ramps(double now_s, StudioActions& actions) noexcept;
+    void ensure_broadcast_outputs_enabled(double now_s);
     void execute_palette_command(const PaletteInvokeResult& res, double now_s, StudioActions& actions);
     void save_app_config_files();
     static void on_log_drained(const LogRecord& rec, void* user) noexcept;
@@ -106,6 +113,11 @@ class StudioWorkspace {
     bool layout_maximized_{false};
     std::array<char, 48> maximized_window_{};
     std::array<char, 48> last_hovered_zone_window_{"Viewport"};
+    std::array<char, 48> focus_tab_after_layout_{};
+
+    // Hermite ramp progress (0..1) per quick-expression slot
+    std::array<float, StudioActions::kQuickExpressionSlots> expr_ramp_u_{};
+    double last_ramp_s_{0.0};
 
     ParamStore params_{};
     uint64_t synced_param_epoch_{0};
@@ -143,5 +155,9 @@ class StudioWorkspace {
 
     bool demo_bones_seeded_{false};
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 } // namespace aether::ui

@@ -97,6 +97,8 @@ struct GpuFrameGlobals {
     uint4 gbuffer_extra_ids[2];
     uint4 history_ids;
     uint4 output_storage_ids;
+    float4 avatar_pos_scale;  // xyz = AvatarRoot position, w = uniform scale
+    float4 avatar_rot_sincos; // x = cos(yaw), y = sin(yaw), z = yaw_rad, w = 1
     GpuLight lights[8];
 };
 

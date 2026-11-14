@@ -151,6 +151,7 @@ class RhiDevice {
     [[nodiscard]] const SelectedGpuInfo& gpu_info() const noexcept { return gpu_info_; }
     [[nodiscard]] const RhiExtDispatch& ext() const noexcept { return ext_; }
     [[nodiscard]] bool rt_supported() const noexcept { return gpu_info_.rt_enabled; }
+    [[nodiscard]] bool fill_mode_non_solid_supported() const noexcept { return gpu_info_.fill_mode_non_solid; }
 
     [[nodiscard]] bool validation_active() const noexcept { return validation_active_; }
     [[nodiscard]] bool sync_validation_active() const noexcept { return sync_validation_active_; }

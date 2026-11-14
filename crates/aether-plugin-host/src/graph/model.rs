@@ -26,6 +26,9 @@ pub enum ValueType {
     ExprSet,
     /// 5-channel DSP lip-sync visemes `A, I, U, E, O`.
     VisemeSet,
+    /// DSP audio frame carrying envelope, voiced flag, and formant F1/F2 parameters.
+    #[serde(alias = "AudioSpectrum")]
+    AudioFrame,
     /// Linear RGBA color `[r, g, b, a]`.
     Color,
     /// Compile-time configuration parameter only (forbidden on runtime data wires).
@@ -39,7 +42,7 @@ impl ValueType {
         if matches!((from, to), (Self::String, _) | (_, Self::String)) {
             return false;
         }
-        if matches!(
+        matches!(
             (from, to),
             (Self::Event, Self::Event)
                 | (Self::Bool | Self::Float, Self::Bool | Self::Float)
@@ -47,13 +50,11 @@ impl ValueType {
                 | (Self::Quat, Self::Quat)
                 | (Self::Transform, Self::Transform)
                 | (Self::Pose, Self::Pose)
-                | (Self::ExprSet, Self::ExprSet)
+                | (Self::ExprSet | Self::VisemeSet, Self::ExprSet)
                 | (Self::VisemeSet, Self::VisemeSet)
+                | (Self::AudioFrame, Self::AudioFrame)
                 | (Self::Color, Self::Color)
-        ) {
-            return true;
-        }
-        false
+        )
     }
 }
 
@@ -85,7 +86,8 @@ pub struct GraphNode {
     /// Stable user-assigned node identifier (`>= 1` recommended; preserved across hot swap).
     pub id: u64,
     /// Versioned node type identifier (e.g. `"aether.ik.visibility_first@1"`).
-    #[serde(rename = "type")]
+    /// Serialized as `"type"`; `"type_id"` is accepted for documents written by older Studio UI builds.
+    #[serde(rename = "type", alias = "type_id")]
     pub type_id: String,
     /// Canvas `[x, y]` coordinate in graph space.
     #[serde(default)]
@@ -148,6 +150,9 @@ pub struct GraphComment {
     /// Position on canvas.
     #[serde(default)]
     pub position: [f32; 2],
+    /// Box width/height on canvas.
+    #[serde(default)]
+    pub size: [f32; 2],
 }
 
 /// Full serialized `graph.json` authoring document (§7.7).
@@ -286,14 +291,14 @@ impl GraphDocument {
                 GraphEdge {
                     id: 6,
                     from_node: 4,
-                    from_port: "visemes".to_owned(),
+                    from_port: "audio".to_owned(),
                     to_node: 5,
-                    to_port: "visemes".to_owned(),
+                    to_port: "audio".to_owned(),
                 },
                 GraphEdge {
                     id: 7,
                     from_node: 5,
-                    from_port: "expressions".to_owned(),
+                    from_port: "visemes".to_owned(),
                     to_node: 6,
                     to_port: "expressions".to_owned(),
                 },

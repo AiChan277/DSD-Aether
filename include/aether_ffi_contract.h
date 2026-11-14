@@ -568,6 +568,66 @@
 #define AETHER_GRAPH_MAX_DEBUG_NODES 256
 
 /*
+ Maximum per-output-pin live readout slots exposed by `AetherGraphTelemetryReadout`.
+ */
+#define AETHER_GRAPH_MAX_DEBUG_PINS 384
+
+/*
+ Compact live pin summary value kind: empty / unavailable.
+ */
+#define AETHER_PIN_VALUE_INVALID 0
+
+/*
+ Compact live pin summary value kind: scalar float (`[val, 0, 0, 0]`).
+ */
+#define AETHER_PIN_VALUE_FLOAT 1
+
+/*
+ Compact live pin summary value kind: boolean (`[0.0 | 1.0, 0, 0, 0]`).
+ */
+#define AETHER_PIN_VALUE_BOOL 2
+
+/*
+ Compact live pin summary value kind: vec3 (`[x, y, z, 0]`).
+ */
+#define AETHER_PIN_VALUE_VEC3 3
+
+/*
+ Compact live pin summary value kind: quat / color (`[x, y, z, w]`).
+ */
+#define AETHER_PIN_VALUE_QUAT 4
+
+/*
+ Compact live pin summary value kind: transform (`[px, py, pz, scale]`).
+ */
+#define AETHER_PIN_VALUE_TRANSFORM 5
+
+/*
+ Compact live pin summary value kind: pose stream (`[head_x, head_y, head_z, root_conf]`).
+ */
+#define AETHER_PIN_VALUE_POSE 6
+
+/*
+ Compact live pin summary value kind: expression set (`[max_w, active_count, jaw_open, blink_l]`).
+ */
+#define AETHER_PIN_VALUE_EXPR 7
+
+/*
+ Compact live pin summary value kind: 5-viseme set (`[max_w, dominant_idx, sum, a_w]`).
+ */
+#define AETHER_PIN_VALUE_VISEME 8
+
+/*
+ Compact live pin summary value kind: DSP audio frame (`[rms_db, voiced, f1_hz, f2_hz]`).
+ */
+#define AETHER_PIN_VALUE_AUDIO 9
+
+/*
+ Compact live pin summary value kind: trigger event counter (`[fired, 0, 0, 0]`).
+ */
+#define AETHER_PIN_VALUE_EVENT 10
+
+/*
  FFI status code (`0` = success, `< 0` = typed error).
  */
 typedef int32_t AetherStatus;
@@ -1079,6 +1139,64 @@ typedef struct AETHER_ALIGNED(8) AetherGraphPlanStats {
      */
     float node_live_values[256];
 } AetherGraphPlanStats;
+
+/*
+ 64-byte aligned live per-node timing and per-output-pin value snapshot for Studio Z4 inspection (`§7.2`).
+ */
+typedef struct AETHER_ALIGNED(64) AetherGraphTelemetryReadout {
+    /*
+     Expected `sizeof(AetherGraphTelemetryReadout)` filled by caller.
+     */
+    uint32_t struct_size;
+    /*
+     Valid slot count in `node_ids` and `node_eval_ns` (`<= 256`).
+     */
+    uint32_t active_node_count;
+    /*
+     Valid slot count in `pin_*` arrays (`<= 384`).
+     */
+    uint32_t pin_readout_count;
+    /*
+     Non-zero once at least one graph evaluation tick has populated this snapshot.
+     */
+    uint32_t valid;
+    /*
+     Monotonic evaluation tick counter.
+     */
+    uint64_t eval_sequence;
+    /*
+     Total evaluation duration of the latest graph tick (nanoseconds).
+     */
+    uint64_t total_eval_ns;
+    /*
+     Graph node IDs corresponding slot-for-slot to `node_eval_ns`.
+     */
+    uint64_t node_ids[256];
+    /*
+     Per-node execution duration in nanoseconds.
+     */
+    uint32_t node_eval_ns[256];
+    /*
+     Owning node ID for each output pin readout slot.
+     */
+    uint64_t pin_node_ids[384];
+    /*
+     Four-lane summary payload (`[scalar, ...]`, `[x, y, z, w]`, `[rms_db, voiced, f1, f2]`, etc.).
+     */
+    float pin_values[384][4];
+    /*
+     Zero-based output pin index on `pin_node_ids[i]`.
+     */
+    uint8_t pin_indices[384];
+    /*
+     Value classification tag (`AETHER_PIN_VALUE_*`).
+     */
+    uint8_t pin_kinds[384];
+    /*
+     Explicit padding to maintain a 64-byte multiple (`13120` bytes total).
+     */
+    uint64_t _reserved_tail[4];
+} AetherGraphTelemetryReadout;
 
 /*
  Stream 0: 2.5D NPR geometry vertex — 64 B, frozen by MTD (§5.2).
@@ -1878,6 +1996,12 @@ extern AetherStatus aether_host_copy_project_json(AetherHostHandle host,
  */
 extern AetherStatus aether_host_get_plan_stats(AetherHostHandle host,
                                                struct AetherGraphPlanStats *out_stats);
+
+/*
+ Populates 64-byte aligned per-node nanosecond timings and output pin values for UI watches (`§7.2`). `[ui]`
+ */
+extern AetherStatus aether_host_get_telemetry_readout(AetherHostHandle host,
+                                                      struct AetherGraphTelemetryReadout *out_readout);
 
 /*
  Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`

@@ -35,7 +35,8 @@ void populate_stress_spring_rig(SpringBoneSimulator& sim, uint32_t joint_count, 
         d.parent_bone_index =
             is_root_of_chain ? static_cast<int32_t>(AETHER_BONE_HEAD) : static_cast<int32_t>(64U + j - 1U);
         d.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
-        const float strand = static_cast<float>(j / 4U);
+        const uint32_t strand_idx = j / 4U;
+        const float strand = static_cast<float>(strand_idx);
         d.local_bone_offset = {0.02f * std::cos(strand), -0.06f, 0.02f * std::sin(strand)};
         d.bone_length = 0.07f;
         d.hit_radius = 0.02f;
@@ -158,4 +159,81 @@ TEST_CASE("SimEngine full T2 tick + 512-joint SpringBone are strictly zero-alloc
 #else
     CHECK(mean_tick_ms <= 6.00);
 #endif
+}
+
+TEST_CASE("SpringBone collider contact detection and overlay export work across Scalar and AVX2 paths",
+          "[animation][spring][collider]") {
+    for (const auto path : {SpringBoneSimulator::SimdPath::Scalar, SpringBoneSimulator::SimdPath::Avx2}) {
+        auto sim = std::make_unique<SpringBoneSimulator>();
+        sim->clear();
+        // Sphere collider 0 at (0, 1.0, 0) radius 0.14 attached to HIPS
+        REQUIRE(sim->add_sphere_collider(static_cast<int32_t>(AETHER_BONE_HIPS), Vec3{0.0f, 0.0f, 0.0f}, 0.14f));
+        // Capsule collider 1 far away at (+0.65, 1.0, 0) -> (+0.65, 0.85, 0) radius 0.05 attached to SPINE
+        REQUIRE(sim->add_capsule_collider(static_cast<int32_t>(AETHER_BONE_SPINE), Vec3{0.65f, 0.0f, 0.0f},
+                                          Vec3{0.65f, -0.15f, 0.0f}, 0.05f));
+
+        // Joint 0 penetrates sphere collider 0; joint 1 stays far away at (-0.65, 1.0, 0)
+        SpringJointDesc j0{};
+        j0.bone_index = 64;
+        j0.parent_joint_index = -1;
+        j0.parent_bone_index = static_cast<int32_t>(AETHER_BONE_HEAD);
+        j0.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
+        j0.local_bone_offset = {0.0f, -0.10f, 0.0f};
+        j0.bone_length = 0.08f;
+        j0.hit_radius = 0.03f;
+        j0.stiffness = 0.25f;
+        j0.drag_force = 0.40f;
+        j0.gravity_power = 0.20f;
+        REQUIRE(sim->add_joint(j0));
+
+        SpringJointDesc j1 = j0;
+        j1.bone_index = 65;
+        j1.local_bone_offset = {-0.65f, -0.10f, 0.0f};
+        REQUIRE(sim->add_joint(j1));
+
+        std::array<Vec3, kMaxBones> bones{};
+        std::array<Quat, kMaxBones> rots{};
+        rots.fill(Quat::identity());
+        bones[AETHER_BONE_HIPS] = {0.0f, 1.00f, 0.0f};
+        bones[AETHER_BONE_SPINE] = {0.0f, 1.00f, 0.0f};
+        bones[AETHER_BONE_HEAD] = {0.0f, 1.12f, 0.0f};
+
+        sim->reset_state(bones, rots, kMaxBones);
+
+#if defined(AETHER_ENABLE_HOT_PATH_GUARD) && AETHER_ENABLE_HOT_PATH_GUARD
+        aether::HotPathGuard::install();
+        aether::HotPathGuard::reset_thread_violations();
+#endif
+        {
+#if defined(AETHER_ENABLE_HOT_PATH_GUARD) && AETHER_ENABLE_HOT_PATH_GUARD
+            AETHER_HOT_PATH_SCOPE;
+#endif
+            sim->step(1.0f / 60.0f, Vec3{0.0f, 0.0f, 0.0f}, 1.0f, bones, rots, kMaxBones, path);
+            std::array<SpringColliderOverlay, kMaxOverlayColliders> col_out{};
+            std::array<SpringSegmentOverlay, kMaxOverlaySpringSegments> seg_out{};
+            uint32_t col_cnt = 0;
+            uint32_t seg_cnt = 0;
+            sim->export_overlay(col_out.data(), kMaxOverlayColliders, col_cnt, seg_out.data(),
+                                kMaxOverlaySpringSegments, seg_cnt, bones);
+
+            CHECK(col_cnt == 2U);
+            CHECK(seg_cnt == 2U);
+            CHECK(sim->collider_in_contact(0U));
+            CHECK_FALSE(sim->collider_in_contact(1U));
+            CHECK(col_out[0].shape == 0U);
+            CHECK(col_out[0].in_contact == 1U);
+            CHECK(col_out[1].shape == 1U);
+            CHECK(col_out[1].in_contact == 0U);
+            CHECK(seg_out[0].in_contact == 1U);
+            CHECK(seg_out[1].in_contact == 0U);
+#if defined(AETHER_ENABLE_HOT_PATH_GUARD) && AETHER_ENABLE_HOT_PATH_GUARD
+            CHECK(aether::HotPathGuard::thread_violations() == 0);
+#endif
+        }
+
+        // Moving head far clear of collider 0 clears contact flag cleanly on next step
+        bones[AETHER_BONE_HEAD] = {0.0f, 1.85f, 0.0f};
+        sim->step(1.0f / 60.0f, Vec3{0.0f, 0.0f, 0.0f}, 1.0f, bones, rots, kMaxBones, path);
+        CHECK_FALSE(sim->collider_in_contact(0U));
+    }
 }

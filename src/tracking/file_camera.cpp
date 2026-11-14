@@ -122,8 +122,9 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
                         frame_->stride_uv = width_;
                         frame_->format = CameraPixelFormat::NV12;
                         frame_->sequence = ++seq_;
-                        frame_->capture_timestamp_us =
-                            static_cast<uint64_t>(std::max<LONGLONG>(ts / 10, 0)) + aether::now_us();
+                        const uint64_t now = aether::now_us();
+                        frame_->capture_timestamp_us = std::max(now, last_capture_ts_us_ + 1ULL);
+                        last_capture_ts_us_ = frame_->capture_timestamp_us;
                         out_frame = frame_.get();
                         return true;
                     }
@@ -137,15 +138,16 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
         }
 
         // Deterministic synthetic animated face+torso+hand NV12 generator (`HR-12` clean)
-        const uint64_t step_us = 1'000'000ULL / fps_;
         const uint64_t f_idx = ++seq_;
+        const uint64_t now = aether::now_us();
         frame_->width = width_;
         frame_->height = height_;
         frame_->stride_y = width_;
         frame_->stride_uv = width_;
         frame_->format = CameraPixelFormat::NV12;
         frame_->sequence = f_idx;
-        frame_->capture_timestamp_us = f_idx * step_us;
+        frame_->capture_timestamp_us = std::max(now, last_capture_ts_us_ + 1ULL);
+        last_capture_ts_us_ = frame_->capture_timestamp_us;
 
         const float t = static_cast<float>(f_idx) / static_cast<float>(fps_);
         const float cx = 0.50f + 0.08f * std::sin(t * 2.0f);
@@ -202,6 +204,7 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
     uint32_t fps_{60};
     uint32_t synth_limit_{0};
     uint64_t seq_{0};
+    uint64_t last_capture_ts_us_{0};
     std::unique_ptr<CapturedFrameBuffer> frame_{};
     ComPtr<IMFSourceReader> reader_;
 };

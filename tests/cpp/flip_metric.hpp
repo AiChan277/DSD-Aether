@@ -39,7 +39,7 @@ struct YCxCz {
     return (t > kDelta3) ? std::cbrt(t) : (t / (3.0f * kDelta * kDelta) + 4.0f / 29.0f);
 }
 
-[[nodiscard]] inline void linear_rgb_to_xyz_d65(float r, float g, float b, float& X, float& Y, float& Z) noexcept {
+inline void linear_rgb_to_xyz_d65(float r, float g, float b, float& X, float& Y, float& Z) noexcept {
     X = 0.4124564f * r + 0.3575761f * g + 0.1804375f * b;
     Y = 0.2126729f * r + 0.7151522f * g + 0.0721750f * b;
     Z = 0.0193339f * r + 0.1191920f * g + 0.9503041f * b;

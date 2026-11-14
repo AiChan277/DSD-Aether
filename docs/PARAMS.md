@@ -26,7 +26,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.outline_scale` | Render | Outline Scale | `float` | T3 | `1.0` | `[0.0, 3.0]` | x | `/aether/param/render.outline_scale` | persist, project, osc, graph, undoable |
 | `render.bloom_intensity` | Render | Premul Bloom | `float` | T3 | `0.28` | `[0.0, 1.5]` | — | `/aether/param/render.bloom_intensity` | persist, project, osc, graph, undoable |
 | `render.rt_enabled` | Render | Ray Tracing | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | `/aether/param/render.rt_enabled` | persist, project, osc, undoable |
-| `render.denoiser` | Render | Denoiser Backend | `enum` | T3 | `0.0` | `[0.0, 4.0]` | — | — | persist, app, undoable |
+| `render.denoiser` | Render | Denoiser Backend | `enum` | T3 | `0.0` | `[0.0, 5.0]` | — | — | persist, app, undoable |
 | `render.backend` | Render | Render Backend | `enum` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
 | `rnd.debug.force_device_lost` | Diagnostics | Force Device Lost | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | runtime |
 | `tracking.ep_mode` | Tracking | Execution Provider | `enum` | T1 | `0.0` | `[0.0, 4.0]` | — | — | persist, app |

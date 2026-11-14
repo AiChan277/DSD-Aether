@@ -21,11 +21,13 @@ use aether_ffi::{
     AETHER_HOST_CMD_SET_WS_ENABLED, AETHER_HOST_EVT_GRAPH_COMPILED, AETHER_HOST_EVT_HOTKEY_EVENT,
     AETHER_HOST_EVT_OSC_PARAM, AETHER_HOST_EVT_PLUGIN_CONSENT_REQ, AETHER_HOST_EVT_PLUGIN_LOADED,
     AETHER_HOST_EVT_PLUGIN_TRAP, AETHER_HOST_EVT_PROJECT_LOADED, AETHER_HOST_EVT_PROJECT_SAVED,
-    AETHER_HOST_EVT_WS_COMMAND, AETHER_OK, AetherGraphOutputs, AetherGraphPlanStats,
-    AetherHostCommand, AetherHostConfig, AetherHostEvent,
+    AETHER_HOST_EVT_WS_COMMAND, AETHER_OK, AETHER_PIN_VALUE_FLOAT, AetherGraphOutputs,
+    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
+    AetherHostEvent,
 };
 use aether_plugin_host::graph::model::{GraphEdge, GraphNode, PortDecl, PortDirection, ValueType};
 use aether_plugin_host::io::{OscRateLimiter, parse_osc_packet};
+use aether_plugin_host::project::schema::parse_graph_json;
 use aether_plugin_host::project::{
     ProjectBundle, load_project_bundle, parse_and_migrate_project_toml, save_project_bundle,
 };
@@ -305,6 +307,67 @@ fn graph_types_coercions_cycles_and_hotswap_migration() -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Exactly the document shape `ui::NodeCanvas::serialize_graph_json()` writes (Studio Node Graph):
+/// `type` key, `params` holding `bypass` + unconnected-pin defaults, `groups` with size/members,
+/// `comments` with a UI-only `size` field.
+const STUDIO_UI_GRAPH_JSON: &str = r#"{"schema_version":1,
+ "nodes":[
+  {"id":1,"type":"aether.source.clock@1","position":[40.0,40.0],"label":"Studio Clock","params":{"bypass":false},"ports":[]},
+  {"id":2,"type":"aether.math.add@1","position":[300.0,40.0],"label":"Add","params":{"bypass":false,"b":2.0},"ports":[]},
+  {"id":3,"type":"aether.output.camera_control@1","position":[560.0,40.0],"label":"Camera Control","params":{"bypass":false,"focal_mm":85.0},"ports":[]}],
+ "edges":[
+  {"id":10,"from_node":1,"from_port":"dt_s","to_node":2,"to_port":"a"},
+  {"id":11,"from_node":2,"from_port":"out","to_node":3,"to_port":"flatness"}],
+ "groups":[{"id":20,"title":"Rig","position":[20.0,4.0],"size":[860.0,470.0],"nodes":[1,2,3]}],
+ "comments":[{"id":21,"text":"note","position":[0.0,0.0],"size":[220.0,80.0]}]}"#;
+
+#[test]
+fn studio_ui_graph_json_compiles_with_pin_defaults_bypass_and_legacy_type_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let doc = aether_plugin_host::project::parse_graph_json(STUDIO_UI_GRAPH_JSON.as_bytes())?;
+    assert_eq!(doc.nodes.len(), 3);
+    assert_eq!(doc.groups.len(), 1);
+
+    // Unconnected inputs read their inline defaults: add.b = 2.0, camera focal_mm = 85.
+    let dt = 1.0 / 60.0;
+    let inp = default_inputs(dt);
+    let mut out = AetherGraphOutputs::default_zero();
+    let mut plan = compile_graph_document(&doc, &[])?;
+    plan.evaluate(&inp, &mut out);
+    assert!((out.ik_targets[6][0] - 85.0).abs() < 1e-4);
+    assert!((out.ik_targets[6][1] - (dt + 2.0)).abs() < 1e-4);
+
+    // Bypass / Mute: the Add node passes its first Float input (`a` = dt) straight to `out`.
+    let mut bypassed = doc.clone();
+    bypassed.nodes[1]
+        .params
+        .insert("bypass".to_owned(), serde_json::Value::Bool(true));
+    let mut plan_bypass = compile_graph_document(&bypassed, &[])?;
+    plan_bypass.evaluate(&inp, &mut out);
+    assert!((out.ik_targets[6][1] - dt).abs() < 1e-4);
+
+    // Bypassed sink is muted: the camera op is not emitted, so its outputs stay untouched.
+    let mut muted = doc.clone();
+    muted.nodes[2]
+        .params
+        .insert("bypass".to_owned(), serde_json::Value::Bool(true));
+    let mut plan_muted = compile_graph_document(&muted, &[])?;
+    let mut out_muted = AetherGraphOutputs::default_zero();
+    plan_muted.evaluate(&inp, &mut out_muted);
+    assert!(out_muted.ik_targets[6][0].abs() < 1e-6);
+
+    // Documents written by older Studio builds used `type_id`; they still parse and compile.
+    let legacy = STUDIO_UI_GRAPH_JSON.replace("\"type\":", "\"type_id\":");
+    let legacy_doc = aether_plugin_host::project::parse_graph_json(legacy.as_bytes())?;
+    assert_eq!(legacy_doc.nodes[1].type_id, "aether.math.add@1");
+    compile_graph_document(&legacy_doc, &[])?;
+
+    // Re-serialization writes the canonical `type` key.
+    let round = serde_json::to_string(&legacy_doc)?;
+    assert!(round.contains("\"type\":\"aether.math.add@1\""));
+    Ok(())
+}
+
 #[test]
 fn debounced_live_recompile_completes_under_100ms_and_evaluates_256_nodes()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -411,6 +474,126 @@ fn debounced_live_recompile_completes_under_100ms_and_evaluates_256_nodes()
     let mut stats = AetherGraphPlanStats::default_zero();
     host.get_plan_stats(&mut stats)?;
     assert_eq!(stats.active_node_count, 256);
+    Ok(())
+}
+
+#[test]
+fn cpp_default_6_node_graph_json_parses_and_compiles_cleanly()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Exact JSON structure produced by C++ NodeCanvas::serialize_graph_json() for the default 6-node graph.
+    let cpp_default_json = br#"{
+        "comments": [
+            {
+                "id": 900,
+                "position": [24.0, 24.0],
+                "size": [770.0, 175.0],
+                "text": "Tracking + Visibility-First IK Pipeline"
+            }
+        ],
+        "edges": [
+            {"from_node": 1, "from_port": "pose", "id": 100, "to_node": 2, "to_port": "pose"},
+            {"from_node": 1, "from_port": "face_conf", "id": 101, "to_node": 2, "to_port": "face_conf"},
+            {"from_node": 1, "from_port": "hand_conf", "id": 102, "to_node": 2, "to_port": "hand_conf"},
+            {"from_node": 1, "from_port": "body_conf", "id": 103, "to_node": 2, "to_port": "body_conf"},
+            {"from_node": 2, "from_port": "pose", "id": 104, "to_node": 3, "to_port": "pose"},
+            {"from_node": 4, "from_port": "visemes", "id": 105, "to_node": 5, "to_port": "visemes"},
+            {"from_node": 5, "from_port": "expressions", "id": 106, "to_node": 6, "to_port": "expressions"}
+        ],
+        "groups": [],
+        "nodes": [
+            {
+                "id": 1,
+                "label": "NPU Pose",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [40.0, 60.0],
+                "type": "aether.source.npu_pose@1"
+            },
+            {
+                "id": 2,
+                "label": "Visibility-First IK",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [300.0, 60.0],
+                "type": "aether.ik.visibility_first@1"
+            },
+            {
+                "id": 3,
+                "label": "Output Pose",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [560.0, 60.0],
+                "type": "aether.output.pose@1"
+            },
+            {
+                "id": 4,
+                "label": "DSP Audio",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [40.0, 240.0],
+                "type": "aether.source.dsp_audio@1"
+            },
+            {
+                "id": 5,
+                "label": "Formant LipSync",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [300.0, 240.0],
+                "type": "aether.expr.formant_lipsync@1"
+            },
+            {
+                "id": 6,
+                "label": "Output Expressions",
+                "params": {"b": 1.0, "bypass": false},
+                "ports": [],
+                "position": [560.0, 240.0],
+                "type": "aether.output.expressions@1"
+            }
+        ],
+        "schema_version": 1
+    }"#;
+
+    let doc = parse_graph_json(cpp_default_json)?;
+    assert_eq!(doc.schema_version, 1);
+    assert_eq!(doc.nodes.len(), 6);
+    assert_eq!(doc.edges.len(), 7);
+    assert_eq!(doc.comments.len(), 1);
+    assert_eq!(doc.comments[0].size, [770.0, 175.0]);
+
+    let mut plan = compile_graph_document(&doc, &[])?;
+
+    let mut inp = default_inputs(1.0 / 240.0);
+    inp.dsp_visemes[0] = 0.85;
+    inp.dsp_rms_db = -12.0;
+    let mut out = AetherGraphOutputs::default_zero();
+    plan.evaluate(&inp, &mut out);
+    assert!(out.expression_weights[52] > 0.8);
+    assert!(out.expression_weights[24] > 0.6);
+
+    let host = PluginHost::create(&base_host_config())?;
+    host.compile_graph(cpp_default_json)?;
+
+    let mut stats = AetherGraphPlanStats::default_zero();
+    host.get_plan_stats(&mut stats)?;
+    assert_eq!(stats.error_node_id, u32::MAX);
+    assert_eq!(stats.active_node_count, 6);
+
+    host.evaluate_active(&inp, &mut out)?;
+    let mut readout = AetherGraphTelemetryReadout::default_zero();
+    host.get_telemetry_readout(&mut readout)?;
+    assert_eq!(readout.valid, 1);
+    assert_eq!(readout.active_node_count, 6);
+    assert!(readout.pin_readout_count >= 10);
+    let rms_slot = readout
+        .pin_node_ids
+        .iter()
+        .take(readout.pin_readout_count as usize)
+        .enumerate()
+        .find(|&(i, &nid)| nid == 4 && readout.pin_indices[i] == 1)
+        .map(|(i, _)| i)
+        .ok_or("dsp_audio rms_db pin readout present")?;
+    assert_eq!(readout.pin_kinds[rms_slot], AETHER_PIN_VALUE_FLOAT);
+    assert!((readout.pin_values[rms_slot][0] - (-12.0)).abs() < 1e-3);
     Ok(())
 }
 
@@ -1061,6 +1244,118 @@ impl PlanStatsZeroExt for AetherGraphPlanStats {
             plugin_count: 0,
             node_eval_us: [0.0; 256],
             node_live_values: [0.0; 256],
+        }
+    }
+}
+
+#[test]
+fn audio_frame_and_viseme_types_distinct_with_legacy_json_compat() -> Result<(), Box<dyn std::error::Error>> {
+    use aether_plugin_host::graph::model::ValueType;
+    use aether_plugin_host::graph::{compile_graph_document, GraphDocument, GraphEdge, GraphNode};
+
+    // 1. Type system: AudioFrame (AudioSpectrum) is strictly distinct from VisemeSet / ExprSet.
+    assert!(ValueType::can_connect(ValueType::AudioFrame, ValueType::AudioFrame));
+    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::VisemeSet));
+    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::ExprSet));
+    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::Pose));
+    assert!(ValueType::can_connect(ValueType::VisemeSet, ValueType::VisemeSet));
+    assert!(ValueType::can_connect(ValueType::VisemeSet, ValueType::ExprSet));
+    let alias_ty: ValueType = serde_json::from_str("\"AudioSpectrum\"")?;
+    assert_eq!(alias_ty, ValueType::AudioFrame);
+
+    // 2. Default project graph carries DspAudio(audio: AudioFrame) -> FormantLipSync(visemes: VisemeSet) -> OutputExpressions.
+    let default_doc = GraphDocument::default_project_graph();
+    let e45 = default_doc.edges.iter().find(|e| e.from_node == 4 && e.to_node == 5).ok_or("missing 4->5")?;
+    assert_eq!(e45.from_port, "audio");
+    assert_eq!(e45.to_port, "audio");
+    let e56 = default_doc.edges.iter().find(|e| e.from_node == 5 && e.to_node == 6).ok_or("missing 5->6")?;
+    assert_eq!(e56.from_port, "visemes");
+    assert_eq!(e56.to_port, "expressions");
+
+    let host = aether_plugin_host::PluginHost::create(&base_host_config())?;
+    let mut inp = default_inputs(1.0 / 60.0);
+    inp.dsp_rms_db = -18.0;
+    inp.dsp_visemes[0] = 0.8;
+    let mut out = AetherGraphOutputs::default_zero();
+    host.evaluate_active(&inp, &mut out)?;
+    assert!((out.expression_weights[52] - 0.8).abs() < 1e-4);
+    assert!(out.expression_weights[24] > 0.5);
+
+    // Pin readouts report AETHER_PIN_VALUE_AUDIO (with F1/F2 formants) on DspAudio and AETHER_PIN_VALUE_VISEME on FormantLipSync.
+    let mut ro = AetherGraphTelemetryReadout::default_zero();
+    host.get_telemetry_readout(&mut ro)?;
+    assert_eq!(ro.valid, 1);
+    let n_pins = usize::try_from(ro.pin_readout_count).unwrap_or(0).min(ro.pin_kinds.len());
+    let audio_idx = (0..n_pins)
+        .find(|&i| ro.pin_node_ids[i] == 4 && ro.pin_indices[i] == 0)
+        .ok_or("missing DspAudio pin 0 readout")?;
+    assert_eq!(ro.pin_kinds[audio_idx], aether_ffi::AETHER_PIN_VALUE_AUDIO);
+    assert!((ro.pin_values[audio_idx][0] - (-18.0)).abs() < 1e-3);
+    assert!((ro.pin_values[audio_idx][2] - 730.0).abs() < 1e-2);
+
+    let vis_idx = (0..n_pins)
+        .find(|&i| ro.pin_node_ids[i] == 5 && ro.pin_indices[i] == 0)
+        .ok_or("missing FormantLipSync pin 0 readout")?;
+    assert_eq!(ro.pin_kinds[vis_idx], aether_ffi::AETHER_PIN_VALUE_VISEME);
+
+    // 3. Reject direct AudioFrame -> ExprSet without FormantLipSync conversion.
+    let invalid_doc = GraphDocument {
+        schema_version: 1,
+        nodes: vec![
+            GraphNode {
+                id: 1,
+                type_id: "aether.source.dsp_audio@1".to_owned(),
+                position: [0.0, 0.0],
+                label: None,
+                params: BTreeMap::new(),
+                ports: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+            GraphNode {
+                id: 2,
+                type_id: "aether.output.expressions@1".to_owned(),
+                position: [200.0, 0.0],
+                label: None,
+                params: BTreeMap::new(),
+                ports: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+        ],
+        edges: vec![GraphEdge {
+            id: 1,
+            from_node: 1,
+            from_port: "audio".to_owned(),
+            to_node: 2,
+            to_port: "expressions".to_owned(),
+        }],
+        groups: Vec::new(),
+        comments: Vec::new(),
+        extra: BTreeMap::new(),
+    };
+    assert!(compile_graph_document(&invalid_doc, &[]).is_err());
+    Ok(())
+}
+
+trait TelemetryReadoutZeroExt {
+    fn default_zero() -> Self;
+}
+
+impl TelemetryReadoutZeroExt for AetherGraphTelemetryReadout {
+    fn default_zero() -> Self {
+        Self {
+            struct_size: size_of::<Self>() as u32,
+            active_node_count: 0,
+            pin_readout_count: 0,
+            valid: 0,
+            eval_sequence: 0,
+            total_eval_ns: 0,
+            node_ids: [0; 256],
+            node_eval_ns: [0; 256],
+            pin_node_ids: [0; 384],
+            pin_values: [[0.0; 4]; 384],
+            pin_indices: [0; 384],
+            pin_kinds: [0; 384],
+            _reserved_tail: [0; 4],
         }
     }
 }

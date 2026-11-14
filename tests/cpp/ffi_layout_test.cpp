@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <span>
 #include <string>
 #include <unordered_map>
 
@@ -72,6 +73,22 @@ static_assert(offsetof(AetherGraphPlanStats, eval_count) == 40);
 static_assert(offsetof(AetherGraphPlanStats, node_eval_us) == 56);
 static_assert(offsetof(AetherGraphPlanStats, node_live_values) == 1080);
 
+static_assert(sizeof(AetherGraphTelemetryReadout) == 13120);
+static_assert(alignof(AetherGraphTelemetryReadout) == 64);
+static_assert(offsetof(AetherGraphTelemetryReadout, struct_size) == 0);
+static_assert(offsetof(AetherGraphTelemetryReadout, active_node_count) == 4);
+static_assert(offsetof(AetherGraphTelemetryReadout, pin_readout_count) == 8);
+static_assert(offsetof(AetherGraphTelemetryReadout, valid) == 12);
+static_assert(offsetof(AetherGraphTelemetryReadout, eval_sequence) == 16);
+static_assert(offsetof(AetherGraphTelemetryReadout, total_eval_ns) == 24);
+static_assert(offsetof(AetherGraphTelemetryReadout, node_ids) == 32);
+static_assert(offsetof(AetherGraphTelemetryReadout, node_eval_ns) == 2080);
+static_assert(offsetof(AetherGraphTelemetryReadout, pin_node_ids) == 3104);
+static_assert(offsetof(AetherGraphTelemetryReadout, pin_values) == 6176);
+static_assert(offsetof(AetherGraphTelemetryReadout, pin_indices) == 12320);
+static_assert(offsetof(AetherGraphTelemetryReadout, pin_kinds) == 12704);
+static_assert(offsetof(AetherGraphTelemetryReadout, _reserved_tail) == 13088);
+
 namespace {
 
 struct ExpectedFieldOffset {
@@ -79,9 +96,8 @@ struct ExpectedFieldOffset {
     size_t offset;
 };
 
-template <size_t N>
 void verify_struct_in_json(const nlohmann::json& map, const char* struct_name, size_t cpp_size, size_t cpp_align,
-                           const ExpectedFieldOffset (&fields)[N]) {
+                           std::span<const ExpectedFieldOffset> fields) {
     REQUIRE(map.contains(struct_name));
     const auto& entry = map.at(struct_name);
     REQUIRE(entry.at("size").get<size_t>() == cpp_size);
@@ -300,6 +316,24 @@ TEST_CASE("FFI layout table JSON matches C++ sizeof, alignof, and offsetof", "[f
     };
     verify_struct_in_json(map, "AetherGraphPlanStats", sizeof(AetherGraphPlanStats), alignof(AetherGraphPlanStats),
                           stats_fields);
+
+    const ExpectedFieldOffset telemetry_fields[] = {
+        {"struct_size", offsetof(AetherGraphTelemetryReadout, struct_size)},
+        {"active_node_count", offsetof(AetherGraphTelemetryReadout, active_node_count)},
+        {"pin_readout_count", offsetof(AetherGraphTelemetryReadout, pin_readout_count)},
+        {"valid", offsetof(AetherGraphTelemetryReadout, valid)},
+        {"eval_sequence", offsetof(AetherGraphTelemetryReadout, eval_sequence)},
+        {"total_eval_ns", offsetof(AetherGraphTelemetryReadout, total_eval_ns)},
+        {"node_ids", offsetof(AetherGraphTelemetryReadout, node_ids)},
+        {"node_eval_ns", offsetof(AetherGraphTelemetryReadout, node_eval_ns)},
+        {"pin_node_ids", offsetof(AetherGraphTelemetryReadout, pin_node_ids)},
+        {"pin_values", offsetof(AetherGraphTelemetryReadout, pin_values)},
+        {"pin_indices", offsetof(AetherGraphTelemetryReadout, pin_indices)},
+        {"pin_kinds", offsetof(AetherGraphTelemetryReadout, pin_kinds)},
+        {"_reserved_tail", offsetof(AetherGraphTelemetryReadout, _reserved_tail)},
+    };
+    verify_struct_in_json(map, "AetherGraphTelemetryReadout", sizeof(AetherGraphTelemetryReadout),
+                          alignof(AetherGraphTelemetryReadout), telemetry_fields);
 }
 
 TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "[ffi]") {
@@ -331,6 +365,15 @@ TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "
     AetherGraphOutputs gout{};
     gin.dt_s = 1.0f / 60.0f;
     REQUIRE(aether_host_evaluate_active(host, &gin, &gout) == AETHER_OK);
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_UI);
+    AetherGraphTelemetryReadout readout{};
+    readout.struct_size = static_cast<uint32_t>(sizeof(readout));
+    REQUIRE(aether_host_get_telemetry_readout(host, &readout) == AETHER_OK);
+    REQUIRE(readout.valid == 1);
+    REQUIRE(readout.eval_sequence >= 1);
+    REQUIRE(readout.active_node_count == 6);
+    REQUIRE(readout.pin_readout_count >= 6);
 
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
     aether_host_destroy(host);

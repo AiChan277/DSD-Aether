@@ -46,6 +46,16 @@ impl Default for ExprSetData {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AudioFrameData {
+    pub env: f32,
+    pub rms_db: f32,
+    pub voiced: f32,
+    pub f1_hz: f32,
+    pub f2_hz: f32,
+    pub visemes: [f32; 5],
+}
+
 /// Type-segregated flat slot arena sized once at compile time (`HR-01`).
 #[derive(Clone, Debug, Default)]
 pub struct ValuesArena {
@@ -58,6 +68,7 @@ pub struct ValuesArena {
     pub poses: Vec<PoseData>,
     pub expr_sets: Vec<ExprSetData>,
     pub viseme_sets: Vec<[f32; 5]>,
+    pub audio_frames: Vec<AudioFrameData>,
     pub colors: Vec<[f32; 4]>,
     pub luts: Vec<[f32; 64]>,
 }
@@ -74,6 +85,7 @@ pub enum SlotRef {
     Pose(usize),
     ExprSet(usize),
     VisemeSet(usize),
+    AudioFrame(usize),
     Color(usize),
 }
 
@@ -89,6 +101,7 @@ impl SlotRef {
             | Self::Pose(i)
             | Self::ExprSet(i)
             | Self::VisemeSet(i)
+            | Self::AudioFrame(i)
             | Self::Color(i) => i,
         }
     }
@@ -144,6 +157,11 @@ impl ValuesArena {
                 let idx = self.viseme_sets.len();
                 self.viseme_sets.push([0.0; 5]);
                 Ok(SlotRef::VisemeSet(idx))
+            }
+            ValueType::AudioFrame => {
+                let idx = self.audio_frames.len();
+                self.audio_frames.push(AudioFrameData::default());
+                Ok(SlotRef::AudioFrame(idx))
             }
             ValueType::Color => {
                 let idx = self.colors.len();
@@ -264,6 +282,14 @@ pub enum Op {
         src: usize,
         dst: usize,
     },
+    CopyAudioFrame {
+        src: usize,
+        dst: usize,
+    },
+    VisemeToExprSet {
+        src: usize,
+        dst: usize,
+    },
     CopyColor {
         src: usize,
         dst: usize,
@@ -293,7 +319,7 @@ pub enum Op {
         out_ep_id: usize,
     },
     DspAudio {
-        out_visemes: usize,
+        out_audio: usize,
         out_rms_db: usize,
         out_voice_active: usize,
     },
@@ -340,9 +366,9 @@ pub enum Op {
         out_pose: usize,
     },
     FormantLipSync {
-        in_visemes: usize,
+        in_audio: usize,
         in_gain: usize,
-        out_expr: usize,
+        out_visemes: usize,
     },
     ExpressionTrigger {
         in_trigger: usize,
@@ -530,6 +556,14 @@ pub struct LatchedBinding {
     pub output_count: u32,
 }
 
+/// Output pin readout mapping precomputed at compile time (`T2` hot path reads without allocating).
+#[derive(Clone, Copy, Debug)]
+pub struct CompiledPinSlot {
+    pub(crate) node_id: u64,
+    pub(crate) pin_idx: u8,
+    pub(crate) slot: Option<SlotRef>,
+}
+
 /// Allocation-free compiled graph evaluation plan executed on `T2` (§7.3).
 #[derive(Clone, Debug)]
 pub struct CompiledGraphPlan {
@@ -539,8 +573,13 @@ pub struct CompiledGraphPlan {
     pub(crate) state_keys: Vec<(u64, String)>,
     pub(crate) node_ids: Vec<u64>,
     pub(crate) op_to_node_slot: Vec<Option<usize>>,
+    pub(crate) node_eval_ns: Vec<u32>,
     pub(crate) node_eval_us: Vec<f32>,
     pub(crate) node_live_values: Vec<f32>,
+    pub(crate) last_total_eval_ns: u64,
+    pub(crate) output_pins: Vec<CompiledPinSlot>,
+    pub(crate) pin_kinds: Vec<u8>,
+    pub(crate) pin_values: Vec<[f32; 4]>,
     pub(crate) latched_bindings: Vec<LatchedBinding>,
 }
 
@@ -555,8 +594,13 @@ impl CompiledGraphPlan {
             state_keys: Vec::new(),
             node_ids: Vec::new(),
             op_to_node_slot: Vec::new(),
+            node_eval_ns: Vec::new(),
             node_eval_us: Vec::new(),
             node_live_values: Vec::new(),
+            last_total_eval_ns: 0,
+            output_pins: Vec::new(),
+            pin_kinds: Vec::new(),
+            pin_values: Vec::new(),
             latched_bindings: Vec::new(),
         }
     }
@@ -657,6 +701,12 @@ fn emit_copy_or_coerce(
         (SlotRef::VisemeSet(s), SlotRef::VisemeSet(d)) => {
             ops.push(Op::CopyVisemeSet { src: s, dst: d });
         }
+        (SlotRef::VisemeSet(s), SlotRef::ExprSet(d)) => {
+            ops.push(Op::VisemeToExprSet { src: s, dst: d });
+        }
+        (SlotRef::AudioFrame(s), SlotRef::AudioFrame(d)) => {
+            ops.push(Op::CopyAudioFrame { src: s, dst: d });
+        }
         (SlotRef::Color(s), SlotRef::Color(d)) => ops.push(Op::CopyColor { src: s, dst: d }),
         (SlotRef::Bool(s), SlotRef::Float(d)) => ops.push(Op::CastBoolToFloat { src: s, dst: d }),
         (SlotRef::Float(s), SlotRef::Bool(d)) => ops.push(Op::CastFloatToBool { src: s, dst: d }),
@@ -702,19 +752,49 @@ pub fn compile_graph_document(
         ports_per_node.push(resolved);
     }
 
-    // Validate edges, types, String runtime wire ban, OutputPose strict Pose rule, and single driver per input.
-    let mut driven_inputs: HashMap<(u64, String), usize> = HashMap::with_capacity(doc.edges.len());
-    let mut incoming_for_node: Vec<Vec<&GraphEdge>> = vec![Vec::new(); doc.nodes.len()];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); doc.nodes.len()];
-    let mut in_degree: Vec<usize> = vec![0; doc.nodes.len()];
-
-    for (edge_idx, edge) in doc.edges.iter().enumerate() {
+    let normalize_compat_port = |node_idx: usize, dir: PortDirection, port_name: &str| -> String {
+        if ports_per_node[node_idx]
+            .iter()
+            .any(|p| p.direction == dir && p.name == port_name)
+        {
+            return port_name.to_owned();
+        }
+        match (kinds[node_idx], dir, port_name) {
+            (NodeKind::DspAudio, PortDirection::Output, "visemes")
+            | (NodeKind::FormantLipSync, PortDirection::Input, "visemes") => "audio".to_owned(),
+            (NodeKind::FormantLipSync, PortDirection::Output, "expressions") => {
+                "visemes".to_owned()
+            }
+            _ => port_name.to_owned(),
+        }
+    };
+    let mut normalized_edges: Vec<GraphEdge> = Vec::with_capacity(doc.edges.len());
+    for edge in &doc.edges {
         let from_idx = *id_to_idx.get(&edge.from_node).ok_or_else(|| {
             HostError::compile(edge.from_node, "edge references missing source node")
         })?;
         let to_idx = *id_to_idx.get(&edge.to_node).ok_or_else(|| {
             HostError::compile(edge.to_node, "edge references missing target node")
         })?;
+        normalized_edges.push(GraphEdge {
+            id: edge.id,
+            from_node: edge.from_node,
+            from_port: normalize_compat_port(from_idx, PortDirection::Output, &edge.from_port),
+            to_node: edge.to_node,
+            to_port: normalize_compat_port(to_idx, PortDirection::Input, &edge.to_port),
+        });
+    }
+
+    // Validate edges, types, String runtime wire ban, OutputPose strict Pose rule, and single driver per input.
+    let mut driven_inputs: HashMap<(u64, String), usize> =
+        HashMap::with_capacity(normalized_edges.len());
+    let mut incoming_for_node: Vec<Vec<&GraphEdge>> = vec![Vec::new(); doc.nodes.len()];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); doc.nodes.len()];
+    let mut in_degree: Vec<usize> = vec![0; doc.nodes.len()];
+
+    for (edge_idx, edge) in normalized_edges.iter().enumerate() {
+        let from_idx = id_to_idx[&edge.from_node];
+        let to_idx = id_to_idx[&edge.to_node];
 
         let from_port = ports_per_node[from_idx]
             .iter()
@@ -817,6 +897,8 @@ pub fn compile_graph_document(
 
     let mut port_slots: BTreeMap<(u64, String, bool), SlotRef> = BTreeMap::new();
     let mut delay_nodes: Vec<(usize, u64)> = Vec::new();
+    let mut delay_ui_slots: HashMap<u64, usize> = HashMap::new();
+    let mut output_pins: Vec<CompiledPinSlot> = Vec::new();
 
     // Allocate every node's input/output slots upfront.
     for (idx, node) in doc.nodes.iter().enumerate() {
@@ -911,6 +993,25 @@ pub fn compile_graph_document(
         let kind = kinds[idx];
         let ui_slot = node_ids.len();
         node_ids.push(node.id);
+        let mut out_pin_idx = 0_u8;
+        for port in ports_per_node[idx]
+            .iter()
+            .filter(|p| p.direction == PortDirection::Output)
+        {
+            let slot = if port.ty == ValueType::String {
+                None
+            } else {
+                port_slots.get(&(node.id, port.name.clone(), true)).copied()
+            };
+            if output_pins.len() < aether_ffi::AETHER_GRAPH_MAX_DEBUG_PINS {
+                output_pins.push(CompiledPinSlot {
+                    node_id: node.id,
+                    pin_idx: out_pin_idx,
+                    slot,
+                });
+            }
+            out_pin_idx = out_pin_idx.saturating_add(1);
+        }
 
         // Emit wire copies / coercions into this node's input slots cleanly (Delay input deferred).
         if kind != NodeKind::Delay {
@@ -921,11 +1022,38 @@ pub fn compile_graph_document(
             }
         }
 
+        // Studio "Bypass / Mute Node": each output passes through the first input of the same value
+        // type (pose -> pose, expressions -> expressions, a -> out ...); outputs without a matching
+        // input keep their zero/default slot value, and the node's own op is not emitted. Sources and
+        // sinks are therefore muted. Delay and WASM plugin nodes keep their state wiring and ignore it.
+        let bypassed = node
+            .params
+            .get("bypass")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if bypassed && !matches!(kind, NodeKind::Delay | NodeKind::WasmPlugin) {
+            for out_port in ports_per_node[idx]
+                .iter()
+                .filter(|p| p.direction == PortDirection::Output && p.ty != ValueType::String)
+            {
+                if let Some(in_port) = ports_per_node[idx]
+                    .iter()
+                    .find(|p| p.direction == PortDirection::Input && p.ty == out_port.ty)
+                {
+                    let src = port_slots[&(node.id, in_port.name.clone(), false)];
+                    let dst = port_slots[&(node.id, out_port.name.clone(), true)];
+                    emit_copy_or_coerce(&mut ops, &mut op_to_node_slot, src, dst)?;
+                }
+            }
+            continue;
+        }
+
         let in_slot = |name: &str| port_slots[&(node.id, name.to_owned(), false)].as_usize();
         let out_slot = |name: &str| port_slots[&(node.id, name.to_owned(), true)].as_usize();
 
         let emitted = match kind {
             NodeKind::Delay => {
+                delay_ui_slots.insert(node.id, ui_slot);
                 // DelayRead already emitted before DAG loop; DelayWrite emits at end after all producers execute.
                 continue;
             }
@@ -938,7 +1066,7 @@ pub fn compile_graph_document(
                 out_ep_id: out_slot("ep_id"),
             },
             NodeKind::DspAudio => Op::DspAudio {
-                out_visemes: out_slot("visemes"),
+                out_audio: out_slot("audio"),
                 out_rms_db: out_slot("rms_db"),
                 out_voice_active: out_slot("voice_active"),
             },
@@ -987,9 +1115,9 @@ pub fn compile_graph_document(
                 out_pose: out_slot("pose"),
             },
             NodeKind::FormantLipSync => Op::FormantLipSync {
-                in_visemes: in_slot("visemes"),
+                in_audio: in_slot("audio"),
                 in_gain: in_slot("gain"),
-                out_expr: out_slot("expressions"),
+                out_visemes: out_slot("visemes"),
             },
             NodeKind::ExpressionTrigger => Op::ExpressionTrigger {
                 in_trigger: in_slot("trigger"),
@@ -1258,10 +1386,11 @@ pub fn compile_graph_document(
             src: in_f,
             state_idx: s_idx,
         });
-        op_to_node_slot.push(None);
+        op_to_node_slot.push(delay_ui_slots.get(&delay_id).copied());
     }
 
     let node_count = node_ids.len();
+    let pin_count = output_pins.len();
     Ok(CompiledGraphPlan {
         arena,
         ops,
@@ -1269,8 +1398,13 @@ pub fn compile_graph_document(
         state_keys,
         node_ids,
         op_to_node_slot,
+        node_eval_ns: vec![0; node_count],
         node_eval_us: vec![0.0; node_count],
         node_live_values: vec![0.0; node_count],
+        last_total_eval_ns: 0,
+        output_pins,
+        pin_kinds: vec![0; pin_count],
+        pin_values: vec![[0.0; 4]; pin_count],
         latched_bindings,
     })
 }

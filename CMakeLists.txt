@@ -96,7 +96,8 @@ add_custom_command(
         --crate aether-ffi
         --output "${CMAKE_BINARY_DIR}/ffi_check/aether_ffi_contract.h"
         "${CMAKE_SOURCE_DIR}/crates/aether-ffi"
-    COMMAND "${CMAKE_COMMAND}" -E compare_files
+    # --ignore-eol: Windows checkouts with core.autocrlf=true mix CRLF/LF in cbindgen doc comments.
+    COMMAND "${CMAKE_COMMAND}" -E compare_files --ignore-eol
         "${CMAKE_BINARY_DIR}/ffi_check/aether_ffi_contract.h"
         "${CMAKE_SOURCE_DIR}/include/aether_ffi_contract.h"
     DEPENDS

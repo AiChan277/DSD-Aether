@@ -13,11 +13,22 @@ struct JointLimitEulerRad {
     float min_z{-3.14159f}, max_z{3.14159f};
 };
 
+struct RestColliderDef {
+    int32_t attached_bone{AETHER_BONE_HIPS};
+    uint8_t shape{0}; // 0 = sphere, 1 = capsule
+    uint8_t pad[3]{};
+    Vec3 local_a{};
+    Vec3 local_b{};
+    float radius{0.05f};
+};
+
 struct RestSkeletonMetrics {
     std::array<int32_t, AETHER_HUMANOID_BONE_COUNT> parent_indices{};
     std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> rest_local_positions{};
     std::array<Quat, AETHER_HUMANOID_BONE_COUNT> rest_local_rotations{};
     std::array<float, AETHER_HUMANOID_BONE_COUNT> bone_lengths{};
+    std::array<RestColliderDef, 32> custom_colliders{};
+    uint32_t custom_collider_count{0};
     bool valid{false};
 };
 

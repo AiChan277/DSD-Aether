@@ -162,9 +162,11 @@ uint64_t OutputCoordinator::process_slot(const OutputRingSlot& slot, float obser
     const float video_latency_ms = (slot.t3_start_us > 0u && done_qpc_us > slot.t3_start_us)
                                        ? static_cast<float>(done_qpc_us - slot.t3_start_us) * 0.001f
                                        : 0.5f;
-    const float m2p_ms = (slot.t1_capture_us > 0u && done_qpc_us > slot.t1_capture_us)
-                             ? static_cast<float>(done_qpc_us - slot.t1_capture_us) * 0.001f
-                             : video_latency_ms;
+    const bool valid_m2p_slot = slot.tracking_active && (slot.t1_capture_us > 0u) &&
+                                (done_qpc_us > slot.t1_capture_us) &&
+                                ((done_qpc_us - slot.t1_capture_us) <= 5'000'000ULL);
+    const float m2p_ms =
+        valid_m2p_slot ? static_cast<float>(done_qpc_us - slot.t1_capture_us) * 0.001f : video_latency_ms;
 
     uint32_t video_flags = 0x01u;
     if (spout_.is_active()) {

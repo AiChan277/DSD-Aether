@@ -139,6 +139,12 @@ unsafe extern "C" {
         out_stats: *mut AetherGraphPlanStats,
     ) -> AetherStatus;
 
+    /// Populates 64-byte aligned per-node nanosecond timings and output pin values for UI watches (`§7.2`). `[ui]`
+    pub fn aether_host_get_telemetry_readout(
+        host: AetherHostHandle,
+        out_readout: *mut AetherGraphTelemetryReadout,
+    ) -> AetherStatus;
+
     /// Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`
     pub fn aether_ffi_layout_table_json(out_len: *mut usize) -> *const u8;
 }

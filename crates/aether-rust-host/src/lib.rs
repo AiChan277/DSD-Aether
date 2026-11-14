@@ -28,7 +28,8 @@ use aether_ffi::{
     AETHER_THREAD_ROLE_LOADER, AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_PLUGIN,
     AETHER_THREAD_ROLE_T2, AETHER_THREAD_ROLE_UI, AetherArenaSlice, AetherAssetRequirements,
     AetherAvatarDesc, AetherGraphInputs, AetherGraphOutputs, AetherGraphPlanStats,
-    AetherHostCommand, AetherHostConfig, AetherHostEvent, AetherHostHandle, AetherLoadRequest,
+    AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig, AetherHostEvent,
+    AetherHostHandle, AetherLoadRequest,
     AetherLoaderHandle, AetherPlanHandle, AetherRuntimeConfig, AetherStatus, AetherTrackingFrame,
     LAYOUT_TABLE_JSON,
 };
@@ -775,6 +776,36 @@ pub unsafe extern "C" fn aether_host_get_plan_stats(
         let stats_ref = unsafe { &mut *out_stats };
         host_ref
             .get_plan_stats(stats_ref)
+            .map_err(|e| map_host_error(&e))
+    })
+}
+
+/// Populates 64-byte aligned per-node nanosecond timings and output pin readout values for UI watches. `[ui]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_host_get_telemetry_readout(
+    host: AetherHostHandle,
+    out_readout: *mut AetherGraphTelemetryReadout,
+) -> AetherStatus {
+    ffi_guard_cow(AETHER_THREAD_ROLE_UI, || {
+        if host.is_null() || out_readout.is_null() {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                Cow::Borrowed("null host or out_readout pointer"),
+            ));
+        }
+        // SAFETY: Valid `host` handle and writable `out_readout` pointer guaranteed by caller.
+        let host_ref = unsafe { &*host.cast::<PluginHost>() };
+        // SAFETY: `out_readout` verified non-null above.
+        let readout_ref = unsafe { &mut *out_readout };
+        let expected_size = size_of::<AetherGraphTelemetryReadout>() as u32;
+        if readout_ref.struct_size != 0 && readout_ref.struct_size != expected_size {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                Cow::Borrowed("unexpected AetherGraphTelemetryReadout struct_size"),
+            ));
+        }
+        host_ref
+            .get_telemetry_readout(readout_ref)
             .map_err(|e| map_host_error(&e))
     })
 }

@@ -16,6 +16,11 @@
 #include <cstdint>
 #include <vector>
 
+namespace aether::animation {
+struct SpringColliderOverlay;
+struct SpringSegmentOverlay;
+} // namespace aether::animation
+
 namespace aether::renderer {
 
 struct SdfBakeOutput;
@@ -76,9 +81,18 @@ struct FrameRenderRequest {
     bool premul_alpha{true};
     bool show_checkerboard{true};
     bool show_skeleton_heatmap{false};
+    bool wireframe{false};
+    bool show_rig_colliders{false};
     bool show_orbit_orb{true};
     bool render_csm_shadow{true};
     float outline_width_scale{1.0f};
+    std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
+    float avatar_rot_y_deg{0.0f};
+    float avatar_scale{1.0f};
+    const animation::SpringColliderOverlay* spring_colliders{nullptr};
+    uint32_t spring_collider_count{0};
+    const animation::SpringSegmentOverlay* spring_segments{nullptr};
+    uint32_t spring_segment_count{0};
     std::array<float, 3> non_alpha_bg_rgb{0.0f, 177.0f / 255.0f, 64.0f / 255.0f};
     bool need_straight_alpha{false};
     bool need_bottom_up{false};
@@ -184,6 +198,7 @@ class FrameGraph {
     [[nodiscard]] uint32_t effective_output_height() const noexcept {
         return cfg_.output_height > 0 ? cfg_.output_height : cfg_.height;
     }
+    [[nodiscard]] bool wireframe_supported() const noexcept { return wireframe_supported_; }
     [[nodiscard]] const rhi::GpuTimingRing& timing() const noexcept { return timing_; }
     [[nodiscard]] rhi::GpuTimingRing& timing() noexcept { return timing_; }
     [[nodiscard]] const DenoiserManager& denoiser() const noexcept { return denoiser_; }
@@ -299,6 +314,9 @@ class FrameGraph {
     VkPipeline pso_live2d_opaque_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_double_sided_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_blend_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_opaque_wire_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_double_sided_wire_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_blend_wire_{VK_NULL_HANDLE};
     VkPipeline pso_orbit_orb_{VK_NULL_HANDLE};
     VkPipeline pso_outline_hull_{VK_NULL_HANDLE};
     VkPipeline pso_crease_lines_{VK_NULL_HANDLE};
@@ -313,10 +331,11 @@ class FrameGraph {
     std::vector<uint32_t> opaque_draw_indices_{};
     std::vector<uint32_t> cutout_draw_indices_{};
     std::vector<uint32_t> transparent_draw_indices_{};
-    std::array<GpuHeatmapBone, 128> heatmap_scratch_{};
+    std::array<GpuHeatmapBone, 4096> heatmap_scratch_{};
     std::array<int64_t, 27> shader_mtimes_{};
     bool bgra8_supports_storage_{false};
     bool pipelines_ready_{false};
+    bool wireframe_supported_{false};
 };
 #ifdef _MSC_VER
 #pragma warning(pop)

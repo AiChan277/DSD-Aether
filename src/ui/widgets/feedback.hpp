@@ -72,6 +72,23 @@ bool draw_inline_error_banner(const UiFontSet& fonts, const char* what_happened,
 /** Draws plain-text empty state centered in panel with one optional primary button (`§12.13`). */
 bool draw_empty_state(const UiFontSet& fonts, const char* message, const char* action_label = nullptr) noexcept;
 
+/** Semantic tone of a rounded status pill (`§1 BUG-08`: Active green / Idle amber / Off gray). */
+enum class PillTone : uint8_t {
+    Ok = 0,
+    Standby = 1,
+    Off = 2,
+    Error = 3,
+    Live = 4,
+};
+
+[[nodiscard]] ImU32 pill_tone_color(PillTone tone) noexcept;
+[[nodiscard]] ImVec2 status_pill_size(const char* text) noexcept;
+/** Draws a dot + label pill with its top-left at `pos_min` (pure draw call, no ImGui item). */
+void draw_status_pill_at(ImDrawList* dl, ImVec2 pos_min, const char* text, PillTone tone) noexcept;
+
+/** Secondary ghost button: transparent fill, hairline border, left-aligned label, optional trailing icon. */
+bool ghost_button(const char* label, const char* trailing_icon, ImVec2 size) noexcept;
+
 struct PluginConsentPrompt {
     bool open{false};
     std::array<char, 128> plugin_id{};

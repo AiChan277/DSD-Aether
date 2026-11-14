@@ -6,7 +6,7 @@ use aether_ffi::{AetherGraphOutputs, AetherTrackingFrame};
 
 use crate::events::SharedParamBank;
 use crate::graph::compiler::{
-    CompareOp, CompiledGraphPlan, ExprSetData, Op, PoseData, ValuesArena,
+    AudioFrameData, CompareOp, CompiledGraphPlan, ExprSetData, Op, PoseData, ValuesArena,
 };
 
 /// Number of WASM node instances supported concurrently (`§7.5 <= 64`).
@@ -283,6 +283,22 @@ fn eval_op(
             arena.viseme_sets[dst] = arena.viseme_sets[src];
             arena.viseme_sets[dst][0]
         }
+        Op::CopyAudioFrame { src, dst } => {
+            arena.audio_frames[dst] = arena.audio_frames[src];
+            arena.audio_frames[dst].env
+        }
+        Op::VisemeToExprSet { src, dst } => {
+            let vis = arena.viseme_sets[src];
+            let mut expr = ExprSetData::default();
+            for (i, &w) in vis.iter().enumerate() {
+                if let Some(slot) = expr.weights.get_mut(52 + i) {
+                    *slot = w.clamp(0.0, 1.0);
+                }
+            }
+            expr.weights[24] = (vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65).clamp(0.0, 1.0);
+            arena.expr_sets[dst] = expr;
+            expr.weights[24]
+        }
         Op::CopyColor { src, dst } => {
             arena.colors[dst] = arena.colors[src];
             arena.colors[dst][0]
@@ -353,28 +369,57 @@ fn eval_op(
         }
 
         Op::DspAudio {
-            out_visemes,
+            out_audio,
             out_rms_db,
             out_voice_active,
         } => {
             let mut vis = [0.0_f32; 5];
+            let mut vis_sum = 0.0_f32;
             for (dst, &v) in vis.iter_mut().zip(inputs.dsp_visemes.iter()) {
-                *dst = if v.is_finite() {
+                let c = if v.is_finite() {
                     v.clamp(0.0, 1.0)
                 } else {
                     0.0
                 };
+                *dst = c;
+                vis_sum += c;
             }
-            arena.viseme_sets[out_visemes] = vis;
             let rms = if inputs.dsp_rms_db.is_finite() {
                 inputs.dsp_rms_db
             } else {
                 -90.0
             };
+            let env = ((rms + 60.0) / 60.0).clamp(0.0, 1.0);
+            let voiced = rms > -50.0 || vis.iter().any(|&v| v > 0.05);
+            // Derive F1/F2 formant frequencies (Hz) from vowel distribution (A/I/U/E/O centroids).
+            let (f1_hz, f2_hz) = if vis_sum > 1e-4 {
+                const F1_HZ: [f32; 5] = [730.0, 270.0, 300.0, 530.0, 570.0];
+                const F2_HZ: [f32; 5] = [1090.0, 2290.0, 870.0, 1840.0, 840.0];
+                let mut f1 = 0.0_f32;
+                let mut f2 = 0.0_f32;
+                for i in 0..5 {
+                    let w = vis[i] / vis_sum;
+                    f1 += w * F1_HZ[i];
+                    f2 += w * F2_HZ[i];
+                }
+                (f1, f2)
+            } else if voiced {
+                vis[0] = env * 0.45;
+                (730.0, 1090.0)
+            } else {
+                (500.0, 1500.0)
+            };
+            arena.audio_frames[out_audio] = AudioFrameData {
+                env,
+                rms_db: rms,
+                voiced: if voiced { 1.0 } else { 0.0 },
+                f1_hz,
+                f2_hz,
+                visemes: vis,
+            };
             arena.floats[out_rms_db] = rms;
-            let voice = u32::from(rms > -50.0 || vis.iter().any(|&v| v > 0.05));
-            arena.bools[out_voice_active] = voice;
-            vis[0]
+            arena.bools[out_voice_active] = u32::from(voiced);
+            env
         }
 
         Op::Hotkey {
@@ -508,23 +553,25 @@ fn eval_op(
         }
 
         Op::FormantLipSync {
-            in_visemes,
+            in_audio,
             in_gain,
-            out_expr,
+            out_visemes,
         } => {
-            let vis = arena.viseme_sets[in_visemes];
+            let af = arena.audio_frames[in_audio];
             let gain = arena.floats[in_gain].clamp(0.0, 4.0);
-            let mut expr = ExprSetData::default();
-            for (i, &w) in vis.iter().enumerate() {
-                if let Some(slot) = expr.weights.get_mut(52 + i) {
-                    *slot = (w * gain).clamp(0.0, 1.0);
-                }
+            let mut vis = [0.0_f32; 5];
+            for (i, &w) in af.visemes.iter().enumerate() {
+                vis[i] = (w * gain).clamp(0.0, 1.0);
             }
-            // Map A-I-U-E-O smoothly onto Appendix B jawOpen (slot 24) and mouthFunnel/Smile hints.
-            expr.weights[24] =
-                ((vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65) * gain).clamp(0.0, 1.0);
-            arena.expr_sets[out_expr] = expr;
-            expr.weights[24]
+            // Synthesize formant weights if envelope is voiced without explicit viseme channels.
+            if af.voiced > 0.5 && vis.iter().all(|&v| v < 1e-4) {
+                let open = ((af.f1_hz - 250.0) / 550.0).clamp(0.0, 1.0);
+                let front = ((af.f2_hz - 800.0) / 1600.0).clamp(0.0, 1.0);
+                vis[0] = (af.env * open * gain).clamp(0.0, 1.0);
+                vis[1] = (af.env * front * (1.0 - open) * gain).clamp(0.0, 1.0);
+            }
+            arena.viseme_sets[out_visemes] = vis;
+            (vis[0] * 0.85 + vis[3] * 0.45 + vis[4] * 0.65).clamp(0.0, 1.0)
         }
 
         Op::ExpressionTrigger {
@@ -1023,18 +1070,107 @@ impl CompiledGraphPlan {
         // Split borrows between ops/meta and mutable arena/states.
         let arena = &mut self.arena;
         let states = &mut self.states;
+        self.node_eval_ns.fill(0);
+        self.node_eval_us.fill(0.0);
+        let plan_start = Instant::now();
         for (op_idx, op) in self.ops.iter().enumerate() {
             let op_start = Instant::now();
             let val = eval_op(op, arena, states, inputs, host, outputs);
-            let op_us = op_start.elapsed().as_secs_f32() * 1_000_000.0;
+            let op_ns = u32::try_from(op_start.elapsed().as_nanos()).unwrap_or(u32::MAX);
             if let Some(node_slot) = self.op_to_node_slot.get(op_idx).copied().flatten() {
                 if node_slot < self.node_eval_us.len() {
-                    self.node_eval_us[node_slot] = op_us;
+                    let accum_ns = self.node_eval_ns[node_slot].saturating_add(op_ns);
+                    self.node_eval_ns[node_slot] = accum_ns;
+                    self.node_eval_us[node_slot] = accum_ns as f32 * 0.001;
                     self.node_live_values[node_slot] = val;
                 }
             }
         }
-
+        self.last_total_eval_ns = u64::try_from(plan_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        for (i, pin_meta) in self.output_pins.iter().enumerate() {
+            let (kind, values) = summarize_slot(arena, pin_meta.slot);
+            self.pin_kinds[i] = kind;
+            self.pin_values[i] = values;
+        }
         t0.elapsed().as_secs_f32() * 1_000_000.0
+    }
+}
+
+fn summarize_slot(arena: &ValuesArena, slot: Option<crate::graph::compiler::SlotRef>) -> (u8, [f32; 4]) {
+    use crate::graph::compiler::SlotRef;
+    let Some(slot_ref) = slot else {
+        return (aether_ffi::AETHER_PIN_VALUE_INVALID, [0.0; 4]);
+    };
+    match slot_ref {
+        SlotRef::Event(i) => (
+            aether_ffi::AETHER_PIN_VALUE_EVENT,
+            [arena.events[i] as f32, 0.0, 0.0, 0.0],
+        ),
+        SlotRef::Bool(i) => (
+            aether_ffi::AETHER_PIN_VALUE_BOOL,
+            [if arena.bools[i] != 0 { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        ),
+        SlotRef::Float(i) => (
+            aether_ffi::AETHER_PIN_VALUE_FLOAT,
+            [arena.floats[i], 0.0, 0.0, 0.0],
+        ),
+        SlotRef::Vec3(i) => {
+            let v = arena.vec3s[i];
+            (aether_ffi::AETHER_PIN_VALUE_VEC3, [v[0], v[1], v[2], 0.0])
+        }
+        SlotRef::Quat(i) => (aether_ffi::AETHER_PIN_VALUE_QUAT, arena.quats[i]),
+        SlotRef::Transform(i) => {
+            let t = arena.transforms[i];
+            (aether_ffi::AETHER_PIN_VALUE_TRANSFORM, [t[0], t[1], t[2], t[7]])
+        }
+        SlotRef::Pose(i) => {
+            let p = &arena.poses[i];
+            (
+                aether_ffi::AETHER_PIN_VALUE_POSE,
+                [p.pos[12][0], p.pos[12][1], p.pos[12][2], p.pos[0][3]],
+            )
+        }
+        SlotRef::ExprSet(i) => {
+            let expr = &arena.expr_sets[i];
+            let mut max_w = 0.0_f32;
+            let mut active = 0_u32;
+            for &w in &expr.weights {
+                if w > max_w {
+                    max_w = w;
+                }
+                if w > 0.01 {
+                    active += 1;
+                }
+            }
+            (
+                aether_ffi::AETHER_PIN_VALUE_EXPR,
+                [max_w, active as f32, expr.weights[24], expr.weights[8]],
+            )
+        }
+        SlotRef::VisemeSet(i) => {
+            let v = arena.viseme_sets[i];
+            let mut best_idx = 0_usize;
+            let mut best_w = 0.0_f32;
+            let mut sum = 0.0_f32;
+            for (k, &w) in v.iter().enumerate() {
+                sum += w;
+                if w > best_w {
+                    best_w = w;
+                    best_idx = k;
+                }
+            }
+            (
+                aether_ffi::AETHER_PIN_VALUE_VISEME,
+                [best_w, best_idx as f32, sum, v[0]],
+            )
+        }
+        SlotRef::AudioFrame(i) => {
+            let af = arena.audio_frames[i];
+            (
+                aether_ffi::AETHER_PIN_VALUE_AUDIO,
+                [af.rms_db, af.env, af.f1_hz, af.f2_hz],
+            )
+        }
+        SlotRef::Color(i) => (aether_ffi::AETHER_PIN_VALUE_QUAT, arena.colors[i]),
     }
 }
