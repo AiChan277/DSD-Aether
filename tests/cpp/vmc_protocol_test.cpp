@@ -142,13 +142,13 @@ TEST_CASE("VMC frame: normalized identity rest bones, Unity handedness, all bone
     engine.export_vmc_pose(skin, 4.0f, frame);
     REQUIRE(frame.valid);
 
-    // Untracked legs export identity (normalized rest) and the A-pose arm exports only its ~38 deg fold, even though
+    // Untracked legs export identity (normalized rest) and the A-pose arm exports only its ~69 deg relaxed fold, even though
     // the raw VRM bind rotation of LeftUpperArm is 90 deg.
     CHECK(std::abs(frame.local_rot[AETHER_BONE_LEFT_UPPER_LEG][3]) > 0.9999f);
     const float arm_angle_deg =
         2.0f * std::acos(std::min(1.0f, std::abs(frame.local_rot[AETHER_BONE_LEFT_UPPER_ARM][3]))) * kRadToDeg;
-    CHECK(arm_angle_deg > 30.0f);
-    CHECK(arm_angle_deg < 46.0f);
+    CHECK(arm_angle_deg > 60.0f);
+    CHECK(arm_angle_deg < 78.0f);
     // The whole chain composes to the tracked 30 deg yaw; mirrored into Unity's left-handed frame (q.y flips).
     Quat chain = Quat::identity();
     for (uint32_t b : {AETHER_BONE_HIPS, AETHER_BONE_SPINE, AETHER_BONE_CHEST, AETHER_BONE_UPPER_CHEST,

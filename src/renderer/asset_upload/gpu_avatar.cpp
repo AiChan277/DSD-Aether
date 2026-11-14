@@ -293,7 +293,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
             }
             const size_t v_count = skinned_vertices_scratch.size();
             for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
-                const float w = std::clamp(morph_weights_scratch[mi], 0.0f, 1.5f);
+                // VRM morphs are authored for [0, 1]; overlapping presets must never overdrive a shape past 100%.
+                const float w = std::clamp(morph_weights_scratch[mi], 0.0f, 1.0f);
                 if (w <= 0.002f) {
                     continue;
                 }

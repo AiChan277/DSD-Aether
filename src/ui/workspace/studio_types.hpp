@@ -178,6 +178,21 @@ struct StudioActions {
     // Quick-expression overrides (F1-F8). The workspace ramps each latched slot with a cubic Hermite
     // (smoothstep) curve and sets bit `i` of `expression_dirty_mask` whenever slot `i`'s weight changed.
     static constexpr size_t kQuickExpressionSlots = 8;
+    /// Index of the momentary "Reset Neutral" quick slot (F8): it releases every other latched expression.
+    static constexpr size_t kResetNeutralQuickSlot = 7;
+    /// Graph expression slot each quick slot drives. Graph slots `52..58` feed the dedicated VRM emotion inputs
+    /// `57..63` (Joy, Angry, Sorrow, Surprised, Blush, Sparkle, Custom); slot 0 is ARKit eyeBlinkLeft (VRM Blink_L).
+    /// The quick slot index itself must never be sent: slots 0..7 are ARKit eye channels (F1 used to close an eye).
+    static constexpr std::array<int32_t, kQuickExpressionSlots> kQuickExpressionGraphSlot = {
+        52, // F1 Smile        -> Joy
+        0,  // F2 Wink L       -> eyeBlinkLeft / Blink_L
+        55, // F3 Surprised    -> Surprised
+        53, // F4 Angry        -> Angry
+        54, // F5 Sad          -> Sorrow
+        57, // F6 Sparkle Eyes -> Sparkle
+        56, // F7 Blush        -> Blush
+        -1, // F8 Reset Neutral (momentary, clears the others)
+    };
     std::array<float, kQuickExpressionSlots> expression_weights{};
     uint8_t expression_dirty_mask{0};
 
@@ -280,17 +295,17 @@ inline void format_camera_status_badge(const DevShellTrackingView& tracking, cha
     }
     const double face_pct = static_cast<double>(tracking.face_confidence * 100.0f);
     if (tracking.using_synthetic_camera) {
-        std::snprintf(out, out_cap, "Synthetic Feed (%ux%u @ %u fps) · Face %.0f%%",
+        std::snprintf(out, out_cap, "Synthetic Feed (%ux%u @ %u fps) · Face %3.0f%%",
                       tracking.camera_width > 0U ? tracking.camera_width : 1280U,
                       tracking.camera_height > 0U ? tracking.camera_height : 720U,
                       tracking.camera_fps > 0U ? tracking.camera_fps : 60U, face_pct);
     } else if (!tracking.camera_active) {
-        std::snprintf(out, out_cap, "Camera Stopped · Face %.0f%%", face_pct);
+        std::snprintf(out, out_cap, "Camera Stopped · Face %3.0f%%", face_pct);
     } else if (tracking.camera_width > 0U && tracking.camera_height > 0U) {
-        std::snprintf(out, out_cap, "%s (%ux%u @ %u fps) · Face %.0f%%", tracking.camera_label,
+        std::snprintf(out, out_cap, "%s (%ux%u @ %u fps) · Face %3.0f%%", tracking.camera_label,
                       tracking.camera_width, tracking.camera_height, tracking.camera_fps, face_pct);
     } else {
-        std::snprintf(out, out_cap, "%s · Face %.0f%%", tracking.camera_label, face_pct);
+        std::snprintf(out, out_cap, "%s · Face %3.0f%%", tracking.camera_label, face_pct);
     }
 }
 

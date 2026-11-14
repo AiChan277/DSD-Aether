@@ -711,6 +711,13 @@ void StudioWorkspace::update_expression_ramps(double now_s, StudioActions& actio
     const double dt = std::clamp(now_s - last_ramp_s_, 0.0, 0.1);
     last_ramp_s_ = now_s;
     const bool instant = params_.get_bool(ParamId::AppReduceMotion);
+    // "Reset Neutral" is momentary: pressing it releases every latched expression (they ramp out smoothly).
+    constexpr size_t kReset = StudioActions::kResetNeutralQuickSlot;
+    if (kReset < expressions_.size() && expressions_[kReset].triggered_override) {
+        for (auto& ex : expressions_) {
+            ex.triggered_override = false;
+        }
+    }
     for (size_t i = 0; i < StudioActions::kQuickExpressionSlots && i < expressions_.size(); ++i) {
         ExpressionSlotInfo& ex = expressions_[i];
         const float target = ex.triggered_override ? 1.0f : 0.0f;

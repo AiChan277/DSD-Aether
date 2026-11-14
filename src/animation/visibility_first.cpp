@@ -282,7 +282,12 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
 
     // Layered kinematic chain deltas in character world frame (rest-relative via world_delta_to_local_pose):
     // rotation share + Warudo roll lean (-dx * 12/15/8 deg) + forward lean from head depth + additive breathing.
-    const Quat spine_delta = rotvec_to_quat(spine_rv + Vec3{hips_lean.z * 0.06f, 0.0f, spine_roll_lean});
+    // Living idle: a very slow, sub-degree torso sway (two incommensurate frequencies so it never looks looped).
+    const float sway_amp = cfg.enable_idle_breathing ? cfg.idle_sway_deg * kDegToRad : 0.0f;
+    const Vec3 idle_sway{0.0f, sway_amp * std::sin(kTwoPi * 0.071f * phase_time_s_),
+                         0.7f * sway_amp * std::sin(kTwoPi * 0.113f * phase_time_s_ + 1.3f)};
+    const Quat spine_delta =
+        rotvec_to_quat(spine_rv + idle_sway + Vec3{hips_lean.z * 0.06f, 0.0f, spine_roll_lean});
     out.local_rotations[AETHER_BONE_SPINE] = rest_metrics_.world_delta_to_local_pose(AETHER_BONE_SPINE, spine_delta);
 
     const Quat chest_delta =
@@ -304,22 +309,31 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     out.local_rotations[AETHER_BONE_RIGHT_SHOULDER] =
         rest_metrics_.world_delta_to_local_pose(AETHER_BONE_RIGHT_SHOULDER, r_shoulder_delta);
 
-    // Relaxed VTuber standing A-Pose (~38 deg adducted down from horizontal, ~8 deg slight elbow bend) when untracked.
-    // Compute delta relative to the avatar's actual rest upper-arm vector so VRMs in bind A-pose or T-pose both land at ~38 deg.
+    // Natural relaxed standing pose when hands are untracked (not a stiff winged A-pose): upper arms hang
+    // `idle_arm_drop_deg` below horizontal and swing slightly forward, elbows keep a soft bend, wrists relax.
+    // The delta is measured from the avatar's actual rest upper-arm vector so T-pose and A-pose binds both land here.
     const Vec3 l_rest_u_dir =
         normalize_safe(rest_metrics_.rest_local_positions[AETHER_BONE_LEFT_LOWER_ARM], {1.0f, 0.0f, 0.0f});
     const Vec3 r_rest_u_dir =
         normalize_safe(rest_metrics_.rest_local_positions[AETHER_BONE_RIGHT_LOWER_ARM], {-1.0f, 0.0f, 0.0f});
-    const Vec3 l_target_u_dir =
-        rotate_vec(from_euler_xyz(0.0f, -4.0f * kDegToRad, -38.0f * kDegToRad), {1.0f, 0.0f, 0.0f});
-    const Vec3 r_target_u_dir =
-        rotate_vec(from_euler_xyz(0.0f, 4.0f * kDegToRad, 38.0f * kDegToRad), {-1.0f, 0.0f, 0.0f});
+    const float drop = cfg.idle_arm_drop_deg * kDegToRad;
+    const float fwd = cfg.idle_arm_forward_deg * kDegToRad;
+    const Vec3 l_target_u_dir{std::cos(drop) * std::cos(fwd), -std::sin(drop), std::cos(drop) * std::sin(fwd)};
+    const Vec3 r_target_u_dir{-std::cos(drop) * std::cos(fwd), -std::sin(drop), std::cos(drop) * std::sin(fwd)};
     const Quat l_a_delta = quat_from_to(l_rest_u_dir, l_target_u_dir);
     const Quat r_a_delta = quat_from_to(r_rest_u_dir, r_target_u_dir);
+    // Elbow flexion swings the forearm forward (+Z) about the arm's rest-frame Y axis.
+    const float elbow = cfg.idle_elbow_bend_deg * kDegToRad;
     const Quat l_upper_a = slerp(l_a_delta, Quat::identity(), w_l_arm);
-    const Quat l_lower_a = slerp(from_euler_xyz(0.0f, -8.0f * kDegToRad, -5.0f * kDegToRad), Quat::identity(), w_l_arm);
+    const Quat l_lower_a = slerp(from_euler_xyz(0.0f, -elbow, 0.0f), Quat::identity(), w_l_arm);
     const Quat r_upper_a = slerp(r_a_delta, Quat::identity(), w_r_arm);
-    const Quat r_lower_a = slerp(from_euler_xyz(0.0f, 8.0f * kDegToRad, 5.0f * kDegToRad), Quat::identity(), w_r_arm);
+    const Quat r_lower_a = slerp(from_euler_xyz(0.0f, elbow, 0.0f), Quat::identity(), w_r_arm);
+    // Relaxed wrists: slight palm-side flexion (palm faces -Y in the rest frame).
+    const float wrist = cfg.idle_wrist_flex_deg * kDegToRad;
+    out.local_rotations[AETHER_BONE_LEFT_HAND] = rest_metrics_.world_delta_to_local_pose(
+        AETHER_BONE_LEFT_HAND, slerp(from_euler_xyz(0.0f, 0.0f, -wrist), Quat::identity(), w_l_arm));
+    out.local_rotations[AETHER_BONE_RIGHT_HAND] = rest_metrics_.world_delta_to_local_pose(
+        AETHER_BONE_RIGHT_HAND, slerp(from_euler_xyz(0.0f, 0.0f, wrist), Quat::identity(), w_r_arm));
     out.local_rotations[AETHER_BONE_LEFT_UPPER_ARM] =
         rest_metrics_.world_delta_to_local_pose(AETHER_BONE_LEFT_UPPER_ARM, l_upper_a);
     out.local_rotations[AETHER_BONE_LEFT_LOWER_ARM] =
@@ -356,16 +370,24 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL] = w_lhand;
     prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL] = w_rhand;
 
-    // Gentle relaxed neutral palm-inward finger curl when untracked
-    const Quat idle_l_finger_curl = from_euler_xyz(0.0f, 0.0f, -0.22f);
-    const Quat idle_r_finger_curl = from_euler_xyz(0.0f, 0.0f, 0.22f);
+    // Relaxed natural finger curl when untracked, graded per joint (proximal < intermediate > distal, thumb lighter)
+    // so the hand reads as soft and alive instead of a flat paddle.
+    const auto idle_curl_rad = [&](size_t joint_in_hand) noexcept {
+        const size_t finger = joint_in_hand / 3U; // 0 = thumb
+        const size_t seg = joint_in_hand % 3U;    // 0 proximal, 1 intermediate, 2 distal
+        static constexpr float kSeg[3] = {0.80f, 1.25f, 0.90f};
+        const float finger_scale = (finger == 0U) ? 0.45f : (0.85f + 0.08f * static_cast<float>(finger));
+        return cfg.idle_finger_curl_rad * kSeg[seg] * finger_scale;
+    };
     for (size_t b = AETHER_BONE_LEFT_THUMB_PROXIMAL; b <= AETHER_BONE_LEFT_LITTLE_DISTAL; ++b) {
-        const Quat finger_delta = slerp(idle_l_finger_curl, normalize(tracked.joint_rotations[b]), w_lhand);
+        const Quat idle = from_euler_xyz(0.0f, 0.0f, -idle_curl_rad(b - AETHER_BONE_LEFT_THUMB_PROXIMAL));
+        const Quat finger_delta = slerp(idle, normalize(tracked.joint_rotations[b]), w_lhand);
         out.local_rotations[b] = rest_metrics_.world_delta_to_local_pose(static_cast<uint32_t>(b), finger_delta);
         out.joint_blend_weights[b] = w_lhand;
     }
     for (size_t b = AETHER_BONE_RIGHT_THUMB_PROXIMAL; b <= AETHER_BONE_RIGHT_LITTLE_DISTAL; ++b) {
-        const Quat finger_delta = slerp(idle_r_finger_curl, normalize(tracked.joint_rotations[b]), w_rhand);
+        const Quat idle = from_euler_xyz(0.0f, 0.0f, idle_curl_rad(b - AETHER_BONE_RIGHT_THUMB_PROXIMAL));
+        const Quat finger_delta = slerp(idle, normalize(tracked.joint_rotations[b]), w_rhand);
         out.local_rotations[b] = rest_metrics_.world_delta_to_local_pose(static_cast<uint32_t>(b), finger_delta);
         out.joint_blend_weights[b] = w_rhand;
     }

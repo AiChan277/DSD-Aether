@@ -1306,8 +1306,9 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
     // Extract vertices, submeshes & morph targets
     let mut vertices = Vec::new();
     let mut submeshes = Vec::new();
-    let mut morphs = Vec::new();
+    let mut morphs: Vec<RawMorphTarget> = Vec::new();
     let mut mesh_node_morph_base: HashMap<usize, usize> = HashMap::new();
+    let mut mesh_index_morph_base: HashMap<usize, usize> = HashMap::new();
     let mut total_morph_deltas = 0usize;
 
     let mut mesh_nodes: Vec<(usize, gltf::Mesh<'_>)> = Vec::new();
@@ -1327,6 +1328,8 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
         if node_idx != usize::MAX {
             mesh_node_morph_base.insert(node_idx, mesh_first_morph);
         }
+        // VRM 0.x blendShapeGroups bind `(mesh, index)` by glTF mesh index.
+        mesh_index_morph_base.entry(mesh.index()).or_insert(mesh_first_morph);
         let mesh_target_names: Option<Vec<String>> = parse_raw_json_value(mesh.extras().as_deref())
             .and_then(|v| {
                 v.get("targetNames").and_then(Value::as_array).map(|a| {
@@ -1337,7 +1340,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                 })
             });
 
-        for prim in mesh.primitives() {
+        for (prim_i, prim) in mesh.primitives().enumerate() {
             check_draco_map(prim.extensions())?;
             let pos_acc = prim
                 .get(&gltf::Semantic::Positions)
@@ -1456,8 +1459,6 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                     })
                 });
 
-            let target_count = prim.morph_targets().len();
-            check_morph_count(morphs.len() + target_count)?;
 
             for (t_i, target) in prim.morph_targets().enumerate() {
                 let tname = prim_target_names
@@ -1496,6 +1497,23 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                 if total_morph_deltas > MAX_MORPH_DELTAS {
                     return Err(LoaderError::LimitExceeded("morph deltas exceed 16M"));
                 }
+                // glTF: morph target `t_i` of a mesh is ONE shape spanning every primitive of that mesh. VRoid face
+                // meshes split skin / lashes / eye whites / irises / brows into primitives, and expressions bind
+                // `(mesh, t_i)`, so later primitives must merge into the first primitive's morph instead of creating
+                // unreachable duplicates (which left lashes and irises frozen while the eyelid skin blinked).
+                let merged_idx = mesh_first_morph + t_i;
+                if prim_i > 0 && merged_idx < morphs.len() {
+                    let existing = &mut morphs[merged_idx];
+                    let old_n = existing.deltas.len() as f32;
+                    let add_n = deltas.len() as f32;
+                    if add_n > 0.0 {
+                        existing.centroid_x =
+                            (existing.centroid_x * old_n + sum_x) / (old_n + add_n).max(1.0);
+                        existing.deltas.extend(deltas);
+                    }
+                    continue;
+                }
+                check_morph_count(morphs.len() + 1)?;
                 let centroid_x = if deltas.is_empty() {
                     0.0
                 } else {
@@ -1560,7 +1578,9 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             let mut binds = Vec::new();
             if let Some(arr) = g.get("binds").and_then(Value::as_array) {
                 for b in arr {
-                    let m_idx = b.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let mesh_i = b.get("mesh").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let m_rel = b.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let m_idx = mesh_index_morph_base.get(&mesh_i).copied().unwrap_or(0) + m_rel;
                     let w =
                         (b.get("weight").and_then(Value::as_f64).unwrap_or(100.0) as f32) / 100.0;
                     if m_idx < morphs.len() {

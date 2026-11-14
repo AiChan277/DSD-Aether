@@ -90,6 +90,21 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
             out_morphs[dst] = 0.0f;
         }
     }
+
+    // VRM "overrideBlink" behaviour: emotion presets (Joy/Angry/Sorrow/Surprised at 57..60) reshape the eyes, so the
+    // tracked blink fades out while they are active instead of stacking onto the emotion's own eyelid shape.
+    // An explicit graph/hotkey override on a blink slot (e.g. F2 Wink) is left untouched.
+    float emotion = 0.0f;
+    for (size_t m = 57U; m <= 60U; ++m) {
+        emotion = std::max(emotion, out_morphs[m]);
+    }
+    if (emotion > 0.0f) {
+        for (size_t b : {size_t{0U}, size_t{7U}}) {
+            if (!(graph_out.expression_override[b] > 0.0f)) {
+                out_morphs[b] *= (1.0f - std::clamp(emotion, 0.0f, 1.0f));
+            }
+        }
+    }
 }
 
 } // namespace aether::animation

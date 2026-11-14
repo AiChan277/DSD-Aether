@@ -70,21 +70,29 @@ struct ScopedRowColors {
     ScopedRowColors& operator=(const ScopedRowColors&) = delete;
 };
 
-/** Copies `text` into `out`, eliding with "..." to fit `max_w` px. */
-void elide_into(const char* text, float max_w, char* out, size_t cap) noexcept {
+/** Copies `text` into `out`, eliding with "..." to fit `max_w` px without splitting a UTF-8 code point
+ *  (Japanese file / bone names). Returns true when the text was shortened. */
+bool elide_into(const char* text, float max_w, char* out, size_t cap) noexcept {
     std::snprintf(out, cap, "%s", text != nullptr ? text : "");
     if (ImGui::CalcTextSize(out).x <= max_w) {
-        return;
+        return false;
     }
     const float dots = ImGui::CalcTextSize("...").x;
     size_t len = std::strlen(out);
     while (len > 0) {
-        out[--len] = '\0';
+        --len;
+        while (len > 0 && (static_cast<unsigned char>(out[len]) & 0xC0U) == 0x80U) {
+            --len; // back up to the lead byte of this code point
+        }
+        out[len] = '\0';
         if (ImGui::CalcTextSize(out).x + dots <= max_w) {
             break;
         }
     }
-    std::snprintf(out + len, cap - len, "...");
+    if (len + 4U <= cap) {
+        std::snprintf(out + len, cap - len, "...");
+    }
+    return true;
 }
 
 } // namespace
@@ -162,18 +170,34 @@ void OutlinerPanel::draw_scene_well(const DevShellAvatarView& avatar, const UiFo
                 }
                 any_visible = true;
                 const bool sel = (selection.kind == k && selection.item_index == idx);
-                char row_lbl[160]{};
-                std::snprintf(row_lbl, sizeof(row_lbl), "%s  %s##scene%d", icon, label, static_cast<int>(k) * 64 + idx);
-                if (ImGui::Selectable(row_lbl, sel)) {
+                char row_id[32]{};
+                std::snprintf(row_id, sizeof(row_id), "##scene%d", static_cast<int>(k) * 64 + idx);
+                if (ImGui::Selectable(row_id, sel)) {
                     set_selection(selection, k, idx, label);
                 }
+                const bool row_hovered = ImGui::IsItemHovered();
+                const ImVec2 rmin = ImGui::GetItemRectMin();
+                const ImVec2 rmax = ImGui::GetItemRectMax();
+                ImDrawList* row_dl = ImGui::GetWindowDrawList();
+                // Badge is right-aligned; the label is elided so it always ends before the badge (no overdraw).
+                float badge_w = 0.0f;
                 if (badge != nullptr && badge[0] != '\0') {
                     const ImVec2 bsz = ImGui::CalcTextSize(badge);
-                    const ImVec2 rmax = ImGui::GetItemRectMax();
-                    const ImVec2 rmin = ImGui::GetItemRectMin();
-                    ImGui::GetWindowDrawList()->AddText(
-                        ImVec2(rmax.x - bsz.x - 4.0f * scale, rmin.y + (rmax.y - rmin.y - bsz.y) * 0.5f),
-                        t.col32_text_tertiary, badge);
+                    badge_w = bsz.x + 12.0f * scale;
+                    row_dl->AddText(ImVec2(std::floor(rmax.x - bsz.x - 4.0f * scale),
+                                           std::floor(rmin.y + (rmax.y - rmin.y - bsz.y) * 0.5f)),
+                                    t.col32_text_tertiary, badge);
+                }
+                char full_lbl[192]{};
+                std::snprintf(full_lbl, sizeof(full_lbl), "%s  %s", icon, label);
+                char vis_lbl[192]{};
+                const bool elided =
+                    elide_into(full_lbl, std::max(8.0f, rmax.x - rmin.x - badge_w), vis_lbl, sizeof(vis_lbl));
+                const float text_h = ImGui::GetTextLineHeight();
+                row_dl->AddText(ImVec2(rmin.x, std::floor(rmin.y + (rmax.y - rmin.y - text_h) * 0.5f)),
+                                ImGui::GetColorU32(ImGuiCol_Text), vis_lbl);
+                if (elided && row_hovered) {
+                    ImGui::SetTooltip("%s", label);
                 }
             };
 

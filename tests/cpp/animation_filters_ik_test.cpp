@@ -303,22 +303,22 @@ TEST_CASE("60Hz critically-damped kinematic chain, zero jitter, C2 follow-throug
         }
         CHECK(max_jitter_deg < 0.001f);
 
-        // Verify upright rest pose preservation & relaxed ~38 deg A-pose upper arms
+        // Verify upright rest pose preservation & relaxed natural idle arms (~68 deg below horizontal)
         const Vec3 head_delta_aa =
             to_axis_angle(normalize(engine.bone_rot_ws()[AETHER_BONE_HEAD] * conjugate(rm.rest_world_rotations[AETHER_BONE_HEAD])));
         CHECK(length(head_delta_aa) * kRadToDeg < 0.25f);
 
-        // With no hands tracked, upper arms hang downward from shoulder (~38 deg adduction along -Y)
+        // With no hands tracked, upper arms hang downward from shoulder (~68 deg below horizontal)
         const Vec3 l_arm_vec =
             engine.bone_pos_ws()[AETHER_BONE_LEFT_LOWER_ARM] - engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM];
         const Vec3 r_arm_vec =
             engine.bone_pos_ws()[AETHER_BONE_RIGHT_LOWER_ARM] - engine.bone_pos_ws()[AETHER_BONE_RIGHT_UPPER_ARM];
         const float l_drop_deg = std::asin(std::clamp(-normalize_safe(l_arm_vec).y, -1.0f, 1.0f)) * kRadToDeg;
         const float r_drop_deg = std::asin(std::clamp(-normalize_safe(r_arm_vec).y, -1.0f, 1.0f)) * kRadToDeg;
-        CHECK(l_drop_deg > 30.0f);
-        CHECK(l_drop_deg < 46.0f);
-        CHECK(r_drop_deg > 30.0f);
-        CHECK(r_drop_deg < 46.0f);
+        CHECK(l_drop_deg > 60.0f);
+        CHECK(l_drop_deg < 76.0f);
+        CHECK(r_drop_deg > 60.0f);
+        CHECK(r_drop_deg < 76.0f);
     }
 
     // 2. Step head turn (+24 deg Yaw): layered Spine -> Chest -> Neck -> Head follow-through,
@@ -526,15 +526,15 @@ TEST_CASE("Live default node graph + near-neutral tracking keeps avatar upright,
     CHECK(std::abs(head_pos.z - rest_head_pos.z) < 0.03f);
     CHECK(head_pos.y > rest_head_pos.y - 0.02f); // not dragged down toward the hips
 
-    // Shoulders level, arms relaxed into the ~38 deg A-pose (not yanked to the floor / origin).
+    // Shoulders level, arms relaxed into the natural ~68 deg idle pose (not yanked to the floor / origin).
     CHECK(std::abs(engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM].y -
                    engine.bone_pos_ws()[AETHER_BONE_RIGHT_UPPER_ARM].y) < 0.01f);
     const float l_drop = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
     const float r_drop = arm_drop_deg(engine, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM);
-    CHECK(l_drop > 30.0f);
-    CHECK(l_drop < 46.0f);
-    CHECK(r_drop > 30.0f);
-    CHECK(r_drop < 46.0f);
+    CHECK(l_drop > 60.0f);
+    CHECK(l_drop < 76.0f);
+    CHECK(r_drop > 60.0f);
+    CHECK(r_drop < 76.0f);
 
     // Rock-solid steady state for the whole Hips -> Head chain with 0.025 deg camera noise.
     CHECK(max_jitter_deg < 0.001f);
@@ -573,7 +573,8 @@ TEST_CASE("Graph IK override is per-tick: a one-off head target never latches th
         engine.tick(raw, dsp, gout, static_cast<uint64_t>(f + 1) * 16667ULL, 0.0f, cfg, skin);
         if (f == 20) {
             CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 0.5f);
-            CHECK(arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM) < 46.0f);
+            // An IK pull to the origin would swing the left hand inward past the shoulder; the idle arm hangs outside it.
+            CHECK(engine.bone_pos_ws()[AETHER_BONE_LEFT_HAND].x > engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM].x);
         }
     }
     CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 0.5f);
@@ -741,4 +742,27 @@ TEST_CASE("Warudo pendulum lean: torso rolls with lateral head offset, head stay
     const Vec3 head_up = rotate_vec(world_delta(AETHER_BONE_HEAD), {0.0f, 1.0f, 0.0f});
     CHECK(std::abs(head_up.x) < 0.02f);
     CHECK(engine.bone_pos_ws()[AETHER_BONE_HEAD].x > engine.bone_pos_ws()[AETHER_BONE_HIPS].x);
+}
+
+TEST_CASE("Emotion presets suppress tracked blink (VRM overrideBlink) but keep explicit winks", "[animation][expression]") {
+    ExpressionMixer mixer;
+    mixer.reset();
+    std::array<float, 52> cam{};
+    cam[0] = 0.7f;
+    cam[7] = 0.7f;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    gout.expression_weights[52] = 1.0f; // graph slot 52 -> Joy input 57 (F1)
+    gout.expression_override[52] = 1.0f;
+    std::array<float, kMaxMorphs> out{};
+    float blend = 0.0f;
+    mixer.update(cam.data(), dsp, gout, 1.0f / 60.0f, out.data(), blend);
+    CHECK(out[57] == 1.0f);
+    CHECK(out[0] < 1e-6f); // Joy's own closed-eye shape is not stacked with the tracked blink
+    CHECK(out[7] < 1e-6f);
+
+    gout.expression_weights[0] = 1.0f; // explicit wink override survives
+    gout.expression_override[0] = 1.0f;
+    mixer.update(cam.data(), dsp, gout, 1.0f / 60.0f, out.data(), blend);
+    CHECK(out[0] > 0.99f);
 }

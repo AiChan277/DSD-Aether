@@ -860,3 +860,20 @@ struct ScopedUiRig {
 };
 
 } // namespace aether::ui
+
+TEST_CASE("Quick expressions F1-F8 never drive ARKit eye-look slots and F8 is a reset", "[ui][expressions]") {
+    using aether::ui::StudioActions;
+    // Regression: the quick slot index (0..7) used to be sent as the expression slot, so F1 "Smile" closed the left
+    // eye (ARKit 0) and F3..F7 drove eye-look channels. Only F2 (Wink L) may target an ARKit slot, and only slot 0.
+    for (size_t i = 0; i < StudioActions::kQuickExpressionSlots; ++i) {
+        const int32_t s = StudioActions::kQuickExpressionGraphSlot[i];
+        if (i == 1U) {
+            CHECK(s == 0);
+        } else if (i == StudioActions::kResetNeutralQuickSlot) {
+            CHECK(s < 0);
+        } else {
+            CHECK(s >= 52);
+            CHECK(s <= 58);
+        }
+    }
+}

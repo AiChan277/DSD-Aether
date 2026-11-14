@@ -1712,9 +1712,10 @@ int run_application(const AppLaunchOptions& opts) {
             if (studio_actions.expression_dirty_mask != 0) {
                 // Hermite-ramped quick-expression weights (UI interpolates; host applies as overrides).
                 for (size_t slot = 0; slot < ui::StudioActions::kQuickExpressionSlots; ++slot) {
-                    if ((studio_actions.expression_dirty_mask & (1u << slot)) != 0) {
-                        post_host_cmd(plugin_host, AETHER_HOST_CMD_TRIGGER_EXPRESSION, static_cast<uint64_t>(slot),
-                                      studio_actions.expression_weights[slot]);
+                    const int32_t graph_slot = ui::StudioActions::kQuickExpressionGraphSlot[slot];
+                    if ((studio_actions.expression_dirty_mask & (1u << slot)) != 0 && graph_slot >= 0) {
+                        post_host_cmd(plugin_host, AETHER_HOST_CMD_TRIGGER_EXPRESSION,
+                                      static_cast<uint64_t>(graph_slot), studio_actions.expression_weights[slot]);
                     }
                 }
                 studio_actions.expression_dirty_mask = 0;

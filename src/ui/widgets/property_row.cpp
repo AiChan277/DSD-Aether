@@ -134,8 +134,15 @@ void draw_scrub_well(ImDrawList* dl, ImVec2 p0, ImVec2 p1, float frac, float ori
     if (hi >= 0.999f) {
         corners |= ImDrawFlags_RoundCornersRight;
     }
-    dl->AddRectFilled(ImVec2(p0.x + w * lo, p0.y), ImVec2(p0.x + w * hi, p1.y),
-                      active ? t.col32_scrub_fill_active : t.col32_scrub_fill, rounding, corners);
+    // A full-height solid fill put a hard colour edge straight through the right-aligned value digits (e.g. "32|.0").
+    // Keep the body translucent so the text always reads cleanly, and show the exact value as a solid bottom bar.
+    const ImU32 fill = active ? t.col32_scrub_fill_active : t.col32_scrub_fill;
+    const float x0 = std::floor(p0.x + w * lo);
+    const float x1 = std::max(x0 + 1.0f, std::floor(p0.x + w * hi));
+    dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x1, p1.y), col32_with_alpha(fill, active ? 0x70U : 0x48U), rounding,
+                      corners);
+    const float bar_h = std::max(2.0f, std::round(2.0f * ui_scale()));
+    dl->AddRectFilled(ImVec2(x0, p1.y - bar_h), ImVec2(x1, p1.y), fill, 0.0f);
 }
 
 void draw_scrub_overlay(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const char* unit, bool focused, bool editing) noexcept {

@@ -408,7 +408,7 @@ fn compute_aabb(vertices: &[crate::ir::RawVertex]) -> ([f32; 3], [f32; 3]) {
     (min_p, max_p)
 }
 
-fn map_preset_to_slots(name: &str, centroid_x: f32) -> Vec<(u32, f32)> {
+fn map_preset_to_slots(name: &str, centroid_x: f32, has_per_eye_blink: bool) -> Vec<(u32, f32)> {
     const ARKIT_LOWER: [&str; 52] = [
         "eyeblinkleft",
         "eyelookdownleft",
@@ -488,8 +488,8 @@ fn map_preset_to_slots(name: &str, centroid_x: f32) -> Vec<(u32, f32)> {
         || lower.contains("left")
         || trimmed.contains('左');
 
-    // Visemes 52..56: A, I, U, E, O
-    match trimmed {
+    // Visemes 52..56: A, I, U, E, O (case-insensitive: glTF/PMX morph names are often "A", "Aa", "OH")
+    match lower.as_str() {
         "あ" | "a" | "aa" | "vis_aa" | "viseme_a" | "vrc.v_aa" => return vec![(52, 1.0)],
         "い" | "i" | "ih" | "vis_ih" | "viseme_i" | "vrc.v_ih" => return vec![(53, 1.0)],
         "う" | "u" | "ou" | "vis_ou" | "viseme_u" | "vrc.v_ou" => return vec![(54, 1.0)],
@@ -500,7 +500,14 @@ fn map_preset_to_slots(name: &str, centroid_x: f32) -> Vec<(u32, f32)> {
 
     // Japanese & VRM 0/1 expressions + §6.5 ambiguous wink centroid disambiguation!
     if trimmed == "まばたき" || lower == "blink" || lower == "eyesclosed" {
-        return vec![(0, 1.0), (7, 1.0)];
+        // The renderer sums every preset bound to a morph. When the avatar also has Blink_L/Blink_R, those already
+        // close both eyes, so driving "Blink" too would stack the eyelid morphs to 2-3x (eyes collapse into the
+        // cheeks). Only fall back to "Blink" (average of both eyes, never > 1) on rigs without per-eye presets.
+        return if has_per_eye_blink {
+            Vec::new()
+        } else {
+            vec![(0, 0.5), (7, 0.5)]
+        };
     }
     if lower == "blinkleft" || lower == "blink_l" {
         return vec![(0, 1.0)];
@@ -526,27 +533,96 @@ fn map_preset_to_slots(name: &str, centroid_x: f32) -> Vec<(u32, f32)> {
     if lower.contains("mouthopen") || lower.contains("jawopen") {
         return vec![(17, 1.0)];
     }
-    if lower.contains("smile") || lower == "joy" || lower == "happy" || trimmed == "笑い" {
-        return vec![(23, 1.0), (24, 1.0)];
-    }
-    if lower == "angry" || trimmed.contains("怒") {
-        return vec![(41, 0.8), (42, 0.8), (57, 1.0)];
-    }
-    if lower == "sorrow" || lower == "sad" || trimmed.contains("哀") || trimmed.contains("困") {
-        return vec![(43, 0.9), (25, 0.6), (26, 0.6), (58, 1.0)];
+    // VRM LookAt blendshape presets -> both eyes' ARKit gaze (0.5 each so both eyes together = 1.0). "Left" is the
+    // avatar's left: its left eye looks out, its right eye looks in.
+    match lower.as_str() {
+        "lookup" => return vec![(4, 0.5), (11, 0.5)],
+        "lookdown" => return vec![(1, 0.5), (8, 0.5)],
+        "lookleft" => return vec![(3, 0.5), (9, 0.5)],
+        "lookright" => return vec![(10, 0.5), (2, 0.5)],
+        "neutral" => return Vec::new(),
+        _ => {}
     }
 
-    // Fallback: user custom expression slot in 57..63 (<= AETHER_EXPRESSION_SLOT_COUNT)
-    vec![(57, 1.0)]
+    // Whole-face emotion presets are NOT bound to tracking channels: in VRoid-style rigs they also reshape the eyes,
+    // so binding Joy to mouthSmile or Angry to browDown made every small smile / frown snap the whole face (and
+    // close the eyes). They live in dedicated custom slots driven by quick-expression hotkeys or the node graph.
+    if lower.contains("smile")
+        || lower == "joy"
+        || lower == "happy"
+        || lower == "fun"
+        || lower == "relaxed"
+        || trimmed.contains("笑")
+        || trimmed.contains("喜")
+        || trimmed.contains("楽")
+    {
+        return vec![(SLOT_JOY, 1.0)];
+    }
+    if lower == "angry" || trimmed.contains("怒") {
+        return vec![(SLOT_ANGRY, 1.0)];
+    }
+    if lower == "sorrow" || lower == "sad" || trimmed.contains("哀") || trimmed.contains("困") {
+        return vec![(SLOT_SORROW, 1.0)];
+    }
+    if lower.contains("surprise") || trimmed.contains("驚") || trimmed.contains("びっくり") {
+        return vec![(SLOT_SURPRISED, 1.0)];
+    }
+    if lower.contains("blush") || lower.contains("cheek") || trimmed.contains("照れ") || trimmed.contains("赤面") {
+        return vec![(SLOT_BLUSH, 1.0)];
+    }
+    if lower.contains("sparkle")
+        || lower.contains("star")
+        || lower.contains("highlight")
+        || lower.contains("hilight")
+        || lower.contains("kirakira")
+        || trimmed.contains("キラキラ")
+        || trimmed.contains("星")
+    {
+        return vec![(SLOT_SPARKLE, 1.0)];
+    }
+
+    // Fallback: remaining user custom expressions share the last custom slot (graph / OSC driven).
+    vec![(SLOT_CUSTOM, 1.0)]
+}
+
+/// Dedicated expression input slots `57..=63` (fed by Rust graph expression slots `52..=58`).
+pub const SLOT_JOY: u32 = 57;
+/// VRM `Angry`.
+pub const SLOT_ANGRY: u32 = 58;
+/// VRM `Sorrow` / `Sad`.
+pub const SLOT_SORROW: u32 = 59;
+/// VRM `Surprised`.
+pub const SLOT_SURPRISED: u32 = 60;
+/// Blush / cheek / 照れ custom presets.
+pub const SLOT_BLUSH: u32 = 61;
+/// Sparkle / star / highlight eye presets.
+pub const SLOT_SPARKLE: u32 = 62;
+/// Any other custom preset.
+pub const SLOT_CUSTOM: u32 = 63;
+
+fn is_left_blink_name(lower: &str) -> bool {
+    lower == "blink_l" || lower == "blinkleft"
+}
+
+fn is_right_blink_name(lower: &str) -> bool {
+    lower == "blink_r" || lower == "blinkright"
 }
 
 /// Builds the sparse Appendix B retarget matrix `W` (`§6.5`), sorted by `(input_slot, morph_index)`.
 pub fn build_expression_retarget(avatar: &ParsedAvatar) -> Vec<ResolvedExprBinding> {
+    let lower_names: Vec<String> = avatar
+        .expr_presets
+        .iter()
+        .filter(|p| !p.morph_binds.is_empty())
+        .map(|p| p.name.trim().to_ascii_lowercase())
+        .collect();
+    let has_per_eye_blink = lower_names.iter().any(|n| is_left_blink_name(n))
+        && lower_names.iter().any(|n| is_right_blink_name(n));
     let mut out = Vec::new();
     for (p_idx, preset) in avatar.expr_presets.iter().enumerate() {
         for &(m_idx, w) in &preset.morph_binds {
             let cx = avatar.morphs.get(m_idx).map_or(0.0, |m| m.centroid_x);
-            for (slot, slot_w) in map_preset_to_slots(&preset.name, cx) {
+            for (slot, slot_w) in map_preset_to_slots(&preset.name, cx, has_per_eye_blink) {
                 if slot < AETHER_EXPRESSION_SLOT_COUNT {
                     out.push(ResolvedExprBinding {
                         preset_index: p_idx as u32,
@@ -645,4 +721,42 @@ pub fn build_spring_descriptors(
     }
 
     (springs, colliders)
+}
+
+#[cfg(test)]
+mod expression_slot_tests {
+    use super::*;
+
+    #[test]
+    fn blink_preset_never_stacks_on_per_eye_presets() {
+        assert_eq!(map_preset_to_slots("Blink", 0.0, true), Vec::<(u32, f32)>::new());
+        assert_eq!(map_preset_to_slots("Blink", 0.0, false), vec![(0, 0.5), (7, 0.5)]);
+        assert_eq!(map_preset_to_slots("Blink_L", 0.0, true), vec![(0, 1.0)]);
+        assert_eq!(map_preset_to_slots("Blink_R", 0.0, true), vec![(7, 1.0)]);
+    }
+
+    #[test]
+    fn emotions_use_dedicated_slots_not_tracking_channels() {
+        assert_eq!(map_preset_to_slots("Joy", 0.0, true), vec![(SLOT_JOY, 1.0)]);
+        assert_eq!(map_preset_to_slots("Fun", 0.0, true), vec![(SLOT_JOY, 1.0)]);
+        assert_eq!(map_preset_to_slots("Angry", 0.0, true), vec![(SLOT_ANGRY, 1.0)]);
+        assert_eq!(map_preset_to_slots("Sorrow", 0.0, true), vec![(SLOT_SORROW, 1.0)]);
+        assert_eq!(map_preset_to_slots("Surprised", 0.0, true), vec![(SLOT_SURPRISED, 1.0)]);
+        for name in ["Joy", "Angry", "Sorrow", "Surprised", "Fun"] {
+            assert!(
+                map_preset_to_slots(name, 0.0, true).iter().all(|&(s, _)| s >= 57),
+                "{name} must not bind to an ARKit tracking slot"
+            );
+        }
+    }
+
+    #[test]
+    fn vowels_lookat_and_neutral() {
+        assert_eq!(map_preset_to_slots("A", 0.0, true), vec![(52, 1.0)]);
+        assert_eq!(map_preset_to_slots("O", 0.0, true), vec![(56, 1.0)]);
+        assert_eq!(map_preset_to_slots("LookUp", 0.0, true), vec![(4, 0.5), (11, 0.5)]);
+        assert_eq!(map_preset_to_slots("LookLeft", 0.0, true), vec![(3, 0.5), (9, 0.5)]);
+        assert_eq!(map_preset_to_slots("Neutral", 0.0, true), Vec::<(u32, f32)>::new());
+        assert_eq!(map_preset_to_slots("MyCustomFace", 0.0, true), vec![(SLOT_CUSTOM, 1.0)]);
+    }
 }

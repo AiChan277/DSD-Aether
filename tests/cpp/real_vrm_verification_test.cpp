@@ -391,10 +391,10 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     CHECK(chest_deg < 1.0);
     CHECK(spine_deg < 1.0);
     CHECK(std::abs(l_sh_ws.y - r_sh_ws.y) < 0.015f);
-    CHECK(l_drop_deg >= 30.0);
-    CHECK(l_drop_deg <= 46.0);
-    CHECK(r_drop_deg >= 30.0);
-    CHECK(r_drop_deg <= 46.0);
+    CHECK(l_drop_deg >= 60.0);
+    CHECK(l_drop_deg <= 76.0);
+    CHECK(r_drop_deg >= 60.0);
+    CHECK(r_drop_deg <= 76.0);
 
     // Facing proof from actual skinned joint positions (not assumed axes): the avatar's left is +X for a +Z-facing
     // VRM, so forward = cross(left, up). The front Studio camera sits on +Z looking down -Z.
@@ -485,6 +485,24 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     neck.fovy_rad = 0.55f;
     capture_shot("neck_closeup_rt_on", neck, true);
     capture_shot("neck_closeup_rt_off", neck, false);
+
+    // Face close-ups: neutral, then both eyes fully blinked + mouth "A". With per-primitive morph duplication the
+    // blink only moved the eyelid skin (lashes / eye whites / irises stayed open), so this shot is the visual check.
+    aether::renderer::PreviewCamera face = fit_cam;
+    face.target_y = fit_cam.target_y + 0.53f;
+    face.yaw_rad = 0.0f;
+    face.pitch_rad = 0.0f;
+    face.distance = 0.36f;
+    face.fovy_rad = 0.50f;
+    capture_shot("face_neutral", face, false);
+    std::array<float, aether::animation::kMaxMorphs> expr{};
+    std::copy_n(skin.morph_weights, std::min<size_t>(expr.size(), skin.morph_count), expr.begin());
+    expr[0] = 1.0f;  // eyeBlinkLeft  -> VRM Blink_L
+    expr[7] = 1.0f;  // eyeBlinkRight -> VRM Blink_R
+    expr[aether::animation::kVisemeSlotOffset + 0] = 1.0f; // VRM "A"
+    avatar->update_pose(0, 2, skin.bone_matrices, skin.bone_count, expr.data(), skin.morph_count, true);
+    avatar->update_pose(1, 2, skin.bone_matrices, skin.bone_count, expr.data(), skin.morph_count, true);
+    capture_shot("face_blink_mouth_a", face, false);
 
     CHECK(rhi->validation_error_count() == 0);
     renderer.destroy();

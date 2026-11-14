@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace aether::ui {
 namespace {
@@ -199,6 +200,31 @@ OrbProjection project_orbit(ImVec2 center, float r, float az_deg, float el_deg) 
     const float el = el_deg * kDegToRad;
     return OrbProjection{ImVec2(center.x + r * std::cos(el) * std::sin(az), center.y - r * std::sin(el)),
                          std::cos(el) * std::cos(az)};
+}
+
+/** Copies `text` into `out`, eliding with "..." to fit `max_w` px without splitting a UTF-8 code point.
+ *  Returns true when shortened. */
+bool elide_utf8(const char* text, float max_w, char* out, size_t cap) noexcept {
+    std::snprintf(out, cap, "%s", text != nullptr ? text : "");
+    if (ImGui::CalcTextSize(out).x <= max_w) {
+        return false;
+    }
+    const float dots = ImGui::CalcTextSize("...").x;
+    size_t len = std::strlen(out);
+    while (len > 0) {
+        --len;
+        while (len > 0 && (static_cast<unsigned char>(out[len]) & 0xC0U) == 0x80U) {
+            --len;
+        }
+        out[len] = '\0';
+        if (ImGui::CalcTextSize(out).x + dots <= max_w) {
+            break;
+        }
+    }
+    if (len + 4U <= cap) {
+        std::snprintf(out + len, cap - len, "...");
+    }
+    return true;
 }
 
 } // namespace
@@ -426,13 +452,23 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     if (fonts.mono != nullptr) {
         ImGui::PushFont(fonts.mono);
     }
-    char line1[96]{};
-    std::snprintf(line1, sizeof(line1), "%s · %.1f ms", tracking.active_ep_label,
-                  static_cast<double>(tracking.inference_ms));
-    char cam_line[160]{};
-    format_camera_status_badge(tracking, cam_line, sizeof(cam_line));
-    char line2[200]{};
-    std::snprintf(line2, sizeof(line2), "%s · GPU %.1f ms", cam_line, static_cast<double>(render_view.total_gpu_ms));
+    // Every live number uses a fixed-width field (mono font): the HUD box and camera preview must never resize or
+    // shift when a value gains/loses a digit or sign, otherwise the whole tracker window visibly jitters.
+    // Long status text (e.g. a model/EP error) is elided so the HUD keeps a bounded width; the full text is
+    // available as a tooltip on hover.
+    const float max_label_w = 300.0f * scale;
+    char ep_label[160]{};
+    const bool ep_elided = elide_utf8(tracking.active_ep_label, max_label_w, ep_label, sizeof(ep_label));
+    char line1[200]{};
+    std::snprintf(line1, sizeof(line1), "%s · %5.1f ms", ep_label,
+                  static_cast<double>(std::clamp(tracking.inference_ms, 0.0f, 999.9f)));
+    char cam_full[160]{};
+    format_camera_status_badge(tracking, cam_full, sizeof(cam_full));
+    char cam_line[200]{};
+    const bool cam_elided = elide_utf8(cam_full, max_label_w + 40.0f * scale, cam_line, sizeof(cam_line));
+    char line2[240]{};
+    std::snprintf(line2, sizeof(line2), "%s · GPU %5.1f ms", cam_line,
+                  static_cast<double>(std::clamp(render_view.total_gpu_ms, 0.0f, 999.9f)));
 
     const float pad = 8.0f * scale;
     const float dot_w = 12.0f * scale;
@@ -451,12 +487,12 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     if (has_preview) {
         if (tracking.live_preview_face_locked) {
             if (tracking.neutral_calibrated) {
-                std::snprintf(pose_line, sizeof(pose_line), "LOCKED · P%+.1f Y%+.1f R%+.1f",
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKED · P%+5.1f Y%+5.1f R%+5.1f",
                               static_cast<double>(tracking.head_euler_deg[0]),
                               static_cast<double>(tracking.head_euler_deg[1]),
                               static_cast<double>(tracking.head_euler_deg[2]));
             } else {
-                std::snprintf(pose_line, sizeof(pose_line), "LOCKING %u/15 · P%+.1f Y%+.1f R%+.1f",
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKING %2u/15 · P%+5.1f Y%+5.1f R%+5.1f",
                               tracking.stable_lock_frames, static_cast<double>(tracking.head_euler_deg[0]),
                               static_cast<double>(tracking.head_euler_deg[1]),
                               static_cast<double>(tracking.head_euler_deg[2]));
@@ -466,18 +502,19 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
         }
     }
 
-    const float content_w = std::max({l1_w, l2_w, btn_row_w});
-    const float thumb_w = has_preview ? std::max(content_w, 208.0f * scale) : 0.0f;
+    const float content_w = std::ceil(std::max({l1_w, l2_w, btn_row_w}));
+    // Preview size depends only on DPI scale (never on live text) so the camera image stays put.
+    const float thumb_w = has_preview ? std::round(std::max(content_w, 288.0f * scale)) : 0.0f;
     const float thumb_h = has_preview ? std::round(thumb_w * 9.0f / 16.0f) : 0.0f;
-    const float pose_w = has_preview ? ImGui::CalcTextSize(pose_line).x : 0.0f;
-    const float inner_w = std::max({content_w, thumb_w, pose_w});
+    const float pose_w = has_preview ? ImGui::CalcTextSize("LOCKING 15/15 · P+000.0 Y+000.0 R+000.0").x : 0.0f;
+    const float inner_w = std::ceil(std::max({content_w, thumb_w, pose_w}));
     const float w = inner_w + pad * 2.0f;
     const float line_h = ImGui::GetTextLineHeight();
     const float ctrl_h = ImGui::GetFrameHeight();
     const float extra_preview_h =
         has_preview ? (thumb_h + st.ItemSpacing.y * 0.5f + line_h) : 0.0f;
     const float h = pad * 2.0f + line_h * 2.0f + ctrl_h + st.ItemSpacing.y * 2.0f + extra_preview_h;
-    const ImVec2 p0(top_right.x - w, std::max(top_right.y, min_y));
+    const ImVec2 p0(std::floor(top_right.x - w), std::floor(std::max(top_right.y, min_y)));
     const ImVec2 p1(top_right.x, p0.y + h);
     dl->AddRectFilled(p0, p1, t.col32_hud_bg, 8.0f * scale);
     dl->AddRect(p0, p1, t.col32_hud_border, 8.0f * scale, 0, 1.0f);
@@ -488,6 +525,10 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     dl->AddText(ImVec2(p0.x + pad + dot_w, p0.y + pad), t.col32_text_primary, line1);
     dl->AddText(ImVec2(p0.x + pad, p0.y + pad + line_h + st.ItemSpacing.y * 0.5f),
                 tracking.camera_active ? t.col32_text_secondary : t.col32_status_warn, line2);
+    if ((ep_elided || cam_elided) &&
+        ImGui::IsMouseHoveringRect(ImVec2(p0.x, p0.y), ImVec2(p1.x, p0.y + pad + line_h * 2.0f + st.ItemSpacing.y))) {
+        ImGui::SetTooltip("%s\n%s", tracking.active_ep_label, cam_full);
+    }
 
     ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad + line_h * 2.0f + st.ItemSpacing.y * 1.5f));
     ImGui::PushStyleColor(ImGuiCol_Button, tracking.camera_active ? t.bg_raised : t.accent_button);
