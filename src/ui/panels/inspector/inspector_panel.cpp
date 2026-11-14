@@ -80,9 +80,19 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
              selection.kind == SelectionKind::LightRim || selection.kind == SelectionKind::Avatar);
         if (ImGui::CollapsingHeader(tr("Lighting & NPR"),
                                     expand_render ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None)) {
-            if (draw_property_row(ParamId::RenderRtEnabled, params, undo, fonts, row_actions, false,
-                                  !render_view.rt_supported,
-                                  render_view.rt_supported ? nullptr : tr("Ray query unsupported on active GPU"))) {
+            if (draw_property_row(ParamId::RenderBackend, params, undo, fonts, row_actions, false, on_air)) {
+                actions.viewport.render_backend = static_cast<uint8_t>(params.get_int(ParamId::RenderBackend));
+            }
+            if (render_view.render_backend == 1U) {
+                ImGui::TextColored(t.text_tertiary, "%s %s | %.2f ms", tr("DirectX 11:"), render_view.backend_detail,
+                                   static_cast<double>(render_view.dx11_render_ms));
+            }
+            const bool rt_blocked = !render_view.rt_supported || render_view.render_backend == 1U;
+            const char* rt_reason = !render_view.rt_supported ? tr("Ray query unsupported on active GPU")
+                                    : rt_blocked              ? tr("Ray tracing needs the Vulkan backend")
+                                                              : nullptr;
+            if (draw_property_row(ParamId::RenderRtEnabled, params, undo, fonts, row_actions, false, rt_blocked,
+                                  rt_reason)) {
                 actions.viewport.lighting_dirty = true;
             }
             if (draw_property_row(ParamId::RenderFlatness, params, undo, fonts, row_actions)) {
@@ -172,6 +182,10 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             if (fonts.mono != nullptr) {
                 ImGui::PushFont(fonts.mono);
             }
+            ImGui::TextColored(t.text_secondary, "GC: %llu pending | %llu reclaimed | %.1f MB",
+                               static_cast<unsigned long long>(render_view.gc_retired_pending),
+                               static_cast<unsigned long long>(render_view.gc_reclaimed_total),
+                               static_cast<double>(render_view.gc_bytes_reclaimed) / (1024.0 * 1024.0));
             ImGui::TextColored(t.text_secondary, "CPU: %s (%uP/%uE)", hw.cpu.brand_string.c_str(), hw.cpu.p_core_count,
                                hw.cpu.e_core_count);
             ImGui::TextColored(t.text_secondary, "GPU: %s", rhi.gpu_info().device_name.c_str());

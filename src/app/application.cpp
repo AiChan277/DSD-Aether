@@ -6,6 +6,7 @@
 #include "core/clock.hpp"
 #include "core/cpu_topology.hpp"
 #include "core/crash_handler.hpp"
+#include "core/garbage_collector.hpp"
 #include "core/hot_path_guard.hpp"
 #include "core/hw_enum.hpp"
 #include "core/log.hpp"
@@ -16,6 +17,7 @@
 #include "output/output_ring.hpp"
 #include "plugin_runner/native_plugin_manager.hpp"
 #include "renderer/asset_upload/asset_job.hpp"
+#include "renderer/dx11_bridge.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "rhi/rhi_device.hpp"
 #include "rhi/rhi_swapchain.hpp"
@@ -702,6 +704,19 @@ void apply_project_json_to_ui(const std::string& json_str, ui::StudioWorkspace& 
     }
 }
 
+/** GC finalizer for avatars retired on swap: runs once the frame timeline passes the retire epoch. */
+void finalize_retired_avatar(void* handle, uint64_t /*user_tag*/, uint64_t /*byte_size*/) noexcept {
+    delete static_cast<renderer::GpuAvatar*>(handle);
+}
+
+uint64_t completed_frame_timeline(const rhi::RhiDevice& rhi) noexcept {
+    uint64_t v = 0;
+    if (rhi.device() != VK_NULL_HANDLE && rhi.frame_timeline() != VK_NULL_HANDLE) {
+        (void)vkGetSemaphoreCounterValue(rhi.device(), rhi.frame_timeline(), &v);
+    }
+    return v;
+}
+
 bool ends_with_icase(std::string_view hay, std::string_view suffix) noexcept {
     if (hay.size() < suffix.size()) {
         return false;
@@ -1040,6 +1055,45 @@ int run_application(const AppLaunchOptions& opts) {
         std::string last_loaded_avatar_path = opts.avatar_path;
         renderer::PreviewCamera camera{};
 
+        // Engine garbage collector (ADR-0015/0016): GPU objects replaced while frames are in flight are retired
+        // against the frame timeline and destroyed only after the GPU has passed that epoch.
+        GarbageCollector gc;
+        renderer::Dx11Bridge dx11_bridge;
+        dx11_bridge.attach(*rhi, gc);
+        renderer::RenderBackend active_backend = renderer::RenderBackend::Vulkan;
+        uint8_t requested_backend_ui = 0xFFU; // last UI value seen; 0xFF = none yet
+        std::array<char, 96> backend_detail{};
+        backend_detail[0] = '\0';
+        if (opts.render_backend == "dx11" || opts.render_backend == "directx11") {
+            active_backend = renderer::RenderBackend::DirectX11;
+        }
+        auto retire_avatar = [&](std::unique_ptr<renderer::GpuAvatar> old) {
+            if (old == nullptr) {
+                return;
+            }
+            renderer::GpuAvatar* raw = old.release();
+            const uint64_t bytes = static_cast<uint64_t>(raw->requirements.vertex_count) * 64ULL;
+            if (!gc.retire(raw, bytes, npr_renderer.frame_timeline_value(), &finalize_retired_avatar, 0x41564154ULL)) {
+                rhi->wait_idle();
+                delete raw;
+            }
+        };
+        auto configure_dx11_for_avatar = [&]() -> bool {
+            if (active_backend != renderer::RenderBackend::DirectX11 || current_avatar == nullptr) {
+                return false;
+            }
+            const auto outs = npr_renderer.graph().outputs();
+            const uint32_t ow = outs.output_width != 0U ? outs.output_width : active_out_cfg.width;
+            const uint32_t oh = outs.output_height != 0U ? outs.output_height : active_out_cfg.height;
+            const auto v = static_cast<uint32_t>(current_avatar->rest_vertices.size());
+            const auto i = static_cast<uint32_t>(current_avatar->rest_indices.size());
+            if (auto rc = dx11_bridge.configure(ow, oh, v, i); !rc) {
+                AETHER_LOG_ERROR("renderer", "DirectX 11 backend unavailable: %s", rc.error().c_str());
+                return false;
+            }
+            return true;
+        };
+
         ui::DevShellViewportActions vp_actions{};
         vp_actions.rt_enabled = render_cfg.enable_rt;
         vp_actions.key_azimuth_deg = npr_renderer.lighting().lights[0].orbit_azimuth_deg;
@@ -1106,7 +1160,9 @@ int run_application(const AppLaunchOptions& opts) {
             vp_tex_set = VK_NULL_HANDLE;
             orb_tex_set = VK_NULL_HANDLE;
             asset_job.reset();
+            dx11_bridge.release();
             current_avatar.reset();
+            (void)gc.flush_all_epochs();
             destroy_vp_sampler();
             ImGui_ImplVulkan_Shutdown();
             swapchain.destroy();
@@ -1451,6 +1507,15 @@ int run_application(const AppLaunchOptions& opts) {
                 (void)npr_renderer.graph().poll_shader_hot_reload();
             }
 
+            if (opts.smoke_reload_avatar_at > 0U && rendered_frames == opts.smoke_reload_avatar_at &&
+                !opts.avatar_path.empty() && current_avatar != nullptr) {
+                asset_job.start_load(*rhi, opts.avatar_path);
+                while (asset_job.state() == renderer::AssetJobState::Loading &&
+                       !shared.quit_requested.load(std::memory_order_acquire)) {
+                    phase_timer.sleep_us(200);
+                }
+            }
+
             if (asset_job.state() == renderer::AssetJobState::ReadyForGpu) {
                 auto up_res = asset_job.finalize_gpu_upload(*rhi);
                 if (!up_res) {
@@ -1461,12 +1526,16 @@ int run_application(const AppLaunchOptions& opts) {
                     }
                 } else {
                     (void)pipeline->wait_output_slots_drained(250u);
-                    rhi->wait_idle();
+                    // The previous avatar is retired to the GC against the frame timeline instead of being
+                    // destroyed here; NprRenderer::bind_avatar fences its own frame-graph resources.
+                    retire_avatar(std::move(current_avatar));
                     current_avatar = std::move(up_res.value());
                     last_loaded_avatar_path = current_avatar->source_path;
                     if (auto b_rc = npr_renderer.bind_avatar(current_avatar.get()); !b_rc) {
                         AETHER_LOG_ERROR("renderer", "NprRenderer bind_avatar failed: %s", b_rc.error().c_str());
                     }
+                    dx11_bridge.bind_avatar(current_avatar.get());
+                    (void)configure_dx11_for_avatar();
                     baked_face_sdf_applied = false;
                     camera = renderer::fit_camera_to_avatar(*current_avatar);
                     pipeline->push_rest_skeleton(build_rest_metrics_from_avatar(*current_avatar));
@@ -1603,6 +1672,37 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
+            // Apply a backend change requested from the Inspector (render.backend), then reclaim retired objects.
+            if (vp_actions.render_backend != requested_backend_ui) {
+                const bool first_sync = (requested_backend_ui == 0xFFU);
+                requested_backend_ui = vp_actions.render_backend;
+                const auto wanted = (vp_actions.render_backend == 1U) ? renderer::RenderBackend::DirectX11
+                                                                      : renderer::RenderBackend::Vulkan;
+                // A CLI --render-backend wins over the persisted setting on the first sync.
+                if (!(first_sync && !opts.render_backend.empty()) && wanted != active_backend) {
+                    active_backend = wanted;
+                    if (active_backend == renderer::RenderBackend::Vulkan) {
+                        dx11_bridge.release();
+                    } else {
+                        dx11_bridge.bind_avatar(current_avatar.get());
+                    }
+                    shell.workspace().push_toast(ui::ToastSeverity::Info, "Render Backend",
+                                                 renderer::render_backend_name(active_backend), frame_now_s);
+                }
+            }
+            if (active_backend == renderer::RenderBackend::DirectX11 && current_avatar != nullptr) {
+                if (!dx11_bridge.ready()) {
+                    dx11_bridge.bind_avatar(current_avatar.get());
+                }
+                if (!configure_dx11_for_avatar()) {
+                    active_backend = renderer::RenderBackend::Vulkan;
+                    dx11_bridge.release();
+                    shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 11 Unavailable",
+                                                 "Falling back to the Vulkan renderer", frame_now_s);
+                }
+            }
+            (void)gc.collect_epoch(completed_frame_timeline(*rhi), 16U);
+
             if (rendered_frames == 5) {
                 imgui_arena.mark_warmup_complete();
             }
@@ -1723,6 +1823,12 @@ int run_application(const AppLaunchOptions& opts) {
             render_req.show_orbit_orb = vp_actions.show_orbit_orb;
             render_req.render_csm_shadow = true;
             render_req.outline_width_scale = npr_renderer.lighting().outline_width_scale;
+            if (active_backend == renderer::RenderBackend::DirectX11 && current_avatar != nullptr) {
+                render_req.rt_enabled = false;
+                if (dx11_bridge.render(*current_avatar, npr_renderer.lighting(), camera)) {
+                    dx11_bridge.fill_request(render_req);
+                }
+            }
 
             uint64_t tl_val = 0;
             const bool has_avatar_ready = (current_avatar != nullptr && current_avatar->requirements.vertex_count > 0);
@@ -1734,6 +1840,9 @@ int run_application(const AppLaunchOptions& opts) {
                     AETHER_LOG_ERROR("renderer", "submit_critical_and_signal failed: %s", sub_rc.error().c_str());
                     render_exit_code.store(9, std::memory_order_release);
                     break;
+                }
+                if (render_req.external_color_image != VK_NULL_HANDLE) {
+                    dx11_bridge.on_submitted(tl_val);
                 }
             }
             slot_submitted[frame.frame_slot] = true;
@@ -1795,6 +1904,19 @@ int run_application(const AppLaunchOptions& opts) {
                 default:
                     render_view.denoiser_fallback_reason = "";
                     break;
+                }
+                render_view.render_backend = static_cast<uint8_t>(active_backend);
+                {
+                    const auto bs = dx11_bridge.stats();
+                    std::snprintf(backend_detail.data(), backend_detail.size(), "%s%s, %ux%u",
+                                  bs.shared_texture ? "shared texture" : "CPU copy", bs.warp ? " (WARP)" : "", bs.width,
+                                  bs.height);
+                    render_view.backend_detail = backend_detail.data();
+                    render_view.dx11_render_ms = bs.last_render_ms;
+                    const auto gs = gc.stats();
+                    render_view.gc_retired_pending = gs.retired_pending;
+                    render_view.gc_reclaimed_total = gs.retired_reclaimed_total;
+                    render_view.gc_bytes_reclaimed = gs.bytes_reclaimed_total;
                 }
                 render_view.show_skeleton_heatmap = vp_actions.show_skeleton_heatmap;
                 render_view.show_checkerboard = vp_actions.show_checkerboard;
@@ -1989,6 +2111,10 @@ int run_application(const AppLaunchOptions& opts) {
         // Stop T1/T2/T4 before rhi->wait_idle() & resource destruction so T4 transfer_queue never races shutdown.
         pipeline->stop();
         rhi->wait_idle();
+        const auto dx11_final = dx11_bridge.stats();
+        dx11_bridge.release();
+        const uint32_t gc_flushed = gc.flush_all_epochs();
+        const GcStats gc_final = gc.stats();
 
         const auto final_telem = pipeline->latest_telemetry();
         AETHER_LOG_INFO(
@@ -2009,6 +2135,13 @@ int run_application(const AppLaunchOptions& opts) {
                     static_cast<unsigned long long>(imgui_arena.os_fallback_allocs()),
                     imgui_arena.steady_bump_growth_bytes(), static_cast<double>(final_telem.ui_cpu.mean_ms),
                     static_cast<double>(final_telem.ui_cpu.p95_ms));
+        std::printf("[AETHER_SMOKE_EXT] backend=%s dx11_frames=%llu dx11_path=%s gc_reclaimed=%llu "
+                    "gc_flushed_at_exit=%u gc_bytes=%llu\n",
+                    active_backend == renderer::RenderBackend::DirectX11 ? "dx11" : "vulkan",
+                    static_cast<unsigned long long>(dx11_final.frames),
+                    dx11_final.frames == 0ULL ? "none" : (dx11_final.shared_texture ? "shared" : "cpu"),
+                    static_cast<unsigned long long>(gc_final.retired_reclaimed_total), gc_flushed,
+                    static_cast<unsigned long long>(gc_final.bytes_reclaimed_total));
         std::fflush(stdout);
 
         if (rhi->validation_error_count() > 0 || imgui_arena.os_fallback_allocs() > 0 ||

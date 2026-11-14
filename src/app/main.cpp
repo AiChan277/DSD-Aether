@@ -13,6 +13,10 @@ int main(int argc, char** argv) {
                 opts.require_validation = true;
             } else if (std::strcmp(argv[i], "--avatar") == 0 && (i + 1) < argc) {
                 opts.avatar_path = argv[++i];
+            } else if (std::strcmp(argv[i], "--render-backend") == 0 && (i + 1) < argc) {
+                opts.render_backend = argv[++i];
+            } else if (std::strcmp(argv[i], "--smoke-reload-avatar-at") == 0 && (i + 1) < argc) {
+                opts.smoke_reload_avatar_at = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
             }
         }
         return aether::app::run_application(opts);

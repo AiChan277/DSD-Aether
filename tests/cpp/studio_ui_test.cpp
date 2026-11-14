@@ -48,10 +48,10 @@ struct ScopedTempDir {
 
 } // namespace
 
-TEST_CASE("ParamStore enforces 49-parameter registry bounds, epochs, and project reset", "[ui][params]") {
+TEST_CASE("ParamStore enforces 50-parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 49U);
+    REQUIRE(kParamCount == 50U); // 49 + render.backend (ADR-0016)
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);

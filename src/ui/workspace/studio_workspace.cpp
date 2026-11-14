@@ -311,6 +311,7 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.rt_enabled = params_.get_bool(ParamId::RenderRtEnabled);
     v.debug_view = static_cast<uint8_t>(params_.get_int(ParamId::RenderDebugView));
     v.denoiser_kind = static_cast<uint8_t>(params_.get_int(ParamId::RenderDenoiser));
+    v.render_backend = static_cast<uint8_t>(params_.get_int(ParamId::RenderBackend));
     v.show_skeleton_heatmap = params_.get_bool(ParamId::AppSkeletonHeatmap);
     v.show_checkerboard = params_.get_bool(ParamId::AppCheckerboardBg);
     v.show_orbit_orb = params_.get_bool(ParamId::AppOrbitOrbVisible);

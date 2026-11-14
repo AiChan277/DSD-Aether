@@ -143,6 +143,20 @@ sys.exit(rc)
                         $refAvatar = Join-Path $RepoRoot 'tests\data\reference_avatar.vrm'
                         if (Test-Path $refAvatar) {
                             & $exe --smoke-frames 30 --require-validation --avatar $refAvatar
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+                            # ADR-0016 gates: DirectX 11 backend renders every frame through the Vulkan
+                            # outputs, and a mid-run avatar reload is reclaimed by the garbage collector.
+                            $extOut = & $exe --smoke-frames 90 --require-validation --avatar $refAvatar `
+                                --render-backend dx11 --smoke-reload-avatar-at 30
+                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                            $extOut | Where-Object { $_ -match 'AETHER_SMOKE' } | ForEach-Object { Write-Host $_ }
+                            $ext = $extOut | Where-Object { $_ -match '\[AETHER_SMOKE_EXT\]' } | Select-Object -Last 1
+                            if (-not $ext -or $ext -notmatch 'backend=dx11' -or $ext -notmatch 'dx11_frames=90 ' -or
+                                $ext -notmatch 'gc_reclaimed=[1-9]') {
+                                Write-Host "DX11 backend / GC smoke gate failed: $ext" -ForegroundColor Red
+                                exit 1
+                            }
                         }
                     } finally {
                         $env:VK_ADD_LAYER_PATH = $prevLayer

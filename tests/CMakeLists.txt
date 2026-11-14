@@ -191,3 +191,9 @@ target_link_libraries(gc_and_dx11_renderer_test PRIVATE
     aether_rhi
 )
 set_tests_properties(gc_and_dx11_renderer_test PROPERTIES TIMEOUT 60)
+
+# DirectX 11 render backend wired through the Vulkan frame graph + GC resource retirement (ADR-0016)
+aether_add_cpp_test(dx11_backend_test cpp/dx11_backend_test.cpp)
+target_compile_definitions(dx11_backend_test PRIVATE AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(dx11_backend_test PRIVATE aether_renderer aether_rhi windowscodecs ole32)
+set_tests_properties(dx11_backend_test PROPERTIES TIMEOUT 180)

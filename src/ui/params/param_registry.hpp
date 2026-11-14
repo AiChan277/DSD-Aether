@@ -60,6 +60,7 @@ enum class ParamId : uint16_t {
     RenderRtEnabled,
     RenderDenoiser,
     RenderDebugView,
+    RenderBackend,
     RndDebugForceDeviceLost,
 
     TrackingEpMode,
@@ -230,6 +231,10 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
               "Final|Albedo|True Normals|Proxy Normals|Z-Flatten|SDF Face|Hair Stencil|RT Raw|RT Denoised|Rim "
               "Occ|Bounce|Outline|Motion Vec|Overdraw",
               PARAM_FLAG_UNDOABLE},
+    ParamSpec{ParamId::RenderBackend, "render.backend", "Render", "Render Backend",
+              "Avatar renderer. DirectX 11 is a compatibility path without ray tracing; UI and outputs stay on Vulkan.",
+              "", ParamType::Enum, ParamOwner::T3, 0.0, 0.0, 1.0, 1.0, 0, "Vulkan|DirectX 11",
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RndDebugForceDeviceLost, "rnd.debug.force_device_lost", "Diagnostics", "Force Device Lost",
               "Injects a synthetic VK_ERROR_DEVICE_LOST recovery test.", "", ParamType::Bool, ParamOwner::T3, 0.0, 0.0,
               1.0, 1.0, 0, nullptr, PARAM_FLAG_NONE},

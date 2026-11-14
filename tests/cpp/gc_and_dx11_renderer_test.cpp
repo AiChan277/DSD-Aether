@@ -147,6 +147,7 @@ TEST_CASE("Dx11NprRenderer compiles SM5.0 2.5D NPR shaders and renders 64B Aethe
     params.lit_color = {0.90f, 0.80f, 0.75f, 1.0f};
 
     REQUIRE(dx11.render_npr_mesh(verts, indices, params));
+    REQUIRE(dx11.wait_for_gpu(1000));
     CHECK(dx11.rendered_frames() == 1);
 
     std::vector<uint8_t> rgba(static_cast<size_t>(cfg.width) * static_cast<size_t>(cfg.height) * 4U, 0U);

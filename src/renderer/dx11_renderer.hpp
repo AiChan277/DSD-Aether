@@ -20,6 +20,7 @@ struct ID3D11Buffer;
 struct ID3D11RasterizerState;
 struct ID3D11BlendState;
 struct ID3D11DepthStencilState;
+struct ID3D11Query;
 
 namespace aether::renderer {
 
@@ -31,6 +32,19 @@ struct Dx11RendererConfig {
     uint32_t max_indices{49152};
     bool allow_warp_fallback{true};
     bool enable_shared_texture{true};
+    // DXGI adapter LUID (HighPart << 32 | LowPart); 0 = system default adapter.
+    uint64_t adapter_luid{0};
+    // true: pixel shader converts authored sRGB colours to linear light (Vulkan composite contract).
+    bool linear_output{false};
+};
+
+/** One indexed draw with its own cel colours (one per avatar sub-mesh / material). */
+struct Dx11DrawRange {
+    uint32_t index_offset{0};
+    uint32_t index_count{0};
+    int32_t base_vertex{0};
+    std::array<float, 4> lit_color{0.94f, 0.86f, 0.84f, 1.0f};
+    std::array<float, 4> shadow_color{0.62f, 0.52f, 0.58f, 1.0f};
 };
 
 /** Per-frame 2.5D NPR cel/toon shading parameters (16-byte aligned HLSL cbuffer layout). */
@@ -81,6 +95,17 @@ class Dx11NprRenderer {
                                        const Dx11NprFrameParams& params) noexcept;
 
     /**
+     * Uploads the mesh once and issues one draw per range, each with its own lit/shade colours
+     * (`params.lit_color` / `params.shadow_color` are ignored). Allocation-free (`HR-01`).
+     */
+    [[nodiscard]] bool render_npr_draws(std::span<const AetherVertex25D> vertices, std::span<const uint32_t> indices,
+                                        std::span<const Dx11DrawRange> draws,
+                                        const Dx11NprFrameParams& params) noexcept;
+
+    /** Blocks until all submitted D3D11 work has completed (event query). Returns false on timeout. */
+    [[nodiscard]] bool wait_for_gpu(uint32_t timeout_ms = 100) noexcept;
+
+    /**
      * Copies the rendered RGBA8 target into `out_rgba` (`width * height * 4` bytes) via the
      * pre-allocated staging texture. Allocation-free (`HR-01`).
      */
@@ -91,6 +116,8 @@ class Dx11NprRenderer {
     [[nodiscard]] uint32_t width() const noexcept { return cfg_.width; }
     [[nodiscard]] uint32_t height() const noexcept { return cfg_.height; }
     [[nodiscard]] uint64_t rendered_frames() const noexcept { return rendered_frames_; }
+    [[nodiscard]] uint32_t max_vertices() const noexcept { return cfg_.max_vertices; }
+    [[nodiscard]] uint32_t max_indices() const noexcept { return cfg_.max_indices; }
     [[nodiscard]] void* shared_dxgi_handle() const noexcept { return shared_handle_; }
     [[nodiscard]] ID3D11Device* device() const noexcept { return device_; }
     [[nodiscard]] ID3D11Texture2D* color_target() const noexcept { return color_tex_; }
@@ -98,6 +125,8 @@ class Dx11NprRenderer {
   private:
     [[nodiscard]] Expected<void> create_render_targets(uint32_t width, uint32_t height);
     void release_render_targets() noexcept;
+    [[nodiscard]] bool write_constants(const Dx11NprFrameParams& params, const std::array<float, 4>& lit,
+                                       const std::array<float, 4>& shade) noexcept;
 
     Dx11RendererConfig cfg_{};
     bool initialized_{false};
@@ -123,6 +152,7 @@ class Dx11NprRenderer {
     ID3D11RasterizerState* raster_state_{nullptr};
     ID3D11BlendState* blend_state_{nullptr};
     ID3D11DepthStencilState* depth_state_{nullptr};
+    ID3D11Query* idle_query_{nullptr};
 };
 
 } // namespace aether::renderer

@@ -10,11 +10,11 @@ The binding specification is [`AETHER-2.5D_Technical_Specification_v1.0.pdf`](AE
 
 | Area | Technology |
 |---|---|
-| Core, renderer, tracking, output, UI | C++20 (MSVC v143), Vulkan 1.3 (+ `VK_KHR_ray_query`), DirectX 11 backend (ADR-0015) |
+| Core, renderer, tracking, output, UI | C++20 (MSVC v143), Vulkan 1.3 (+ `VK_KHR_ray_query`), selectable DirectX 11 avatar backend (ADR-0015, ADR-0016) |
 | Asset loader, plugin host, node graph | Rust 2024 (static library via Corrosion) |
 | Inference | ONNX Runtime with OpenVINO (NPU), DirectML / TensorRT, CPU tiers |
 | UI | Dear ImGui (docking), ImNodes, ImPlot, ImGuizmo, FreeType |
-| Memory | Epoch-fenced + incremental tri-color garbage collector (`src/core/garbage_collector.*`) |
+| Memory | Epoch-fenced + incremental tri-color garbage collector (`src/core/garbage_collector.*`), used for GPU resource retirement |
 
 ## Building
 
@@ -30,6 +30,10 @@ cmake --build --preset windows-release
 ```
 
 `tools/ci.ps1` expects the Build Tools at `D:\VS2022\BuildTools`; edit `Import-MsvcEnv` if yours are elsewhere.
+
+### Render backend
+
+The avatar renders with Vulkan by default. Pick DirectX 11 in Inspector ▸ Lighting & NPR ▸ Render Backend, or launch with `--render-backend dx11`. Outputs (Spout2, virtual camera, NDI) work with either; ray tracing needs Vulkan.
 
 ### Tracking models
 

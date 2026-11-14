@@ -114,6 +114,14 @@ struct DevShellRenderView {
     bool timing_valid{false};
     uint32_t device_recovery_count{0};
     const char* last_recovery_msg{""};
+
+    // Render backend & engine garbage collector (ADR-0016)
+    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11
+    const char* backend_detail{""};
+    float dx11_render_ms{0.0f};
+    uint64_t gc_retired_pending{0};
+    uint64_t gc_reclaimed_total{0};
+    uint64_t gc_bytes_reclaimed{0};
 };
 
 struct DevShellOutputView {
@@ -178,6 +186,7 @@ struct DevShellViewportActions {
     bool rt_enabled{true};
     uint8_t debug_view{0};
     uint8_t denoiser_kind{0};
+    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11 (applied by T3 when it differs from the active one)
     float key_azimuth_deg{32.0f};
     float key_elevation_deg{26.0f};
     float key_intensity{1.85f};

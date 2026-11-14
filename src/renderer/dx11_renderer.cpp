@@ -26,9 +26,10 @@ struct alignas(16) HlslNprConstants {
     std::array<float, 4> lit_color{};
     std::array<float, 4> shadow_color{};
     std::array<float, 4> rim_color_strength{};
+    std::array<float, 4> misc{}; // x = linear-light output (1) or authored sRGB output (0)
 };
 
-static_assert(sizeof(HlslNprConstants) == 128, "HlslNprConstants must be a multiple of 16 bytes for D3D11 cbuffers");
+static_assert(sizeof(HlslNprConstants) == 144, "HlslNprConstants must be a multiple of 16 bytes for D3D11 cbuffers");
 
 constexpr const char kHlsl25dNprSource[] = R"(
 cbuffer NprFrameConstants : register(b0) {
@@ -37,6 +38,7 @@ cbuffer NprFrameConstants : register(b0) {
     float4 u_lit_color;
     float4 u_shadow_color;
     float4 u_rim_color_strength;
+    float4 u_misc;
 };
 
 struct VSInput {
@@ -75,6 +77,10 @@ float4 ps_main(PSInput pin) : SV_Target0 {
     float3 V = float3(0.0, 0.0, -1.0);
     float rim = pow( saturate(1.0 - abs(dot(pin.true_norm, V))), 3.0 ) * u_rim_color_strength.w;
     float3 final_rgb = saturate(base_rgb + u_rim_color_strength.rgb * rim);
+    if (u_misc.x > 0.5) {
+        // Authored colours are sRGB-encoded; the Vulkan composite expects premultiplied linear light.
+        final_rgb = pow(final_rgb, 2.2);
+    }
     float alpha = saturate(u_lit_color.a);
     return float4(final_rgb * alpha, alpha);
 }
@@ -108,9 +114,36 @@ Expected<void> Dx11NprRenderer::init(const Dx11RendererConfig& cfg) {
     D3D_FEATURE_LEVEL achieved_level = D3D_FEATURE_LEVEL_11_0;
     constexpr UINT create_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, create_flags, kFeatureLevels.data(),
-                                   static_cast<UINT>(kFeatureLevels.size()), D3D11_SDK_VERSION, &device_,
-                                   &achieved_level, &context_);
+    // Prefer the adapter whose LUID matches the Vulkan device so the shared texture stays on one GPU.
+    IDXGIAdapter1* luid_adapter = nullptr;
+    if (cfg_.adapter_luid != 0U) {
+        IDXGIFactory1* factory = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) &&
+            factory != nullptr) {
+            IDXGIAdapter1* candidate = nullptr;
+            for (UINT i = 0; factory->EnumAdapters1(i, &candidate) != DXGI_ERROR_NOT_FOUND; ++i) {
+                DXGI_ADAPTER_DESC1 desc{};
+                const bool ok = SUCCEEDED(candidate->GetDesc1(&desc));
+                const uint64_t luid = (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32U) |
+                                      static_cast<uint64_t>(desc.AdapterLuid.LowPart);
+                if (ok && luid == cfg_.adapter_luid) {
+                    luid_adapter = candidate;
+                    break;
+                }
+                candidate->Release();
+                candidate = nullptr;
+            }
+            factory->Release();
+        }
+    }
+    HRESULT hr =
+        D3D11CreateDevice(luid_adapter, luid_adapter != nullptr ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+                          nullptr, create_flags, kFeatureLevels.data(), static_cast<UINT>(kFeatureLevels.size()),
+                          D3D11_SDK_VERSION, &device_, &achieved_level, &context_);
+    if (luid_adapter != nullptr) {
+        luid_adapter->Release();
+        luid_adapter = nullptr;
+    }
     is_warp_ = false;
     if (FAILED(hr) && cfg_.allow_warp_fallback) {
         hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, create_flags, kFeatureLevels.data(),
@@ -239,6 +272,14 @@ Expected<void> Dx11NprRenderer::init(const Dx11RendererConfig& cfg) {
         return make_unexpected(Error::make(ErrorCode::Internal, "Failed to create D3D11 depth stencil state"));
     }
 
+    D3D11_QUERY_DESC q_desc{};
+    q_desc.Query = D3D11_QUERY_EVENT;
+    hr = device_->CreateQuery(&q_desc, &idle_query_);
+    if (FAILED(hr)) {
+        shutdown();
+        return make_unexpected(Error::make(ErrorCode::Internal, "Failed to create D3D11 event query"));
+    }
+
     auto rt_res = create_render_targets(cfg_.width, cfg_.height);
     if (!rt_res.has_value()) {
         shutdown();
@@ -353,6 +394,7 @@ Expected<void> Dx11NprRenderer::resize(uint32_t width, uint32_t height) {
 
 void Dx11NprRenderer::shutdown() noexcept {
     release_render_targets();
+    safe_release(idle_query_);
     safe_release(depth_state_);
     safe_release(blend_state_);
     safe_release(raster_state_);
@@ -371,6 +413,36 @@ void Dx11NprRenderer::shutdown() noexcept {
 
 bool Dx11NprRenderer::render_npr_mesh(std::span<const AetherVertex25D> vertices, std::span<const uint32_t> indices,
                                       const Dx11NprFrameParams& params) noexcept {
+    std::array<Dx11DrawRange, 1> single{};
+    single[0].index_offset = 0U;
+    single[0].index_count = static_cast<uint32_t>(indices.size());
+    single[0].lit_color = params.lit_color;
+    single[0].shadow_color = params.shadow_color;
+    return render_npr_draws(vertices, indices, single, params);
+}
+
+bool Dx11NprRenderer::write_constants(const Dx11NprFrameParams& params, const std::array<float, 4>& lit,
+                                      const std::array<float, 4>& shade) noexcept {
+    D3D11_MAPPED_SUBRESOURCE mapped_cb{};
+    if (FAILED(context_->Map(constant_buffer_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb)) ||
+        mapped_cb.pData == nullptr) {
+        return false;
+    }
+    HlslNprConstants cb_data{};
+    cb_data.view_proj = params.view_proj;
+    cb_data.light_dir_flatness = params.light_dir_flatness;
+    cb_data.lit_color = lit;
+    cb_data.shadow_color = shade;
+    cb_data.rim_color_strength = params.rim_color_strength;
+    cb_data.misc = {cfg_.linear_output ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    std::memcpy(mapped_cb.pData, &cb_data, sizeof(cb_data));
+    context_->Unmap(constant_buffer_, 0);
+    return true;
+}
+
+bool Dx11NprRenderer::render_npr_draws(std::span<const AetherVertex25D> vertices, std::span<const uint32_t> indices,
+                                       std::span<const Dx11DrawRange> draws,
+                                       const Dx11NprFrameParams& params) noexcept {
     if (!initialized_ || context_ == nullptr || rtv_ == nullptr || dsv_ == nullptr) {
         return false;
     }
@@ -393,20 +465,6 @@ bool Dx11NprRenderer::render_npr_mesh(std::span<const AetherVertex25D> vertices,
     }
     std::memcpy(mapped_ib.pData, indices.data(), indices.size() * sizeof(uint32_t));
     context_->Unmap(index_buffer_, 0);
-
-    D3D11_MAPPED_SUBRESOURCE mapped_cb{};
-    if (FAILED(context_->Map(constant_buffer_, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb)) ||
-        mapped_cb.pData == nullptr) {
-        return false;
-    }
-    HlslNprConstants cb_data{};
-    cb_data.view_proj = params.view_proj;
-    cb_data.light_dir_flatness = params.light_dir_flatness;
-    cb_data.lit_color = params.lit_color;
-    cb_data.shadow_color = params.shadow_color;
-    cb_data.rim_color_strength = params.rim_color_strength;
-    std::memcpy(mapped_cb.pData, &cb_data, sizeof(cb_data));
-    context_->Unmap(constant_buffer_, 0);
 
     context_->ClearRenderTargetView(rtv_, params.clear_color.data());
     context_->ClearDepthStencilView(dsv_, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
@@ -438,10 +496,37 @@ bool Dx11NprRenderer::render_npr_mesh(std::span<const AetherVertex25D> vertices,
     context_->PSSetShader(ps_, nullptr, 0);
     context_->PSSetConstantBuffers(0, 1, &constant_buffer_);
 
-    context_->DrawIndexed(static_cast<UINT>(indices.size()), 0, 0);
+    const auto index_total = static_cast<uint32_t>(indices.size());
+    for (const Dx11DrawRange& d : draws) {
+        if (d.index_count == 0U || d.index_offset >= index_total) {
+            continue;
+        }
+        const uint32_t count = std::min(d.index_count, index_total - d.index_offset);
+        if (!write_constants(params, d.lit_color, d.shadow_color)) {
+            return false;
+        }
+        context_->DrawIndexed(count, d.index_offset, d.base_vertex);
+    }
     context_->Flush();
 
     ++rendered_frames_;
+    return true;
+}
+
+bool Dx11NprRenderer::wait_for_gpu(uint32_t timeout_ms) noexcept {
+    if (!initialized_ || context_ == nullptr || idle_query_ == nullptr) {
+        return false;
+    }
+    context_->End(idle_query_);
+    context_->Flush();
+    const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
+    BOOL done = FALSE;
+    while (context_->GetData(idle_query_, &done, sizeof(done), 0) != S_OK || done == FALSE) {
+        if (::GetTickCount64() > deadline) {
+            return false;
+        }
+        ::SwitchToThread();
+    }
     return true;
 }
 

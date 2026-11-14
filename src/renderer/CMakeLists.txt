@@ -44,6 +44,8 @@ add_library(aether_renderer STATIC
     denoise/svgf_lite_denoiser.hpp
     denoise/vendor_denoisers.cpp
     denoise/vendor_denoisers.hpp
+    dx11_bridge.cpp
+    dx11_bridge.hpp
     dx11_renderer.cpp
     dx11_renderer.hpp
     frame_graph.cpp

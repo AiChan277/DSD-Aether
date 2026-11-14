@@ -1486,8 +1486,10 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         return;
     }
 
-    const bool has_avatar =
-        (req.avatar != nullptr && bound_avatar_ == req.avatar && req.avatar->requirements.vertex_count > 0);
+    const bool use_external =
+        (req.external_color_image != VK_NULL_HANDLE && req.external_width > 0U && req.external_height > 0U);
+    const bool has_avatar = !use_external && (req.avatar != nullptr && bound_avatar_ == req.avatar &&
+                                              req.avatar->requirements.vertex_count > 0);
     const uint32_t w = effective_output_width();
     const uint32_t h = effective_output_height();
     if (w == 0 || h == 0 || out_ring_[0].bgra8.img.handle == VK_NULL_HANDLE) {
@@ -2140,6 +2142,12 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
               VK_ACCESS_2_SHADER_READ_BIT);
         timing_.end_scope(cmd, fslot, rhi::GpuPassId::ToneMap);
+    } else if (use_external) {
+        record_external_color_blit(cmd, req, w, h);
+        trans(out_rgba16f_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+              VK_ACCESS_2_SHADER_READ_BIT);
     } else {
         trans(out_rgba16f_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
               VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -2230,6 +2238,87 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     if (has_avatar) {
         have_prev_view_proj_ = true;
     }
+}
+
+void FrameGraph::record_external_color_blit(VkCommandBuffer cmd, const FrameRenderRequest& req, uint32_t w,
+                                            uint32_t h) noexcept {
+    // Leaves OUT_RGBA16F in TRANSFER_DST_OPTIMAL holding either the external image or a transparent clear.
+    rhi::RhiDevice::cmd_transition_image(cmd, out_rgba16f_.img.handle, out_rgba16f_.layout,
+                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                         VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                         VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    out_rgba16f_.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    const VkImageSubresourceRange sub{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    const uint32_t gfx = device_->graphics_family();
+    const bool foreign = req.external_is_foreign;
+    auto ext_barrier = [&](VkImageLayout old_l, VkImageLayout new_l, VkPipelineStageFlags2 src_st,
+                           VkAccessFlags2 src_ac, VkPipelineStageFlags2 dst_st, VkAccessFlags2 dst_ac, uint32_t src_qf,
+                           uint32_t dst_qf) {
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = src_st;
+        b.srcAccessMask = src_ac;
+        b.dstStageMask = dst_st;
+        b.dstAccessMask = dst_ac;
+        b.oldLayout = old_l;
+        b.newLayout = new_l;
+        b.srcQueueFamilyIndex = src_qf;
+        b.dstQueueFamilyIndex = dst_qf;
+        b.image = req.external_color_image;
+        b.subresourceRange = sub;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.imageMemoryBarrierCount = 1;
+        di.pImageMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cmd, &di);
+    };
+
+    if (req.external_layout == VK_IMAGE_LAYOUT_UNDEFINED && req.external_staging_buffer == VK_NULL_HANDLE) {
+        // First frame of the shared-texture path: establish GENERAL; its contents are not valid yet.
+        ext_barrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, VK_QUEUE_FAMILY_IGNORED,
+                    VK_QUEUE_FAMILY_IGNORED);
+        if (foreign) {
+            ext_barrier(VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, gfx, VK_QUEUE_FAMILY_EXTERNAL);
+        }
+        const VkClearColorValue zero_col{{0.0f, 0.0f, 0.0f, 0.0f}};
+        vkCmdClearColorImage(cmd, out_rgba16f_.img.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero_col, 1, &sub);
+        return;
+    }
+
+    VkImageLayout cur = req.external_layout;
+    if (req.external_staging_buffer != VK_NULL_HANDLE) {
+        ext_barrier(cur, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {req.external_width, req.external_height, 1};
+        vkCmdCopyBufferToImage(cmd, req.external_staging_buffer, req.external_color_image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        ext_barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                    VK_ACCESS_2_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    } else {
+        // Acquire the D3D11-written texture from the external queue family.
+        ext_barrier(cur, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                    VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                    foreign ? VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED,
+                    foreign ? gfx : VK_QUEUE_FAMILY_IGNORED);
+    }
+
+    VkImageBlit bl{};
+    bl.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    bl.srcOffsets[1] = {static_cast<int32_t>(req.external_width), static_cast<int32_t>(req.external_height), 1};
+    bl.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    bl.dstOffsets[1] = {static_cast<int32_t>(w), static_cast<int32_t>(h), 1};
+    vkCmdBlitImage(cmd, req.external_color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out_rgba16f_.img.handle,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+
+    // Hand the image back in GENERAL (released to D3D11 on the shared path).
+    ext_barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                foreign ? gfx : VK_QUEUE_FAMILY_IGNORED, foreign ? VK_QUEUE_FAMILY_EXTERNAL : VK_QUEUE_FAMILY_IGNORED);
 }
 
 void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest& req) noexcept {
@@ -2606,6 +2695,22 @@ FrameGraphOutputs FrameGraph::outputs_for_slot(uint32_t ring_slot) const noexcep
 
 FrameGraphOutputs FrameGraph::outputs() const noexcept {
     return outputs_for_slot(last_output_slot_);
+}
+
+std::array<float, 16> compute_view_proj(const PreviewCamera& cam, float aspect) noexcept {
+    GpuMat4 view{};
+    GpuMat4 inv_view{};
+    GpuMat4 proj{};
+    GpuMat4 inv_proj{};
+    GpuMat4 vp{};
+    Mat4Vec3 eye{};
+    build_camera_matrices(cam, aspect, view, inv_view, proj, inv_proj, vp, eye);
+    std::array<float, 16> out{};
+    std::memcpy(out.data() + 0, vp.col0, sizeof(float) * 4U);
+    std::memcpy(out.data() + 4, vp.col1, sizeof(float) * 4U);
+    std::memcpy(out.data() + 8, vp.col2, sizeof(float) * 4U);
+    std::memcpy(out.data() + 12, vp.col3, sizeof(float) * 4U);
+    return out;
 }
 
 } // namespace aether::renderer

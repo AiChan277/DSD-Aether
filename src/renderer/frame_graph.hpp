@@ -85,7 +85,22 @@ struct FrameRenderRequest {
     bool clear_swapchain{true};
     VkImageView swapchain_view{VK_NULL_HANDLE};
     VkExtent2D swapchain_extent{};
+
+    // Alternate render backend (ADR-0016): when `external_color_image` is set, Passes 1-11 are skipped and the
+    // premultiplied linear RGBA8 image is blitted into OUT_RGBA16F, so Pass 12 encode and every output still run.
+    VkImage external_color_image{VK_NULL_HANDLE};
+    uint32_t external_width{0};
+    uint32_t external_height{0};
+    // Layout the image is in when this frame starts (`UNDEFINED` on first use: the frame shows a clear instead).
+    VkImageLayout external_layout{VK_IMAGE_LAYOUT_UNDEFINED};
+    // true: image memory is owned by a D3D11 device (acquire/release with `VK_QUEUE_FAMILY_EXTERNAL`).
+    bool external_is_foreign{false};
+    // Optional CPU-readback path: tightly packed RGBA8 rows copied into the image before the blit.
+    VkBuffer external_staging_buffer{VK_NULL_HANDLE};
 };
+
+/** Column-major view-projection used by every pass (shared with the DirectX 11 backend). */
+[[nodiscard]] std::array<float, 16> compute_view_proj(const PreviewCamera& cam, float aspect) noexcept;
 
 struct FrameGraphOutputs {
     VkImage rgba16f_image{VK_NULL_HANDLE};
@@ -181,6 +196,8 @@ class FrameGraph {
     [[nodiscard]] bool pipelines_ready() const noexcept { return pipelines_ready_; }
 
   private:
+    void record_external_color_blit(VkCommandBuffer cmd, const FrameRenderRequest& req, uint32_t w,
+                                    uint32_t h) noexcept;
     struct RegisteredImage {
         rhi::RhiImage img{};
         uint32_t sampled_slot{UINT32_MAX};
