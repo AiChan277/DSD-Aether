@@ -22,6 +22,7 @@
 #include "rhi/rhi_device.hpp"
 #include "rhi/rhi_swapchain.hpp"
 #include "ui/dev_shell.hpp"
+#include "ui/params/project_settings.hpp"
 #include "ui/theme/precision_dark.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/workspace/studio_workspace.hpp"
@@ -896,11 +897,24 @@ int run_application(const AppLaunchOptions& opts) {
     init_out_cfg.ndi_enabled = false;
     init_out_cfg.osc_enabled = true;
 
+    ui::AppSettings boot_settings{};
+    ui::ParamStore boot_params{};
+    if (opts.smoke_frames == 0) {
+        const std::filesystem::path cfg_dir =
+            paths.app_data_dir.empty() ? ui::default_config_dir() : std::filesystem::path(paths.app_data_dir);
+        (void)ui::load_app_settings_toml(cfg_dir / "settings.toml", boot_settings, boot_params);
+    }
+
     auto pipeline = std::make_unique<PipelineSkeleton>();
     PipelineConfig pipe_cfg{};
     pipe_cfg.enable_live_tracking = true;
-    pipe_cfg.use_synthetic_camera = true;
-    pipe_cfg.preferred_ep = -1;
+    pipe_cfg.use_synthetic_camera =
+        (opts.smoke_frames > 0) ? true : boot_params.get_bool(ui::ParamId::TrackingSyntheticCamera);
+    pipe_cfg.camera_active = (opts.smoke_frames == 0);
+    pipe_cfg.camera_fps = static_cast<uint32_t>(std::max(30, boot_params.get_int(ui::ParamId::TrackingCameraFps)));
+    pipe_cfg.preferred_camera_link = boot_settings.preferred_camera_link;
+    pipe_cfg.preferred_ep =
+        ui::tracking_ep_mode_to_router_override(boot_params.get_int(ui::ParamId::TrackingEpMode));
     pipe_cfg.ov_cache_dir = std::filesystem::path(paths.cache_dir) / "ov_cache";
     pipe_cfg.output_device = rhi;
     pipe_cfg.output_cfg = init_out_cfg;
@@ -1625,6 +1639,24 @@ int run_application(const AppLaunchOptions& opts) {
                 pipeline->send_tracking_command({TrackingCmdKind::ToggleCameraSource, 0});
                 vp_actions.request_toggle_camera_source = false;
             }
+            if (vp_actions.request_set_camera_active) {
+                pipeline->send_tracking_command(
+                    {TrackingCmdKind::SetCameraActive, vp_actions.target_camera_active ? 1 : 0});
+                vp_actions.request_set_camera_active = false;
+            }
+            if (vp_actions.request_set_synthetic_camera) {
+                pipeline->send_tracking_command(
+                    {TrackingCmdKind::SetSyntheticCamera, vp_actions.target_synthetic_camera ? 1 : 0});
+                vp_actions.request_set_synthetic_camera = false;
+            }
+            if (vp_actions.request_select_camera) {
+                TrackingControlCommand cmd{};
+                cmd.kind = TrackingCmdKind::SelectCameraDevice;
+                cmd.int_arg = vp_actions.select_camera_fps;
+                std::snprintf(cmd.str_arg, sizeof(cmd.str_arg), "%s", vp_actions.select_camera_link.data());
+                pipeline->send_tracking_command(cmd);
+                vp_actions.request_select_camera = false;
+            }
             if (vp_actions.request_ep_override != -99) {
                 pipeline->send_tracking_command({TrackingCmdKind::SetEpOverride, vp_actions.request_ep_override});
                 vp_actions.request_ep_override = -99;
@@ -2093,9 +2125,13 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.enabled = track_hud.enabled;
                     tracking_view.ready = track_hud.ready;
                     tracking_view.using_synthetic_camera = track_hud.using_synthetic_camera;
+                    tracking_view.camera_active = track_hud.camera_active;
                     tracking_view.roi_locked = track_hud.roi_locked;
                     tracking_view.active_ep = track_hud.active_ep;
                     tracking_view.selected_ep_override = track_hud.selected_ep_override;
+                    tracking_view.camera_width = track_hud.camera_width;
+                    tracking_view.camera_height = track_hud.camera_height;
+                    tracking_view.camera_fps = track_hud.camera_fps;
                     tracking_view.frames_processed = track_hud.frames_processed;
                     tracking_view.demotion_count = track_hud.demotion_count;
                     tracking_view.preprocess_ms = track_hud.preprocess_ms;
@@ -2112,6 +2148,7 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.valid_flags = skin_snap.frame.tracking_valid_flags;
                     tracking_view.active_ep_label = track_hud.active_ep_label;
                     tracking_view.camera_label = track_hud.camera_label;
+                    tracking_view.camera_symlink = track_hud.camera_symlink;
 
                     ui::DevShellOutputView output_view{};
                     output_view.width = active_out_cfg.width;

@@ -1392,12 +1392,13 @@ Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
             gm.hair_specular_params[1] = 0.35f;
             gm.hair_specular_params[2] = m.shade_color_gi[3];
             gm.hair_specular_params[3] = 0.35f;
-            gm.tex_slots[0] = resolve_tex(m.tex_base, fallback_white_slot_);
-            gm.tex_slots[1] = resolve_tex(m.tex_shade, fallback_white_slot_);
+            const uint32_t base_slot = resolve_tex(m.tex_base, fallback_white_slot_);
+            gm.tex_slots[0] = base_slot;
+            gm.tex_slots[1] = resolve_tex(m.tex_shade, base_slot);
             gm.tex_slots[2] = resolve_tex(m.tex_sdf_face, avatar_face_sdf_slot_);
             gm.tex_slots[3] = resolve_tex(m.tex_matcap, UINT32_MAX);
             gm.extra_slots[0] = resolve_tex(m.tex_normal, UINT32_MAX);
-            gm.extra_slots[1] = resolve_tex(m.tex_rim, UINT32_MAX);
+            gm.extra_slots[1] = resolve_tex(m.tex_emissive, UINT32_MAX);
             gm.extra_slots[2] = m.flags;
             gm.extra_slots[3] = m.alpha_mode;
             gm.bounce_tint_zflat[0] = m.base_color[0];

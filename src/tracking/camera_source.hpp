@@ -15,6 +15,7 @@ namespace aether::tracking {
 enum class CameraPixelFormat : uint8_t {
     NV12 = 0,
     BGRA32 = 1,
+    YUY2 = 2,
 };
 
 struct CameraControls {
@@ -33,6 +34,7 @@ struct CameraDeviceEntry {
     uint32_t preferred_width{1280};
     uint32_t preferred_height{720};
     uint32_t preferred_fps{60};
+    bool likely_virtual{false};
 };
 
 struct PersistedCameraConfig {
@@ -112,6 +114,8 @@ class ICameraSource {
     [[nodiscard]] virtual uint32_t height() const noexcept = 0;
     [[nodiscard]] virtual uint32_t fps() const noexcept = 0;
     [[nodiscard]] virtual bool is_synthetic() const noexcept = 0;
+    [[nodiscard]] virtual bool is_open() const noexcept { return false; }
+    [[nodiscard]] virtual std::string device_symlink() const { return {}; }
     [[nodiscard]] virtual std::string source_label() const = 0;
 };
 

@@ -595,7 +595,7 @@ void PreferencesModal::draw(bool on_air, ParamStore& params, UndoStack& undo, Ke
                     draw_property_row(ParamId::TrackingEpMode, params, undo, fonts, row_actions, false, on_air);
                 if (changed_a) {
                     const int idx = params.get_int(ParamId::TrackingEpMode);
-                    actions.viewport.request_ep_override = (idx == 0) ? -1 : (idx - 1);
+                    actions.viewport.request_ep_override = tracking_ep_mode_to_router_override(idx);
                     out_settings_dirty = true;
                 }
                 out_settings_dirty |=

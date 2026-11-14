@@ -24,6 +24,11 @@ struct TrackingStatsSnapshot {
     EpTier active_ep{EpTier::Cpu};
     std::string active_ep_label{"Uninitialized"};
     std::string camera_label{"None"};
+    std::string camera_symlink{};
+    uint32_t camera_width{0};
+    uint32_t camera_height{0};
+    uint32_t camera_fps{0};
+    bool camera_active{false};
     uint32_t demotion_count{0};
     float face_confidence{0.0f};
     float upper_body_confidence{0.0f};

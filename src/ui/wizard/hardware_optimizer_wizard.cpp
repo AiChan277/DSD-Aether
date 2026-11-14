@@ -243,7 +243,21 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
                 ImGui::Spacing();
                 ImGui::Combo(tr("Tracking Execution Provider"), &rec_.tracking_ep_mode, ep_names.data(),
                              static_cast<int>(ep_names.size()));
-                rec_.ep_override = (rec_.tracking_ep_mode == 0) ? -1 : (rec_.tracking_ep_mode - 1);
+                switch (rec_.tracking_ep_mode) {
+                case 0:
+                    rec_.ep_override = -1;
+                    break;
+                case 1:
+                    rec_.ep_override = AETHER_EP_INTEL_NPU;
+                    break;
+                case 2:
+                case 3:
+                    rec_.ep_override = AETHER_EP_DIRECTML_GPU;
+                    break;
+                default:
+                    rec_.ep_override = AETHER_EP_CPU;
+                    break;
+                }
                 ImGui::TextColored(t.text_tertiary, "%s", rec_.ep_reason.data());
                 ImGui::Spacing();
 
@@ -380,14 +394,24 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
                 settings.hw_inventory_hash = compute_inventory_hash(hw);
                 if (!synthetic_feed_ && selected_camera_idx_ >= 0 &&
                     selected_camera_idx_ < static_cast<int>(hw.cameras.size())) {
+                    const auto& cam = hw.cameras[static_cast<size_t>(selected_camera_idx_)];
                     settings.preferred_camera_link =
-                        hw.cameras[static_cast<size_t>(selected_camera_idx_)].friendly_name;
+                        cam.symbolic_link.empty() ? cam.friendly_name : cam.symbolic_link;
+                    actions.viewport.request_select_camera = true;
+                    actions.viewport.select_camera_fps = std::max(30, camera_fps_);
+                    std::snprintf(actions.viewport.select_camera_link.data(),
+                                  actions.viewport.select_camera_link.size(), "%s",
+                                  settings.preferred_camera_link.c_str());
                 } else {
                     settings.preferred_camera_link.clear();
                 }
 
+                actions.viewport.request_set_synthetic_camera = true;
+                actions.viewport.target_synthetic_camera = synthetic_feed_;
+                actions.viewport.request_set_camera_active = true;
+                actions.viewport.target_camera_active = true;
                 actions.request_wizard_apply = true;
-                actions.wizard_ep_override = rec_.ep_override;
+                actions.wizard_ep_override = tracking_ep_mode_to_router_override(rec_.tracking_ep_mode);
                 actions.wizard_denoiser = rec_.denoiser_kind;
                 actions.wizard_res_preset = rec_.output_res_preset;
                 actions.wizard_fps = rec_.output_fps;

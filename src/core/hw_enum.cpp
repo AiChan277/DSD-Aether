@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -44,6 +45,28 @@ uint64_t fnv1a_64(const void* data, size_t len) noexcept {
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+bool contains_ci(std::string_view hay, std::string_view needle) noexcept {
+    if (needle.empty() || hay.size() < needle.size()) {
+        return false;
+    }
+    for (size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            auto to_low = [](char c) noexcept -> char {
+                return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+            };
+            if (to_low(hay[i + j]) != to_low(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void enum_dxgi_gpus(std::vector<GpuAdapterInfo>& out) {
@@ -134,14 +157,28 @@ void enum_mf_cameras(std::vector<CameraDeviceInfo>& out) {
                     if (SUCCEEDED(devices[i]->GetAllocatedString(
                             MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &symlink, &symlink_len)) &&
                         symlink != nullptr) {
+                        cam.symbolic_link = wide_to_utf8(std::wstring_view(symlink, symlink_len));
                         cam.symbolic_id_hash = fnv1a_64(symlink, symlink_len * sizeof(WCHAR));
                         ::CoTaskMemFree(symlink);
+                    }
+                    static constexpr const char* kVirtualHints[] = {
+                        "smart connect", "obs virtual", "obs-camera", "broadcast", "snap camera",
+                        "virtual",       "root\\camera", "manycam",   "iriun",     "droidcam",
+                        "epoccam",       "youcam",      "vcam",
+                    };
+                    for (const char* hint : kVirtualHints) {
+                        if (contains_ci(cam.friendly_name, hint) || contains_ci(cam.symbolic_link, hint)) {
+                            cam.likely_virtual = true;
+                            break;
+                        }
                     }
                     // HR-12: NEVER open/activate stream or capture/persist camera frames here.
                     devices[i]->Release();
                     out.push_back(std::move(cam));
                 }
                 ::CoTaskMemFree(static_cast<void*>(devices));
+                std::stable_partition(out.begin(), out.end(),
+                                      [](const CameraDeviceInfo& c) { return !c.likely_virtual; });
             }
         }
         ::MFShutdown();
@@ -150,27 +187,6 @@ void enum_mf_cameras(std::vector<CameraDeviceInfo>& out) {
     if (com_owned) {
         ::CoUninitialize();
     }
-}
-bool contains_ci(std::string_view hay, std::string_view needle) noexcept {
-    if (needle.empty() || hay.size() < needle.size()) {
-        return false;
-    }
-    for (size_t i = 0; i + needle.size() <= hay.size(); ++i) {
-        bool match = true;
-        for (size_t j = 0; j < needle.size(); ++j) {
-            auto to_low = [](char c) noexcept -> char {
-                return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-            };
-            if (to_low(hay[i + j]) != to_low(needle[j])) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
-            return true;
-        }
-    }
-    return false;
 }
 
 std::string query_devnode_string_prop(HDEVINFO devs, SP_DEVINFO_DATA& dev_info, DWORD prop) {

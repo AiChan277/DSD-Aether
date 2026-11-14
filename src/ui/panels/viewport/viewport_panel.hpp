@@ -64,18 +64,21 @@ class ViewportPanel {
     [[nodiscard]] bool is_focused() const noexcept { return viewport_focused_; }
     [[nodiscard]] int focal_preset_index() const noexcept { return focal_idx_; }
 
-    void draw(StudioMode mode, const DevShellAvatarView& avatar, const DevShellTrackingView& tracking,
-              const DevShellRenderView& render_view, const DevShellInputEcho& input_echo, bool tracking_paused,
-              ParamStore& params, UndoStack& undo, const UiFontSet& fonts, float dpi_scale, StudioActions& actions);
+    void draw(StudioMode mode, const HardwareInventory& hw, const DevShellAvatarView& avatar,
+              const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
+              const DevShellInputEcho& input_echo, bool tracking_paused, ParamStore& params, UndoStack& undo,
+              AppSettings& settings, bool& settings_dirty, const UiFontSet& fonts, float dpi_scale,
+              StudioActions& actions);
 
   private:
     ImVec2 draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShellAvatarView& avatar, ParamStore& params,
                         UndoStack& undo, float scale, StudioActions& actions);
     bool draw_transform_gizmo(const DevShellAvatarView& avatar, ParamStore& params, UndoStack& undo,
                               const UiFontSet& fonts, ImVec2 canvas_p0, ImVec2 canvas_p1, float dpi_scale);
-    void draw_tracking_hud(ImVec2 top_right, float min_y, const DevShellTrackingView& tracking,
-                           const DevShellRenderView& render_view, bool tracking_paused, const UiFontSet& fonts,
-                           float scale, StudioActions& actions);
+    void draw_tracking_hud(ImVec2 top_right, float min_y, const HardwareInventory& hw,
+                           const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
+                           bool tracking_paused, ParamStore& params, AppSettings& settings, bool& settings_dirty,
+                           const UiFontSet& fonts, float scale, StudioActions& actions);
     void draw_composition_grid(ImVec2 p0, ImVec2 p1, float scale) const;
     void handle_camera_input(bool hovered, bool active, float scale, StudioActions& actions);
     void draw_light_orbit_gizmo(ParamStore& params, UndoStack& undo, const UiFontSet& fonts, float dpi_scale,

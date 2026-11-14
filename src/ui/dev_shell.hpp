@@ -68,9 +68,13 @@ struct DevShellTrackingView {
     bool enabled{false};
     bool ready{false};
     bool using_synthetic_camera{true};
+    bool camera_active{false};
     bool roi_locked{false};
     uint32_t active_ep{AETHER_EP_CPU};
     int32_t selected_ep_override{-1}; // -1 = Auto
+    uint32_t camera_width{0};
+    uint32_t camera_height{0};
+    uint32_t camera_fps{0};
     uint64_t frames_processed{0};
     uint64_t demotion_count{0};
     float preprocess_ms{0.0f};
@@ -87,6 +91,7 @@ struct DevShellTrackingView {
     uint32_t valid_flags{0};
     const char* active_ep_label{"Initializing..."};
     const char* camera_label{"Synthetic 60Hz"};
+    const char* camera_symlink{""};
 };
 
 struct DevShellRenderView {
@@ -103,11 +108,11 @@ struct DevShellRenderView {
     bool baked_face_sdf_applied{false};
     float key_azimuth_deg{32.0f};
     float key_elevation_deg{26.0f};
-    float key_intensity{1.85f};
-    float fill_intensity{0.55f};
-    float rim_intensity{1.15f};
+    float key_intensity{1.00f};
+    float fill_intensity{0.28f};
+    float rim_intensity{0.35f};
     float live2d_flatness{0.75f};
-    float bloom_intensity{0.28f};
+    float bloom_intensity{0.06f};
     float outline_scale{1.0f};
     float total_gpu_ms{0.0f};
     float rt_gpu_ms{0.0f};
@@ -200,11 +205,11 @@ struct DevShellViewportActions {
     float fill_elevation_deg{12.0f};
     float rim_azimuth_deg{148.0f};
     float rim_elevation_deg{22.0f};
-    float key_intensity{1.85f};
-    float fill_intensity{0.55f};
-    float rim_intensity{1.15f};
+    float key_intensity{1.00f};
+    float fill_intensity{0.28f};
+    float rim_intensity{0.35f};
     float live2d_flatness{0.75f};
-    float bloom_intensity{0.28f};
+    float bloom_intensity{0.06f};
     float outline_scale{1.0f};
     std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
     float avatar_rot_y_deg{0.0f};
@@ -216,6 +221,13 @@ struct DevShellViewportActions {
     bool request_cancel_load{false};
     bool request_calibrate_neutral{false};
     bool request_toggle_camera_source{false};
+    bool request_set_camera_active{false};
+    bool target_camera_active{true};
+    bool request_set_synthetic_camera{false};
+    bool target_synthetic_camera{false};
+    bool request_select_camera{false};
+    int32_t select_camera_fps{60};
+    std::array<char, 256> select_camera_link{};
     int32_t request_ep_override{-99}; // -99 = no-op, -1 = Auto, >=0 = EpTier enum
 
     // Phase 5 Output & Audio-DSP Sync controls

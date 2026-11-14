@@ -59,9 +59,17 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         return float4(0.18, 0.06, 0.02, 0.25);
     }
 
+    // Mask emissive factor with tex_emissive (extra_slots.y) when bound; unflagged materials (0xFFFFFFFFu)
+    // preserve direct analytical emissive composition (Invariant 5).
+    float3 emissive_map = float3(1.0, 1.0, 1.0);
+    if (mat.extra_slots.y != 0xFFFFFFFFu) {
+        emissive_map = g_SampledImages[mat.extra_slots.y].Sample(g_Samplers[kSamplerLinearClamp], i.uv).rgb;
+    }
+    float3 emissive_term = mat.emission_and_shift.rgb * emissive_map;
+
     // Unlit MToon materials preserve exact analytical emissive + base premul composite (Invariants 1, 4, 5)
     if ((mat_flags & 32u) != 0u) {
-        float3 hdr_rgb = (lit_rgba.rgb + mat.emission_and_shift.rgb) * alpha;
+        float3 hdr_rgb = (lit_rgba.rgb + emissive_term) * alpha;
         return float4(hdr_rgb, alpha);
     }
 
@@ -147,17 +155,36 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         }
     }
 
-    // Soft Fill & GI equalization
-    float3 indirect = float3(0.08, 0.08, 0.10);
+    // Energy-conserving Fill, bounce & Live2D/MToon cel-shading (§10.5):
+    // Keep lit surfaces faithful to the artist's base texture without washing out highlights above 1.0.
+    float3 indirect = float3(0.08, 0.08, 0.11);
     if (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u) {
         float3 fill_dir = normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(0.0, 1.0, 0.0));
         float fill_w = saturate(dot(proxy_n, fill_dir) * 0.5 + 0.5);
-        indirect += fg.lights[1].color_intensity.rgb * (fill_w * 0.45);
+        indirect += fg.lights[1].color_intensity.rgb * (fill_w * 0.35);
     }
-    indirect += bounce_rgb * mat.hair_specular_params.w;
+    indirect += bounce_rgb * (mat.hair_specular_params.w * 0.40);
 
-    float3 surf_base = lerp(shade_col, lit_rgba.rgb, cel_lit);
-    float3 direct_term = surf_base * (key_col * lerp(0.55, 1.0, cel_lit) + indirect);
+    // If a VRM material leaves _ShadeColor = white (= base albedo), synthesize a soft chromatic shadow tint
+    // so shadowed cel bands retain warm/cool richness instead of flat grey washout.
+    float lit_luma = max(luminance(lit_rgba.rgb), 1e-4);
+    float sh_luma = luminance(shade_col);
+    float3 eff_shade = shade_col;
+    if (sh_luma > lit_luma * 0.90) {
+        // Auto-synthesize a warm-preserving anime cel shadow (higher saturation + subtle rose shift, avoiding muddy grey)
+        float3 rich_tint = pow(max(lit_rgba.rgb, float3(1e-4, 1e-4, 1e-4)), float3(1.14, 1.18, 1.18)) *
+                           float3(0.95, 0.84, 0.82);
+        eff_shade = min(shade_col, rich_tint);
+    }
+
+    float3 raw_lit = key_col + indirect * 0.25;
+    float lit_peak = max(raw_lit.r, max(raw_lit.g, raw_lit.b));
+    float over = max(lit_peak - 0.95, 0.0);
+    float capped_peak = min(lit_peak, 0.95) + 0.20 * (over / (0.40 + over));
+    float3 lit_irradiance = raw_lit * (capped_peak / max(lit_peak, 1e-5));
+    float3 shade_irradiance = min(indirect * 0.65 + key_col * 0.34, float3(0.88, 0.88, 0.88));
+
+    float3 direct_term = lerp(eff_shade * shade_irradiance, lit_rgba.rgb * lit_irradiance, cel_lit);
 
     // Occluded Fresnel parametric rim
     float ndv = saturate(dot(true_n, view_v));
@@ -178,10 +205,10 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
                                      float3(0.0, 1.0, 0.0));
         float ndh = saturate(dot(true_n, hdir));
         float ring = smoothstep(0.92, 0.985, ndh);
-        angel_term = fg.lights[3].color_intensity.rgb * (ring * 0.35);
+        angel_term = fg.lights[3].color_intensity.rgb * (ring * 0.22 * lerp(0.35, 1.0, cel_lit));
     }
 
-    float3 hdr = direct_term + rim_term + matcap_term + angel_term + mat.emission_and_shift.rgb;
+    float3 hdr = direct_term + rim_term + matcap_term + angel_term + emissive_term;
     return float4(hdr * alpha, alpha);
 }
 

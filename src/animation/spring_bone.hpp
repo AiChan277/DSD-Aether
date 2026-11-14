@@ -39,6 +39,7 @@ struct alignas(32) SpringColliderSoA {
     alignas(32) float center_bx[kMaxSpringColliders]{};
     alignas(32) float center_by[kMaxSpringColliders]{};
     alignas(32) float center_bz[kMaxSpringColliders]{};
+    uint32_t group_bit[kMaxSpringColliders]{};
 };
 
 struct SpringJointDesc {
@@ -47,6 +48,7 @@ struct SpringJointDesc {
     int32_t parent_bone_index{-1};  // Avatar parent bone driving anchor
     int32_t center_bone_index{-1};  // VRM springCenter bone (-1 = root space)
     Vec3 local_bone_offset{0.0f, -0.08f, 0.0f};
+    Vec3 rest_dir{0.0f, 0.0f, 0.0f}; // Optional explicit rest direction (defaults to normalize(local_bone_offset))
     float bone_length{0.08f};
     float hit_radius{0.02f};
     float stiffness{0.45f};
@@ -54,6 +56,7 @@ struct SpringJointDesc {
     float gravity_power{0.08f};
     Vec3 gravity_dir{0.0f, -1.0f, 0.0f};
     uint32_t collider_mask{0};
+    bool filter_colliders_by_mask{false};
 };
 
 /** Zero-alloc collider snapshot for T3 Rigging wireframe overlay (`#06B6D4` rest / `#F97316` contact). */
@@ -94,8 +97,9 @@ class alignas(64) SpringBoneSimulator {
 
     void clear() noexcept;
     bool add_joint(const SpringJointDesc& desc) noexcept;
-    bool add_sphere_collider(int32_t attached_bone, Vec3 offset, float radius) noexcept;
-    bool add_capsule_collider(int32_t attached_bone, Vec3 head_offset, Vec3 tail_offset, float radius) noexcept;
+    bool add_sphere_collider(int32_t attached_bone, Vec3 offset, float radius, uint32_t group_bit = 0) noexcept;
+    bool add_capsule_collider(int32_t attached_bone, Vec3 head_offset, Vec3 tail_offset, float radius,
+                              uint32_t group_bit = 0) noexcept;
     void configure_default_skirt_and_hair(const RestSkeletonMetrics& rest) noexcept;
 
     void reset_state(const std::array<Vec3, kMaxBones>& bone_pos_ws, const std::array<Quat, kMaxBones>& bone_rot_ws,
@@ -126,11 +130,14 @@ class alignas(64) SpringBoneSimulator {
   private:
     void evaluate_colliders(const std::array<Vec3, kMaxBones>& bone_pos_ws,
                             const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept;
-    void step_scalar(float dt_sq, Vec3 ext_accel, float ext_drag_scale, std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+    void step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                      std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
-    void step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_scale, std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+    void step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+                   std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                    std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
-    void step_avx512(float dt_sq, Vec3 ext_accel, float ext_drag_scale, std::array<Vec3, kMaxBones>& io_bone_pos_ws,
+    void step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                      std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
 
     uint32_t count_{0};
@@ -162,6 +169,8 @@ class alignas(64) SpringBoneSimulator {
     alignas(64) float drag_[kMaxSpringJoints]{};
     alignas(64) float bone_len_[kMaxSpringJoints]{};
     alignas(64) float hit_radius_[kMaxSpringJoints]{};
+    alignas(64) uint32_t collider_mask_[kMaxSpringJoints]{};
+    alignas(64) uint8_t filter_by_mask_[kMaxSpringJoints]{};
 
     alignas(64) int32_t bone_idx_[kMaxSpringJoints]{};
     alignas(64) int32_t parent_joint_idx_[kMaxSpringJoints]{};

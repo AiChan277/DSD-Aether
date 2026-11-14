@@ -53,8 +53,9 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                           bool ffi_layout_ok, const DevShellAvatarView& avatar, const DevShellTrackingView& tracking,
                           const DevShellRenderView& render_view, const DevShellOutputView& output_view,
                           const StudioHostStatus& host_status, std::span<const LoadedPluginVm> plugins,
-                          const UiSelection& selection, ParamStore& params, UndoStack& undo, const UiFontSet& fonts,
-                          PropertyRowActions& row_actions, StudioActions& actions) {
+                          const UiSelection& selection, ParamStore& params, UndoStack& undo, AppSettings& settings,
+                          bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions,
+                          StudioActions& actions) {
     const PrecisionDarkTokens& t = tokens();
     const bool focus_output = focus_output_pending_;
     if (focus_output) {
@@ -182,17 +183,50 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             if (begin_property_table("##tracking")) {
                 if (draw_property_row(ParamId::TrackingEpMode, params, undo, fonts, row_actions)) {
                     const int mode_idx = params.get_int(ParamId::TrackingEpMode);
-                    actions.viewport.request_ep_override = (mode_idx == 0) ? -1 : (mode_idx - 1);
+                    actions.viewport.request_ep_override = tracking_ep_mode_to_router_override(mode_idx);
+                    settings_dirty = true;
                 }
                 draw_property_row(ParamId::TrackingSmoothingCutoffHz, params, undo, fonts, row_actions);
                 if (draw_property_row(ParamId::TrackingSyntheticCamera, params, undo, fonts, row_actions)) {
-                    actions.viewport.request_toggle_camera_source = true;
+                    actions.viewport.request_set_synthetic_camera = true;
+                    actions.viewport.target_synthetic_camera = params.get_bool(ParamId::TrackingSyntheticCamera);
+                    settings_dirty = true;
                 }
                 draw_property_row(ParamId::TrackingAntiFlicker, params, undo, fonts, row_actions);
                 draw_property_row(ParamId::TrackingExposureLock, params, undo, fonts, row_actions);
                 end_property_table();
             }
             ImGui::Spacing();
+            const int active_cam = active_camera_device_index(hw, tracking, settings);
+            const char* cam_preview = (active_cam >= 0 && active_cam < static_cast<int>(hw.cameras.size()))
+                                          ? hw.cameras[static_cast<size_t>(active_cam)].friendly_name.c_str()
+                                          : tr("No Webcam Detected");
+            ImGui::SetNextItemWidth(full_w * 0.65f);
+            if (ImGui::BeginCombo("##InspCamCombo", cam_preview)) {
+                for (int i = 0; i < static_cast<int>(hw.cameras.size()); ++i) {
+                    const auto& cam = hw.cameras[static_cast<size_t>(i)];
+                    char lbl[192]{};
+                    std::snprintf(lbl, sizeof(lbl), "%s%s##icam_%d", cam.friendly_name.c_str(),
+                                  cam.likely_virtual ? " [Virtual]" : "", i);
+                    const bool is_sel = (i == active_cam) && !tracking.using_synthetic_camera;
+                    if (ImGui::Selectable(lbl, is_sel)) {
+                        select_camera_device_action(cam, params, settings, settings_dirty, actions);
+                    }
+                    if (is_sel) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(tracking.camera_active ? tr("Stop Cam") : tr("Start Cam"))) {
+                actions.viewport.request_set_camera_active = true;
+                actions.viewport.target_camera_active = !tracking.camera_active;
+            }
+            ImGui::Spacing();
+            char cam_buf[192]{};
+            format_camera_status_badge(tracking, cam_buf, sizeof(cam_buf));
+            draw_status_badge(fonts, tr("Camera"), cam_buf, tracking.camera_active ? t.status_ok : t.status_warn);
             char ep_buf[128]{};
             std::snprintf(ep_buf, sizeof(ep_buf), "%s · %llu frames", tracking.active_ep_label,
                           static_cast<unsigned long long>(tracking.frames_processed));

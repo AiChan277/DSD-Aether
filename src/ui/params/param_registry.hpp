@@ -195,16 +195,16 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderKeyIntensity, "render.key_intensity", "Render", "Key Intensity",
-              "Key light illuminance contribution.", "EV", ParamType::Float, ParamOwner::T3, 1.85, 0.0, 6.0, 0.05, 2,
+              "Key light illuminance contribution.", "EV", ParamType::Float, ParamOwner::T3, 1.00, 0.0, 6.0, 0.05, 2,
               nullptr,
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderFillIntensity, "render.fill_intensity", "Render", "Fill Intensity",
-              "Soft fill light contribution.", "EV", ParamType::Float, ParamOwner::T3, 0.55, 0.0, 4.0, 0.05, 2, nullptr,
+              "Soft fill light contribution.", "EV", ParamType::Float, ParamOwner::T3, 0.28, 0.0, 4.0, 0.05, 2, nullptr,
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderRimIntensity, "render.rim_intensity", "Render", "Rim Intensity",
-              "Backlight rim accent intensity.", "EV", ParamType::Float, ParamOwner::T3, 1.15, 0.0, 6.0, 0.05, 2,
+              "Backlight rim accent intensity.", "EV", ParamType::Float, ParamOwner::T3, 0.35, 0.0, 6.0, 0.05, 2,
               nullptr,
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
@@ -214,7 +214,7 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
     ParamSpec{ParamId::RenderBloomIntensity, "render.bloom_intensity", "Render", "Premul Bloom",
-              "Premultiplied alpha-preserving bloom strength.", "", ParamType::Float, ParamOwner::T3, 0.28, 0.0, 1.5,
+              "Premultiplied alpha-preserving bloom strength.", "", ParamType::Float, ParamOwner::T3, 0.06, 0.0, 1.5,
               0.02, 2, nullptr,
               PARAM_FLAG_PERSIST | PARAM_FLAG_PROJECT_SCOPE | PARAM_FLAG_OSC_EXPOSED | PARAM_FLAG_GRAPH_EXPOSABLE |
                   PARAM_FLAG_UNDOABLE},
@@ -258,7 +258,7 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
               "Locks webcam auto-exposure for stable tracking FPS.", "", ParamType::Bool, ParamOwner::T1, 0.0, 0.0, 1.0,
               1.0, 0, nullptr, PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE},
     ParamSpec{ParamId::TrackingSyntheticCamera, "tracking.synthetic_camera", "Tracking", "Synthetic Feed",
-              "Use deterministic synthetic camera when testing or offline.", "", ParamType::Bool, ParamOwner::T1, 1.0,
+              "Use deterministic synthetic camera when testing or offline.", "", ParamType::Bool, ParamOwner::T1, 0.0,
               0.0, 1.0, 1.0, 0, nullptr, PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE},
 
     ParamSpec{ParamId::OutputResolution, "output.resolution", "Output", "Resolution Preset",
@@ -333,6 +333,22 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
 [[nodiscard]] double clamp_param_value(const ParamSpec& spec, double v) noexcept;
 [[nodiscard]] const char* param_owner_name(ParamOwner owner) noexcept;
 [[nodiscard]] const char* param_type_name(ParamType type) noexcept;
+
+/** Maps `ParamId::TrackingEpMode` UI combo index (`0=Auto,1=NPU,2=dGPU,3=iGPU,4=CPU`) to `EpTier` override. */
+[[nodiscard]] inline constexpr int32_t tracking_ep_mode_to_router_override(int mode_idx) noexcept {
+    switch (mode_idx) {
+    case 1:
+        return 1; // EpTier::NpuOpenVino
+    case 2:
+        return 3; // EpTier::DirectMlDgpu
+    case 3:
+        return 2; // EpTier::DirectMlIgpu
+    case 4:
+        return 0; // EpTier::Cpu
+    default:
+        return -1; // Auto cascade
+    }
+}
 
 class ParamStore {
   public:

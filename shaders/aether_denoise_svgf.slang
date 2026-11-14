@@ -37,9 +37,13 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         gb_n_slot = fg.gbuffer_ids[0].x;
         gb_mv_slot = fg.gbuffer_ids[0].y;
         depth_slot = fg.gbuffer_extra_ids[0].x;
+        center_d = g_SampledImages[depth_slot].Load(int3(p, 0)).x;
+        if (center_d >= 0.99995) {
+            g_StorageImages[dst_slot][tid.xy] = center;
+            return;
+        }
         center_n = oct_decode(g_SampledImages[gb_n_slot].Load(int3(p, 0)).xy);
         mv = g_SampledImages[gb_mv_slot].Load(int3(p, 0)).xy;
-        center_d = g_SampledImages[depth_slot].Load(int3(p, 0)).x;
     }
 
     // 3x3 statistical moments for temporal variance clamping + edge-stopping spatial blur (à-trous stride 2)
@@ -51,6 +55,14 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     static const float kGauss[3] = {0.25, 0.50, 0.25};
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) {
+                m1 += center;
+                m2 += center * center;
+                float w0 = kGauss[1] * kGauss[1];
+                spatial_sum += center * w0;
+                weight_sum += w0;
+                continue;
+            }
             int2 sp = clamp(p + int2(dx, dy), int2(0, 0), max_p);
             float4 s_val = g_SampledImages[raw_slot].Load(int3(sp, 0));
             m1 += s_val;

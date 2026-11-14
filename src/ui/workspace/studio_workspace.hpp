@@ -121,6 +121,8 @@ class StudioWorkspace {
 
     ParamStore params_{};
     uint64_t synced_param_epoch_{0};
+    int last_synced_ep_mode_{0};
+    bool last_synced_synthetic_cam_{false};
     UndoStack undo_{};
     KeymapRegistry keymap_{};
     AppSettings settings_{};

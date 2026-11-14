@@ -52,7 +52,7 @@ struct LightingRig {
     float outline_width_scale{1.0f};
     float crease_threshold_deg{35.0f};
     float bloom_threshold{1.05f};
-    float bloom_intensity{0.28f};
+    float bloom_intensity{0.06f};
     uint32_t tone_mode{1}; // 0 = Standard clamp, 1 = Soft highlights (AgX shoulder)
     float bg_rgba[4]{0.0f, 0.0f, 0.0f, 0.0f};
 
@@ -69,9 +69,9 @@ struct LightingRig {
         rig.lights[0].orbit_azimuth_deg = 32.0f;
         rig.lights[0].orbit_elevation_deg = 26.0f;
         rig.lights[0].color[0] = 1.0f;
-        rig.lights[0].color[1] = 0.96f;
-        rig.lights[0].color[2] = 0.92f;
-        rig.lights[0].intensity = 1.85f;
+        rig.lights[0].color[1] = 0.98f;
+        rig.lights[0].color[2] = 0.95f;
+        rig.lights[0].intensity = 1.00f;
         rig.lights[0].angular_radius_rad = 0.06f;
 
         // 1: Soft Fill Light
@@ -84,7 +84,7 @@ struct LightingRig {
         rig.lights[1].color[0] = 0.62f;
         rig.lights[1].color[1] = 0.76f;
         rig.lights[1].color[2] = 1.0f;
-        rig.lights[1].intensity = 0.55f;
+        rig.lights[1].intensity = 0.28f;
         rig.lights[1].angular_radius_rad = 0.14f;
 
         // 2: Occluded Rim Light
@@ -97,7 +97,7 @@ struct LightingRig {
         rig.lights[2].color[0] = 0.78f;
         rig.lights[2].color[1] = 0.89f;
         rig.lights[2].color[2] = 1.0f;
-        rig.lights[2].intensity = 1.15f;
+        rig.lights[2].intensity = 0.35f;
         rig.lights[2].angular_radius_rad = 0.04f;
 
         // 3: Hair Orbit Specular Driver (angel-ring highlight)

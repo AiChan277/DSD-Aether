@@ -416,9 +416,11 @@ ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShel
     return ImVec2(std::max(top_bg_max.x, giz_bg_max.x), giz_bg_max.y);
 }
 
-void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const DevShellTrackingView& tracking,
-                                      const DevShellRenderView& render_view, bool tracking_paused,
-                                      const UiFontSet& fonts, float scale, StudioActions& actions) {
+void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const HardwareInventory& hw,
+                                      const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
+                                      bool tracking_paused, ParamStore& params, AppSettings& settings,
+                                      bool& settings_dirty, const UiFontSet& fonts, float scale,
+                                      StudioActions& actions) {
     const PrecisionDarkTokens& t = tokens();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (fonts.mono != nullptr) {
@@ -427,19 +429,25 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const DevSh
     char line1[96]{};
     std::snprintf(line1, sizeof(line1), "%s · %.1f ms", tracking.active_ep_label,
                   static_cast<double>(tracking.inference_ms));
-    char line2[96]{};
-    std::snprintf(line2, sizeof(line2), "Face %.0f%% · GPU %.1f ms",
-                  static_cast<double>(tracking.face_confidence * 100.0f),
-                  static_cast<double>(render_view.total_gpu_ms));
+    char cam_line[160]{};
+    format_camera_status_badge(tracking, cam_line, sizeof(cam_line));
+    char line2[200]{};
+    std::snprintf(line2, sizeof(line2), "%s · GPU %.1f ms", cam_line, static_cast<double>(render_view.total_gpu_ms));
+
     const float pad = 8.0f * scale;
     const float dot_w = 12.0f * scale;
     const float l1_w = dot_w + ImGui::CalcTextSize(line1).x;
+    const float l2_w = ImGui::CalcTextSize(line2).x;
     const ImGuiStyle& st = ImGui::GetStyle();
-    const float btn_row_w = ImGui::CalcTextSize(icons::kPause).x + ImGui::CalcTextSize("Calibrate").x +
-                            st.FramePadding.x * 4.0f + st.ItemSpacing.x * 2.0f + ImGui::CalcTextSize(line2).x;
-    const float w = std::max(l1_w, btn_row_w) + pad * 2.0f;
+    const float cam_combo_w = 138.0f * scale;
+    const char* cam_btn_lbl = tracking.camera_active ? tr("Stop Cam") : tr("Start Cam");
+    const float btn_row_w = ImGui::CalcTextSize(cam_btn_lbl).x + cam_combo_w +
+                            ImGui::CalcTextSize(icons::kPause).x + ImGui::CalcTextSize(tr("Calibrate")).x +
+                            st.FramePadding.x * 8.0f + st.ItemSpacing.x * 4.0f;
+    const float w = std::max({l1_w, l2_w, btn_row_w}) + pad * 2.0f;
     const float line_h = ImGui::GetTextLineHeight();
-    const float h = pad * 2.0f + line_h * 2.0f + st.ItemSpacing.y; // text line + SmallButton row
+    const float ctrl_h = ImGui::GetFrameHeight();
+    const float h = pad * 2.0f + line_h * 2.0f + ctrl_h + st.ItemSpacing.y * 2.0f;
     const ImVec2 p0(top_right.x - w, std::max(top_right.y, min_y));
     const ImVec2 p1(top_right.x, p0.y + h);
     dl->AddRectFilled(p0, p1, t.col32_hud_bg, 8.0f * scale);
@@ -449,8 +457,47 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const DevSh
         tracking.ready ? (tracking.demotion_count > 0 ? t.col32_status_warn : t.col32_status_ok) : t.col32_status_error;
     dl->AddCircleFilled(ImVec2(p0.x + pad + 4.0f * scale, p0.y + pad + line_h * 0.5f), 3.5f * scale, ep_dot, 12);
     dl->AddText(ImVec2(p0.x + pad + dot_w, p0.y + pad), t.col32_text_primary, line1);
+    dl->AddText(ImVec2(p0.x + pad, p0.y + pad + line_h + st.ItemSpacing.y * 0.5f),
+                tracking.camera_active ? t.col32_text_secondary : t.col32_status_warn, line2);
 
-    ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad + line_h + st.ItemSpacing.y));
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + pad, p0.y + pad + line_h * 2.0f + st.ItemSpacing.y * 1.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button, tracking.camera_active ? t.bg_raised : t.accent_button);
+    if (ImGui::SmallButton(cam_btn_lbl)) {
+        actions.viewport.request_set_camera_active = true;
+        actions.viewport.target_camera_active = !tracking.camera_active;
+    }
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tracking.camera_active ? tr("Stop webcam capture") : tr("Start webcam capture"));
+    }
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(cam_combo_w);
+    const int active_cam_idx = active_camera_device_index(hw, tracking, settings);
+    const char* preview_cam = (active_cam_idx >= 0 && active_cam_idx < static_cast<int>(hw.cameras.size()))
+                                  ? hw.cameras[static_cast<size_t>(active_cam_idx)].friendly_name.c_str()
+                                  : tr("No Webcam");
+    if (ImGui::BeginCombo("##HudCamCombo", preview_cam, ImGuiComboFlags_HeightSmall)) {
+        for (int i = 0; i < static_cast<int>(hw.cameras.size()); ++i) {
+            const auto& cam = hw.cameras[static_cast<size_t>(i)];
+            char item_lbl[192]{};
+            std::snprintf(item_lbl, sizeof(item_lbl), "%s%s##hcam_%d", cam.friendly_name.c_str(),
+                          cam.likely_virtual ? " [Virtual]" : "", i);
+            const bool is_sel = (i == active_cam_idx) && !tracking.using_synthetic_camera;
+            if (ImGui::Selectable(item_lbl, is_sel)) {
+                select_camera_device_action(cam, params, settings, settings_dirty, actions);
+            }
+            if (is_sel) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tr("Select active webcam device"));
+    }
+
+    ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, t.bg_raised);
     if (ImGui::SmallButton(tracking_paused ? icons::kPlay : icons::kPause)) {
         actions.request_pause_tracking = true;
@@ -467,8 +514,6 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const DevSh
                           tr("Capture neutral rest pose + face zero-offset from the current frame (Ctrl+Shift+K)"));
     }
     ImGui::PopStyleColor();
-    ImGui::SameLine();
-    ImGui::TextColored(t.text_secondary, "%s", line2);
     if (fonts.mono != nullptr) {
         ImGui::PopFont();
     }
@@ -861,9 +906,10 @@ bool ViewportPanel::draw_transform_gizmo(const DevShellAvatarView& avatar, Param
     return gizmo_dragging_ || (gizmo_hover_handle_ >= 0);
 }
 
-void ViewportPanel::draw(StudioMode mode, const DevShellAvatarView& avatar, const DevShellTrackingView& tracking,
-                         const DevShellRenderView& render_view, const DevShellInputEcho& input_echo,
-                         bool tracking_paused, ParamStore& params, UndoStack& undo, const UiFontSet& fonts,
+void ViewportPanel::draw(StudioMode mode, const HardwareInventory& hw, const DevShellAvatarView& avatar,
+                         const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
+                         const DevShellInputEcho& input_echo, bool tracking_paused, ParamStore& params,
+                         UndoStack& undo, AppSettings& settings, bool& settings_dirty, const UiFontSet& fonts,
                          float dpi_scale, StudioActions& actions) {
     const PrecisionDarkTokens& t = tokens();
     const float scale = std::max(0.75f, dpi_scale);
@@ -926,9 +972,10 @@ void ViewportPanel::draw(StudioMode mode, const DevShellAvatarView& avatar, cons
 
         // Tracking HUD top-right; drops below the toolbar when the viewport is too narrow for both.
         const ImVec2 hud_anchor(canvas_p1.x - margin_x, canvas_p0.y + margin_y);
-        const float hud_min_y = (canvas_p1.x - margin_x - 300.0f * scale < toolbar_right) ? toolbar_bottom + margin_y
+        const float hud_min_y = (canvas_p1.x - margin_x - 360.0f * scale < toolbar_right) ? toolbar_bottom + margin_y
                                                                                           : canvas_p0.y + margin_y;
-        draw_tracking_hud(hud_anchor, hud_min_y, tracking, render_view, tracking_paused, fonts, scale, actions);
+        draw_tracking_hud(hud_anchor, hud_min_y, hw, tracking, render_view, tracking_paused, params, settings,
+                          settings_dirty, fonts, scale, actions);
 
         if (params.get_bool(ParamId::AppSkeletonHeatmap) || mode == StudioMode::Rigging) {
             draw_confidence_heatmap_legend(tracking, fonts, scale,

@@ -23,7 +23,9 @@ struct GpuAdapterInfo {
 
 struct CameraDeviceInfo {
     std::string friendly_name;
+    std::string symbolic_link;
     uint64_t symbolic_id_hash{0};
+    bool likely_virtual{false};
 };
 
 struct NpuStatusInfo {

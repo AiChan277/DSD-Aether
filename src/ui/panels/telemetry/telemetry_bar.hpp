@@ -32,7 +32,9 @@ class TelemetryBar {
   public:
     TopMenuAction draw_top_bar(double now_s, StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi,
                                bool ffi_layout_ok, const StudioHostStatus& host_status, const UndoStack& undo,
-                               const UiFontSet& fonts, float dpi_scale, StudioActions& actions);
+                               const HardwareInventory& hw, const DevShellTrackingView& tracking, ParamStore& params,
+                               AppSettings& settings, bool& settings_dirty, const UiFontSet& fonts, float dpi_scale,
+                               StudioActions& actions);
 
     void draw_bottom_bar(double now_s, const TelemetrySnapshot& telemetry, const ImGuiArenaAllocator& arena,
                          const rhi::RhiDevice& rhi, const DevShellTrackingView& tracking,

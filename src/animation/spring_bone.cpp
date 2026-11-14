@@ -74,6 +74,103 @@ namespace {
     return head_ws - c_pos;
 }
 
+inline bool collider_matches_joint(uint32_t c, uint32_t col_mask, uint8_t filter_by_mask,
+                                   const SpringColliderSoA& colliders) noexcept {
+    if (filter_by_mask == 0U) {
+        return true;
+    }
+    if (col_mask == 0U) {
+        return false;
+    }
+    const uint32_t g = colliders.group_bit[c];
+    return g < 32U && ((col_mask & (1U << g)) != 0U);
+}
+
+inline bool push_out_single_collider(uint32_t c, Vec3 head, Vec3 world_rest_dir, float len, float hr,
+                                     const SpringColliderSoA& colliders, Vec3& io_pos) noexcept {
+    const float sum_r = hr + colliders.radius[c];
+    const Vec3 ca{colliders.center_ax[c], colliders.center_ay[c], colliders.center_az[c]};
+    Vec3 closest = ca;
+    if (colliders.shape[c] == static_cast<uint8_t>(ColliderShape::Capsule)) {
+        const Vec3 cb{colliders.center_bx[c], colliders.center_by[c], colliders.center_bz[c]};
+        const Vec3 ab = cb - ca;
+        const float ab2 = dot(ab, ab);
+        const float t = (ab2 > 1e-10f) ? std::clamp(dot(io_pos - ca, ab) / ab2, 0.0f, 1.0f) : 0.0f;
+        closest = ca + ab * t;
+    }
+    const Vec3 diff = io_pos - closest;
+    const float d2 = dot(diff, diff);
+    if (d2 < sum_r * sum_r) {
+        const float d = std::sqrt(std::max(d2, 1e-12f));
+        io_pos = closest + diff * (sum_r / d);
+        io_pos = head + normalize_safe(io_pos - head, world_rest_dir) * len;
+        return true;
+    }
+    return false;
+}
+
+inline Vec3 integrate_verlet_constrained_next(Vec3 head, Vec3 cur, Vec3 prv, Vec3 world_rest_dir, Vec3 grav_force,
+                                             Vec3 ext_accel, float stiffness, float raw_drag, float ext_drag_scale,
+                                             float dt_s, float dt_sq, float drag_pow, float len) noexcept {
+    // Structural/air damping floor prevents zero-drag authored VRM springs from oscillating perpetually.
+    const float eff_drag = std::max(raw_drag, 0.18f);
+    const float drag = std::clamp(eff_drag * ext_drag_scale, 0.0f, 0.99f);
+    const float one_minus_drag = std::pow(1.0f - drag, drag_pow);
+
+    // UniVRM-scaled restoring stiffness & gravity impulse (`* dt_s`, safely capped for ultra-short bones)
+    // plus true world-space external acceleration (`* dt_sq`).
+    const float max_imp = 0.45f * len;
+    const Vec3 internal_imp{
+        (world_rest_dir.x * stiffness + grav_force.x) * dt_s,
+        (world_rest_dir.y * stiffness + grav_force.y) * dt_s,
+        (world_rest_dir.z * stiffness + grav_force.z) * dt_s,
+    };
+    const float imp_len = length(internal_imp);
+    const Vec3 clamped_imp = (imp_len > max_imp && imp_len > 1e-8f) ? (internal_imp * (max_imp / imp_len)) : internal_imp;
+    const Vec3 next = cur + (cur - prv) * one_minus_drag + clamped_imp + ext_accel * dt_sq;
+    return head + normalize_safe(next - head, world_rest_dir) * len;
+}
+
+inline void finalize_joint_verlet_step(uint32_t j, Vec3 cur, Vec3 prv, Vec3 pre_col_next, bool had_contact,
+                                       Vec3& io_next, float bone_len, float dt_s, float* prev_x, float* prev_y,
+                                       float* prev_z, float* curr_x, float* curr_y, float* curr_z) noexcept {
+    // Sleep clamp eliminates residual float jitter so hair/cloth settle to < 1e-5 velocity at rest.
+    // On collider contact, treat impact as inelastic (remove normal push-out impulse) so touching
+    // overlapping colliders never injects outward phantom momentum on the next Verlet frame.
+    const Vec3 col_corr = io_next - pre_col_next;
+    Vec3 next_prev = cur;
+    if (had_contact) {
+        const Vec3 free_vel = pre_col_next - cur;
+        const float cc2 = length_sq(col_corr);
+        Vec3 tang_vel = free_vel;
+        if (cc2 > 1e-12f) {
+            const float inv_cc = 1.0f / std::sqrt(cc2);
+            const Vec3 n{col_corr.x * inv_cc, col_corr.y * inv_cc, col_corr.z * inv_cc};
+            const float vn = dot(free_vel, n);
+            tang_vel = free_vel - n * vn;
+        }
+        next_prev = io_next - tang_vel * 0.80f;
+    }
+
+    const float step_disp_sq = length_sq(io_next - cur);
+    const float prev_disp_sq = length_sq(cur - prv);
+    const float sleep_step = std::max(3.0e-4f * dt_s, 2.0e-6f * std::max(bone_len, 0.05f));
+    const float sleep_step_sq = sleep_step * sleep_step;
+    constexpr float kStaticFloorSq = 6.0e-7f * 6.0e-7f;
+    const bool decelerated_to_sleep = (prev_disp_sq > 0.0f && prev_disp_sq <= sleep_step_sq);
+    const bool sub_micron_static = (step_disp_sq <= kStaticFloorSq);
+    if (step_disp_sq <= sleep_step_sq && (decelerated_to_sleep || sub_micron_static || had_contact)) {
+        io_next = cur;
+        next_prev = cur;
+    }
+    prev_x[j] = next_prev.x;
+    prev_y[j] = next_prev.y;
+    prev_z[j] = next_prev.z;
+    curr_x[j] = io_next.x;
+    curr_y[j] = io_next.y;
+    curr_z[j] = io_next.z;
+}
+
 } // namespace
 
 SpringBoneSimulator::SpringBoneSimulator() noexcept : detected_path_(detect_cpu_simd_path()) {}
@@ -101,7 +198,9 @@ bool SpringBoneSimulator::add_joint(const SpringJointDesc& desc) noexcept {
     local_offset_y_[i] = desc.local_bone_offset.y;
     local_offset_z_[i] = desc.local_bone_offset.z;
 
-    const Vec3 d = normalize_safe(desc.local_bone_offset, {0.0f, -1.0f, 0.0f});
+    const Vec3 d = (length_sq(desc.rest_dir) > 1e-6f)
+                       ? normalize_safe(desc.rest_dir, {0.0f, -1.0f, 0.0f})
+                       : normalize_safe(desc.local_bone_offset, {0.0f, -1.0f, 0.0f});
     rest_dir_x_[i] = d.x;
     rest_dir_y_[i] = d.y;
     rest_dir_z_[i] = d.z;
@@ -115,6 +214,8 @@ bool SpringBoneSimulator::add_joint(const SpringJointDesc& desc) noexcept {
     drag_[i] = std::clamp(desc.drag_force, 0.0f, 1.0f);
     bone_len_[i] = std::max(desc.bone_length, 0.005f);
     hit_radius_[i] = std::max(desc.hit_radius, 0.0f);
+    collider_mask_[i] = desc.collider_mask;
+    filter_by_mask_[i] = desc.filter_colliders_by_mask ? 1U : 0U;
 
     curr_x_[i] = desc.local_bone_offset.x;
     curr_y_[i] = desc.local_bone_offset.y - desc.bone_length;
@@ -129,7 +230,8 @@ bool SpringBoneSimulator::add_joint(const SpringJointDesc& desc) noexcept {
     return true;
 }
 
-bool SpringBoneSimulator::add_sphere_collider(int32_t attached_bone, Vec3 offset, float radius) noexcept {
+bool SpringBoneSimulator::add_sphere_collider(int32_t attached_bone, Vec3 offset, float radius,
+                                              uint32_t group_bit) noexcept {
     if (colliders_.count >= kMaxSpringColliders) {
         return false;
     }
@@ -143,11 +245,12 @@ bool SpringBoneSimulator::add_sphere_collider(int32_t attached_bone, Vec3 offset
     colliders_.local_by[c] = offset.y;
     colliders_.local_bz[c] = offset.z;
     colliders_.radius[c] = std::max(radius, 0.001f);
+    colliders_.group_bit[c] = group_bit;
     return true;
 }
 
-bool SpringBoneSimulator::add_capsule_collider(int32_t attached_bone, Vec3 head_offset, Vec3 tail_offset,
-                                               float radius) noexcept {
+bool SpringBoneSimulator::add_capsule_collider(int32_t attached_bone, Vec3 head_offset, Vec3 tail_offset, float radius,
+                                               uint32_t group_bit) noexcept {
     if (colliders_.count >= kMaxSpringColliders) {
         return false;
     }
@@ -161,6 +264,7 @@ bool SpringBoneSimulator::add_capsule_collider(int32_t attached_bone, Vec3 head_
     colliders_.local_by[c] = tail_offset.y;
     colliders_.local_bz[c] = tail_offset.z;
     colliders_.radius[c] = std::max(radius, 0.001f);
+    colliders_.group_bit[c] = group_bit;
     return true;
 }
 
@@ -199,6 +303,7 @@ void SpringBoneSimulator::configure_default_skirt_and_hair(const RestSkeletonMet
             d.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
             d.local_bone_offset = (link == 0) ? Vec3{0.08f * std::cos(angle), 0.06f, 0.08f * std::sin(angle)}
                                               : (normalize_safe(dir_out) * 0.06f);
+            d.rest_dir = normalize_safe(dir_out);
             d.bone_length = 0.065f;
             d.hit_radius = 0.018f;
             d.stiffness = 0.42f;
@@ -225,7 +330,23 @@ void SpringBoneSimulator::reset_state(const std::array<Vec3, kMaxBones>& bone_po
         const int32_t pb = parent_bone_idx_[j];
         const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? bone_rot_ws[static_cast<size_t>(pb)]
                                                                            : Quat::identity();
-        const Vec3 tail = head + rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]}) * bone_len_[j];
+        const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
+        Vec3 tail = head + world_rest_dir * bone_len_[j];
+        // Push rest-pose tail out of any overlapping colliders (multi-pass relaxation for nested colliders)
+        for (int pass = 0; pass < 4; ++pass) {
+            bool moved = false;
+            for (uint32_t c = 0; c < colliders_.count; ++c) {
+                if (!collider_matches_joint(c, collider_mask_[j], filter_by_mask_[j], colliders_)) {
+                    continue;
+                }
+                if (push_out_single_collider(c, head, world_rest_dir, bone_len_[j], hit_radius_[j], colliders_, tail)) {
+                    moved = true;
+                }
+            }
+            if (!moved) {
+                break;
+            }
+        }
         curr_x_[j] = tail.x;
         curr_y_[j] = tail.y;
         curr_z_[j] = tail.z;
@@ -265,9 +386,10 @@ void SpringBoneSimulator::evaluate_colliders(const std::array<Vec3, kMaxBones>& 
     }
 }
 
-void SpringBoneSimulator::step_scalar(float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+void SpringBoneSimulator::step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
                                       std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                       std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
+    const float drag_pow = dt_s * 60.0f;
     for (uint32_t j = 0; j < count_; ++j) {
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
                                                           local_offset_x_, local_offset_y_, local_offset_z_, curr_x_,
@@ -276,8 +398,6 @@ void SpringBoneSimulator::step_scalar(float dt_sq, Vec3 ext_accel, float ext_dra
         head_y_[j] = head.y;
         head_z_[j] = head.z;
 
-        const float drag = std::clamp(drag_[j] * ext_drag_scale, 0.0f, 0.99f);
-        const float one_minus_drag = 1.0f - drag;
         const Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
         const Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
 
@@ -285,46 +405,36 @@ void SpringBoneSimulator::step_scalar(float dt_sq, Vec3 ext_accel, float ext_dra
         const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? io_bone_rot_ws[static_cast<size_t>(pb)]
                                                                            : Quat::identity();
         const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
-        const Vec3 accel{
-            world_rest_dir.x * stiffness_[j] + grav_x_[j] + ext_accel.x,
-            world_rest_dir.y * stiffness_[j] + grav_y_[j] + ext_accel.y,
-            world_rest_dir.z * stiffness_[j] + grav_z_[j] + ext_accel.z,
-        };
-
-        Vec3 next = cur + (cur - prv) * one_minus_drag + accel * dt_sq;
         const float len = bone_len_[j];
-        Vec3 dir = normalize_safe(next - head, world_rest_dir);
-        next = head + dir * len;
+        Vec3 next = integrate_verlet_constrained_next(head, cur, prv, world_rest_dir,
+                                                      {grav_x_[j], grav_y_[j], grav_z_[j]}, ext_accel, stiffness_[j],
+                                                      drag_[j], ext_drag_scale, dt_s, dt_sq, drag_pow, len);
 
+        const Vec3 pre_col_next = next;
+        bool had_contact = false;
         const float hr = hit_radius_[j];
-        for (uint32_t c = 0; c < colliders_.count; ++c) {
-            const float sum_r = hr + colliders_.radius[c];
-            const Vec3 ca{colliders_.center_ax[c], colliders_.center_ay[c], colliders_.center_az[c]};
-            Vec3 closest = ca;
-            if (colliders_.shape[c] == static_cast<uint8_t>(ColliderShape::Capsule)) {
-                const Vec3 cb{colliders_.center_bx[c], colliders_.center_by[c], colliders_.center_bz[c]};
-                const Vec3 ab = cb - ca;
-                const float ab2 = dot(ab, ab);
-                const float t = (ab2 > 1e-10f) ? std::clamp(dot(next - ca, ab) / ab2, 0.0f, 1.0f) : 0.0f;
-                closest = ca + ab * t;
+        const uint32_t col_mask = collider_mask_[j];
+        const uint8_t filter_mask = filter_by_mask_[j];
+        for (int pass = 0; pass < 2; ++pass) {
+            bool pass_hit = false;
+            for (uint32_t c = 0; c < colliders_.count; ++c) {
+                if (!collider_matches_joint(c, col_mask, filter_mask, colliders_)) {
+                    continue;
+                }
+                if (push_out_single_collider(c, head, world_rest_dir, len, hr, colliders_, next)) {
+                    active_contact_[c] = 1U;
+                    joint_contact_[j] = 1U;
+                    had_contact = true;
+                    pass_hit = true;
+                }
             }
-            const Vec3 diff = next - closest;
-            const float d2 = dot(diff, diff);
-            if (d2 < sum_r * sum_r) {
-                active_contact_[c] = 1U;
-                joint_contact_[j] = 1U;
-                const float d = std::sqrt(std::max(d2, 1e-12f));
-                next = closest + diff * (sum_r / d);
-                next = head + normalize_safe(next - head, world_rest_dir) * len;
+            if (!pass_hit) {
+                break;
             }
         }
 
-        prev_x_[j] = cur.x;
-        prev_y_[j] = cur.y;
-        prev_z_[j] = cur.z;
-        curr_x_[j] = next.x;
-        curr_y_[j] = next.y;
-        curr_z_[j] = next.z;
+        finalize_joint_verlet_step(j, cur, prv, pre_col_next, had_contact, next, len, dt_s, prev_x_, prev_y_, prev_z_,
+                                   curr_x_, curr_y_, curr_z_);
 
         const int32_t bi = bone_idx_[j];
         if (bi >= 0 && static_cast<uint32_t>(bi) < kMaxBones) {
@@ -338,13 +448,14 @@ void SpringBoneSimulator::step_scalar(float dt_sq, Vec3 ext_accel, float ext_dra
     }
 }
 
-void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+void SpringBoneSimulator::step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
                                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                     std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
     // 8-wide AVX2 collider evaluation per joint + scalar topological length-constraint match (`<= 1e-5 m` parity).
     const __m256 v_zero = _mm256_setzero_ps();
     const __m256 v_one = _mm256_set1_ps(1.0f);
     const __m256 v_eps = _mm256_set1_ps(1e-10f);
+    const float drag_pow = dt_s * 60.0f;
 
     for (uint32_t j = 0; j < count_; ++j) {
         const Vec3 head = compute_joint_head_center_space(j, parent_joint_idx_, parent_bone_idx_, center_bone_idx_,
@@ -354,8 +465,6 @@ void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_
         head_y_[j] = head.y;
         head_z_[j] = head.z;
 
-        const float drag = std::clamp(drag_[j] * ext_drag_scale, 0.0f, 0.99f);
-        const float one_minus_drag = 1.0f - drag;
         const Vec3 cur{curr_x_[j], curr_y_[j], curr_z_[j]};
         const Vec3 prv{prev_x_[j], prev_y_[j], prev_z_[j]};
 
@@ -363,122 +472,103 @@ void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_
         const Quat pr = (pb >= 0 && static_cast<uint32_t>(pb) < kMaxBones) ? io_bone_rot_ws[static_cast<size_t>(pb)]
                                                                            : Quat::identity();
         const Vec3 world_rest_dir = rotate_vec(pr, {rest_dir_x_[j], rest_dir_y_[j], rest_dir_z_[j]});
-        const Vec3 accel{
-            world_rest_dir.x * stiffness_[j] + grav_x_[j] + ext_accel.x,
-            world_rest_dir.y * stiffness_[j] + grav_y_[j] + ext_accel.y,
-            world_rest_dir.z * stiffness_[j] + grav_z_[j] + ext_accel.z,
-        };
-
-        Vec3 next = cur + (cur - prv) * one_minus_drag + accel * dt_sq;
         const float len = bone_len_[j];
-        next = head + normalize_safe(next - head, world_rest_dir) * len;
+        Vec3 next = integrate_verlet_constrained_next(head, cur, prv, world_rest_dir,
+                                                      {grav_x_[j], grav_y_[j], grav_z_[j]}, ext_accel, stiffness_[j],
+                                                      drag_[j], ext_drag_scale, dt_s, dt_sq, drag_pow, len);
 
+        const Vec3 pre_col_next = next;
+        bool had_contact = false;
         const float hr = hit_radius_[j];
         const __m256 v_hr = _mm256_set1_ps(hr);
+        const uint32_t col_mask = collider_mask_[j];
+        const uint8_t filter_mask = filter_by_mask_[j];
 
-        uint32_t c = 0;
-        for (; c + 8U <= colliders_.count; c += 8U) {
-            // Test 8 colliders against `next` concurrently in AVX2 registers
-            const __m256 nx = _mm256_set1_ps(next.x);
-            const __m256 ny = _mm256_set1_ps(next.y);
-            const __m256 nz = _mm256_set1_ps(next.z);
+        for (int pass = 0; pass < 2; ++pass) {
+            bool pass_hit = false;
+            uint32_t c = 0;
+            for (; c + 8U <= colliders_.count; c += 8U) {
+                // Test 8 colliders against `next` concurrently in AVX2 registers
+                const __m256 nx = _mm256_set1_ps(next.x);
+                const __m256 ny = _mm256_set1_ps(next.y);
+                const __m256 nz = _mm256_set1_ps(next.z);
 
-            const __m256 ax = _mm256_load_ps(&colliders_.center_ax[c]);
-            const __m256 ay = _mm256_load_ps(&colliders_.center_ay[c]);
-            const __m256 az = _mm256_load_ps(&colliders_.center_az[c]);
-            const __m256 bx = _mm256_load_ps(&colliders_.center_bx[c]);
-            const __m256 by = _mm256_load_ps(&colliders_.center_by[c]);
-            const __m256 bz = _mm256_load_ps(&colliders_.center_bz[c]);
+                const __m256 ax = _mm256_load_ps(&colliders_.center_ax[c]);
+                const __m256 ay = _mm256_load_ps(&colliders_.center_ay[c]);
+                const __m256 az = _mm256_load_ps(&colliders_.center_az[c]);
+                const __m256 bx = _mm256_load_ps(&colliders_.center_bx[c]);
+                const __m256 by = _mm256_load_ps(&colliders_.center_by[c]);
+                const __m256 bz = _mm256_load_ps(&colliders_.center_bz[c]);
 
-            const __m256 abx = _mm256_sub_ps(bx, ax);
-            const __m256 aby = _mm256_sub_ps(by, ay);
-            const __m256 abz = _mm256_sub_ps(bz, az);
+                const __m256 abx = _mm256_sub_ps(bx, ax);
+                const __m256 aby = _mm256_sub_ps(by, ay);
+                const __m256 abz = _mm256_sub_ps(bz, az);
 
-            const __m256 apx = _mm256_sub_ps(nx, ax);
-            const __m256 apy = _mm256_sub_ps(ny, ay);
-            const __m256 apz = _mm256_sub_ps(nz, az);
+                const __m256 apx = _mm256_sub_ps(nx, ax);
+                const __m256 apy = _mm256_sub_ps(ny, ay);
+                const __m256 apz = _mm256_sub_ps(nz, az);
 
-            const __m256 ab2 = _mm256_fmadd_ps(abx, abx, _mm256_fmadd_ps(aby, aby, _mm256_mul_ps(abz, abz)));
-            const __m256 ap_dot_ab = _mm256_fmadd_ps(apx, abx, _mm256_fmadd_ps(apy, aby, _mm256_mul_ps(apz, abz)));
+                const __m256 ab2 = _mm256_fmadd_ps(abx, abx, _mm256_fmadd_ps(aby, aby, _mm256_mul_ps(abz, abz)));
+                const __m256 ap_dot_ab = _mm256_fmadd_ps(apx, abx, _mm256_fmadd_ps(apy, aby, _mm256_mul_ps(apz, abz)));
 
-            const __m256 safe_ab2 = _mm256_max_ps(ab2, v_eps);
-            __m256 t = _mm256_div_ps(ap_dot_ab, safe_ab2);
-            t = _mm256_min_ps(v_one, _mm256_max_ps(v_zero, t));
-            // For sphere colliders (ab == 0), mask t -> 0 cleanly
-            const __m256 has_len = _mm256_cmp_ps(ab2, v_eps, _CMP_GT_OQ);
-            t = _mm256_and_ps(t, has_len);
+                const __m256 safe_ab2 = _mm256_max_ps(ab2, v_eps);
+                __m256 t = _mm256_div_ps(ap_dot_ab, safe_ab2);
+                t = _mm256_min_ps(v_one, _mm256_max_ps(v_zero, t));
+                // For sphere colliders (ab == 0), mask t -> 0 cleanly
+                const __m256 has_len = _mm256_cmp_ps(ab2, v_eps, _CMP_GT_OQ);
+                t = _mm256_and_ps(t, has_len);
 
-            const __m256 cx = _mm256_fmadd_ps(abx, t, ax);
-            const __m256 cy = _mm256_fmadd_ps(aby, t, ay);
-            const __m256 cz = _mm256_fmadd_ps(abz, t, az);
+                const __m256 cx = _mm256_fmadd_ps(abx, t, ax);
+                const __m256 cy = _mm256_fmadd_ps(aby, t, ay);
+                const __m256 cz = _mm256_fmadd_ps(abz, t, az);
 
-            const __m256 dx = _mm256_sub_ps(nx, cx);
-            const __m256 dy = _mm256_sub_ps(ny, cy);
-            const __m256 dz = _mm256_sub_ps(nz, cz);
-            const __m256 d2 = _mm256_fmadd_ps(dx, dx, _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dz, dz)));
+                const __m256 dx = _mm256_sub_ps(nx, cx);
+                const __m256 dy = _mm256_sub_ps(ny, cy);
+                const __m256 dz = _mm256_sub_ps(nz, cz);
+                const __m256 d2 = _mm256_fmadd_ps(dx, dx, _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dz, dz)));
 
-            const __m256 sum_r = _mm256_add_ps(v_hr, _mm256_load_ps(&colliders_.radius[c]));
-            const __m256 sum_r2 = _mm256_mul_ps(sum_r, sum_r);
-            const __m256 hit_mask = _mm256_cmp_ps(d2, sum_r2, _CMP_LT_OQ);
-            const int mask = _mm256_movemask_ps(hit_mask);
+                const __m256 sum_r = _mm256_add_ps(v_hr, _mm256_load_ps(&colliders_.radius[c]));
+                const __m256 sum_r2 = _mm256_mul_ps(sum_r, sum_r);
+                const __m256 hit_mask = _mm256_cmp_ps(d2, sum_r2, _CMP_LT_OQ);
+                const int mask = _mm256_movemask_ps(hit_mask);
 
-            if (mask != 0) {
-                // Push against hitting lanes in ascending order (exact sequential parity)
-                for (int k = 0; k < 8; ++k) {
-                    if (mask & (1 << k)) {
-                        const uint32_t ck = c + static_cast<uint32_t>(k);
-                        const float sum_rk = hr + colliders_.radius[ck];
-                        const Vec3 ca{colliders_.center_ax[ck], colliders_.center_ay[ck], colliders_.center_az[ck]};
-                        Vec3 closest = ca;
-                        if (colliders_.shape[ck] == static_cast<uint8_t>(ColliderShape::Capsule)) {
-                            const Vec3 cb{colliders_.center_bx[ck], colliders_.center_by[ck], colliders_.center_bz[ck]};
-                            const Vec3 ab = cb - ca;
-                            const float ab2s = dot(ab, ab);
-                            const float ts = (ab2s > 1e-10f) ? std::clamp(dot(next - ca, ab) / ab2s, 0.0f, 1.0f) : 0.0f;
-                            closest = ca + ab * ts;
-                        }
-                        const Vec3 diff = next - closest;
-                        const float d2s = dot(diff, diff);
-                        if (d2s < sum_rk * sum_rk) {
-                            active_contact_[ck] = 1U;
-                            joint_contact_[j] = 1U;
-                            const float d = std::sqrt(std::max(d2s, 1e-12f));
-                            next = closest + diff * (sum_rk / d);
-                            next = head + normalize_safe(next - head, world_rest_dir) * len;
+                if (mask != 0) {
+                    // Push against hitting lanes in ascending order (exact sequential parity)
+                    for (int k = 0; k < 8; ++k) {
+                        if (mask & (1 << k)) {
+                            const uint32_t ck = c + static_cast<uint32_t>(k);
+                            if (!collider_matches_joint(ck, col_mask, filter_mask, colliders_)) {
+                                continue;
+                            }
+                            if (push_out_single_collider(ck, head, world_rest_dir, len, hr, colliders_, next)) {
+                                active_contact_[ck] = 1U;
+                                joint_contact_[j] = 1U;
+                                had_contact = true;
+                                pass_hit = true;
+                            }
                         }
                     }
                 }
             }
-        }
-        // Tail scalar colliders (< 8 remainder)
-        for (; c < colliders_.count; ++c) {
-            const float sum_r = hr + colliders_.radius[c];
-            const Vec3 ca{colliders_.center_ax[c], colliders_.center_ay[c], colliders_.center_az[c]};
-            Vec3 closest = ca;
-            if (colliders_.shape[c] == static_cast<uint8_t>(ColliderShape::Capsule)) {
-                const Vec3 cb{colliders_.center_bx[c], colliders_.center_by[c], colliders_.center_bz[c]};
-                const Vec3 ab = cb - ca;
-                const float ab2s = dot(ab, ab);
-                const float ts = (ab2s > 1e-10f) ? std::clamp(dot(next - ca, ab) / ab2s, 0.0f, 1.0f) : 0.0f;
-                closest = ca + ab * ts;
+            // Tail scalar colliders (< 8 remainder)
+            for (; c < colliders_.count; ++c) {
+                if (!collider_matches_joint(c, col_mask, filter_mask, colliders_)) {
+                    continue;
+                }
+                if (push_out_single_collider(c, head, world_rest_dir, len, hr, colliders_, next)) {
+                    active_contact_[c] = 1U;
+                    joint_contact_[j] = 1U;
+                    had_contact = true;
+                    pass_hit = true;
+                }
             }
-            const Vec3 diff = next - closest;
-            const float d2s = dot(diff, diff);
-            if (d2s < sum_r * sum_r) {
-                active_contact_[c] = 1U;
-                joint_contact_[j] = 1U;
-                const float d = std::sqrt(std::max(d2s, 1e-12f));
-                next = closest + diff * (sum_r / d);
-                next = head + normalize_safe(next - head, world_rest_dir) * len;
+            if (!pass_hit) {
+                break;
             }
         }
 
-        prev_x_[j] = cur.x;
-        prev_y_[j] = cur.y;
-        prev_z_[j] = cur.z;
-        curr_x_[j] = next.x;
-        curr_y_[j] = next.y;
-        curr_z_[j] = next.z;
+        finalize_joint_verlet_step(j, cur, prv, pre_col_next, had_contact, next, len, dt_s, prev_x_, prev_y_, prev_z_,
+                                   curr_x_, curr_y_, curr_z_);
 
         const int32_t bi = bone_idx_[j];
         if (bi >= 0 && static_cast<uint32_t>(bi) < kMaxBones) {
@@ -492,11 +582,11 @@ void SpringBoneSimulator::step_avx2(float dt_sq, Vec3 ext_accel, float ext_drag_
     }
 }
 
-void SpringBoneSimulator::step_avx512(float dt_sq, Vec3 ext_accel, float ext_drag_scale,
+void SpringBoneSimulator::step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale,
                                       std::array<Vec3, kMaxBones>& io_bone_pos_ws,
                                       std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept {
     // Dispatches to wide SIMD lane path safely cleanly without requiring AVX-512 compiler codegen flags
-    step_avx2(dt_sq, ext_accel, ext_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+    step_avx2(dt_s, dt_sq, ext_accel, ext_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
 }
 
 void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float external_drag_scale,
@@ -536,13 +626,13 @@ void SpringBoneSimulator::step(float fixed_dt_s, Vec3 external_accel_ws, float e
 
     switch (effective) {
     case SimdPath::Scalar:
-        step_scalar(dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_scalar(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
         break;
     case SimdPath::Avx2:
-        step_avx2(dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_avx2(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
         break;
     case SimdPath::Avx512:
-        step_avx512(dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
+        step_avx512(dt, dt_sq, external_accel_ws, external_drag_scale, io_bone_pos_ws, io_bone_rot_ws);
         break;
     }
 }

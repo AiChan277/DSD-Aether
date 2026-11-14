@@ -36,7 +36,8 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
     float3 view_pos = mul_col(fg.view, float4(v.pos_zflat.xyz, 1.0)).xyz;
     o.clip_pos = project_live2d_flat(fg.proj, view_pos, fg.head_pivot_view_and_flatness.z,
                                      z_flat_weight, fg.head_pivot_view_and_flatness.w);
-    o.view_normal = normalize_safe(mul_col3(fg.view, v.true_norm_hair.xyz), float3(0.0, 0.0, 1.0));
+    float3 smooth_n = normalize_safe(v.proxy_norm_out.xyz, v.true_norm_hair.xyz);
+    o.view_normal = normalize_safe(mul_col3(fg.view, smooth_n), float3(0.0, 0.0, 1.0));
     o.uv = v.uv;
     o.material_id = g_Pc.param0;
 

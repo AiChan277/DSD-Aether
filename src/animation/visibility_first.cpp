@@ -92,27 +92,29 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     phase_time_s_ += safe_dt;
     out.foot_step_triggered_this_tick = {false, false};
 
-    // 1. Evaluate 0.25 Hz sinusoidal chest/shoulder/attractor breathing oscillator (`§9.4`)
+    // 1. Evaluate optional ultra-smooth 0.2 Hz chest breathing oscillator (`enable_idle_breathing`)
     const float phase = kTwoPi * cfg.breathing_hz * phase_time_s_;
     const float breath_s = std::sin(phase);
-    const float breath_01 = 0.5f * (breath_s + 1.0f);
+    const float breath_01 = cfg.enable_idle_breathing ? (0.5f * (breath_s + 1.0f)) : 0.0f;
+    const float breath_chest_rad = cfg.enable_idle_breathing ? (cfg.chest_pitch_rad * breath_01) : 0.0f;
 
-    // Subtle procedural secondary weight shift & shoulder rise when upper body static
     const float upper_conf =
         (tracked.valid_flags == 0U || (tracked.valid_flags & 0x08U) != 0U) ? tracked.upper_body_confidence : 0.0f;
     const float w_upper = step_visibility_weight(prev_weights_[AETHER_BONE_SPINE], upper_conf, safe_dt, cfg);
     prev_weights_[AETHER_BONE_SPINE] = w_upper;
 
     const Vec3 tracked_hips = tracked.joint_positions_ws[AETHER_BONE_HIPS];
-    Vec3 hips_pos = lerp(rest_hips_pos_, tracked_hips, w_upper);
-    // Subtle organic idle lateral breathing shift when untracked
-    hips_pos.x += (1.0f - w_upper) * 0.008f * std::sin(phase * 0.5f);
-    hips_pos.y += (1.0f - w_upper) * 0.003f * breath_01;
+    const Vec3 hips_pos = lerp(rest_hips_pos_, tracked_hips, w_upper);
     out.hips_pos_ws = hips_pos;
+
+    // Head tracking visibility weight & calm torso sway (zero sway when face untracked)
+    const float face_conf = (tracked.valid_flags & 0x01U) ? 1.0f : 0.0f;
+    const float w_face = step_visibility_weight(prev_weights_[AETHER_BONE_HEAD], face_conf, safe_dt, cfg);
+    prev_weights_[AETHER_BONE_HEAD] = w_face;
 
     // Head target: head tracking orientation drives subtle torso/hips sway (`k_sway = 0.35`, `§9.4`)
     const Quat tracked_head_q = normalize(tracked.joint_rotations[AETHER_BONE_HEAD]);
-    const Vec3 head_aa = to_axis_angle(tracked_head_q);
+    const Vec3 head_aa = to_axis_angle(tracked_head_q) * w_face;
     const Vec3 proc_hips_aa{head_aa.x * 0.10f, head_aa.y * (cfg.k_sway * 0.45f), head_aa.z * (cfg.k_sway * 0.35f)};
     const Quat proc_hips_q = rotvec_to_quat(proc_hips_aa);
     const Quat tracked_hips_q = normalize(tracked.joint_rotations[AETHER_BONE_HIPS]);
@@ -214,22 +216,20 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     }
 
     out.local_rotations[AETHER_BONE_HIPS] = slerp(proc_hips_q, tracked_hips_q, w_upper);
-    // Chest breathing pitch (`1.2 deg`) + gentle counter-yaw
-    const Quat proc_chest = from_euler_xyz(cfg.chest_pitch_rad * breath_01, -head_aa.y * (cfg.k_sway * 0.15f), 0.0f);
+    // Optional chest breathing pitch + gentle counter-yaw (zero when untracked & breathing off)
+    const Quat proc_chest = from_euler_xyz(breath_chest_rad, -head_aa.y * (cfg.k_sway * 0.15f), 0.0f);
     out.local_rotations[AETHER_BONE_CHEST] =
         slerp(proc_chest, normalize(tracked.joint_rotations[AETHER_BONE_CHEST]), w_upper);
     out.local_rotations[AETHER_BONE_UPPER_CHEST] =
-        slerp(from_euler_xyz(cfg.chest_pitch_rad * 0.5f * breath_01, 0.0f, 0.0f),
+        slerp(from_euler_xyz(breath_chest_rad * 0.5f, 0.0f, 0.0f),
               normalize(tracked.joint_rotations[AETHER_BONE_UPPER_CHEST]), w_upper);
 
-    // Shoulder / clavicle follow + breathing rise (`4 mm` shoulder equiv angle)
-    out.local_rotations[AETHER_BONE_LEFT_SHOULDER] = from_euler_xyz(0.0f, 0.0f, l_clavicle_lag_ + 0.015f * breath_01);
-    out.local_rotations[AETHER_BONE_RIGHT_SHOULDER] = from_euler_xyz(0.0f, 0.0f, -r_clavicle_lag_ - 0.015f * breath_01);
+    // Shoulder / clavicle follow + optional breathing rise
+    const float shoulder_breath = cfg.enable_idle_breathing ? (0.015f * breath_01) : 0.0f;
+    out.local_rotations[AETHER_BONE_LEFT_SHOULDER] = from_euler_xyz(0.0f, 0.0f, l_clavicle_lag_ + shoulder_breath);
+    out.local_rotations[AETHER_BONE_RIGHT_SHOULDER] = from_euler_xyz(0.0f, 0.0f, -r_clavicle_lag_ - shoulder_breath);
 
     // Neck & Head follow face Procrustes pose cleanly when face valid
-    const float face_conf = (tracked.valid_flags & 0x01U) ? 1.0f : 0.0f;
-    const float w_face = step_visibility_weight(prev_weights_[AETHER_BONE_HEAD], face_conf, safe_dt, cfg);
-    prev_weights_[AETHER_BONE_HEAD] = w_face;
     out.joint_blend_weights[AETHER_BONE_HEAD] = w_face;
 
     out.local_rotations[AETHER_BONE_NECK] = slerp(Quat::identity(), rotvec_to_quat(head_aa * 0.35f), w_face);

@@ -17,10 +17,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace aether::tracking {
@@ -40,6 +42,58 @@ using Microsoft::WRL::ComPtr;
     std::string out(static_cast<size_t>(needed - 1), '\0');
     ::WideCharToMultiByte(CP_UTF8, 0, ws, -1, out.data(), needed, nullptr, nullptr);
     return out;
+}
+
+[[nodiscard]] std::string to_lower_ascii(std::string_view sv) {
+    std::string out(sv);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+[[nodiscard]] bool equals_ignore_case(std::string_view a, std::string_view b) {
+    return !a.empty() && a.size() == b.size() && to_lower_ascii(a) == to_lower_ascii(b);
+}
+
+[[nodiscard]] bool is_likely_virtual_camera(std::string_view friendly_name, std::string_view symbolic_link) {
+    const std::string fn = to_lower_ascii(friendly_name);
+    const std::string sl = to_lower_ascii(symbolic_link);
+    static constexpr const char* kVirtualHints[] = {
+        "smart connect", "obs virtual", "obs-camera", "broadcast", "snap camera",
+        "virtual",       "root\\camera", "manycam",   "iriun",     "droidcam",
+        "epoccam",       "youcam",      "vcam",
+    };
+    for (const char* hint : kVirtualHints) {
+        if (fn.find(hint) != std::string::npos || sl.find(hint) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] uint32_t row_bytes_for_format(CameraPixelFormat fmt, uint32_t width) noexcept {
+    switch (fmt) {
+    case CameraPixelFormat::NV12:
+        return width;
+    case CameraPixelFormat::YUY2:
+        return width * 2U;
+    case CameraPixelFormat::BGRA32:
+    default:
+        return width * 4U;
+    }
+}
+
+[[nodiscard]] const char* pixel_format_name(CameraPixelFormat fmt) noexcept {
+    switch (fmt) {
+    case CameraPixelFormat::NV12:
+        return "NV12";
+    case CameraPixelFormat::YUY2:
+        return "YUY2";
+    case CameraPixelFormat::BGRA32:
+    default:
+        return "BGRA32";
+    }
 }
 
 class MfSessionGuard {
@@ -136,7 +190,7 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
                     BYTE* buf_start = nullptr;
                     DWORD buf_len = 0;
                     if (SUCCEEDED(buf2d->Lock2DSize(MF2DBuffer_LockFlags_Read, &scan0, &pitch, &buf_start, &buf_len))) {
-                        copy_locked_planes(scan0, pitch, buf_len, dst);
+                        copy_locked_planes(scan0, buf_start, pitch, buf_len, dst);
                         buf2d->Unlock2D();
                         copied = true;
                     }
@@ -146,10 +200,8 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
                     DWORD max_len = 0;
                     DWORD cur_len = 0;
                     if (SUCCEEDED(buf->Lock(&raw, &max_len, &cur_len))) {
-                        const LONG default_pitch = (format_ == CameraPixelFormat::NV12)
-                                                       ? static_cast<LONG>(dst.width)
-                                                       : static_cast<LONG>(dst.width * 4U);
-                        copy_locked_planes(raw, default_pitch, cur_len, dst);
+                        const LONG default_pitch = static_cast<LONG>(row_bytes_for_format(format_, dst.width));
+                        copy_locked_planes(raw, raw, default_pitch, cur_len, dst);
                         buf->Unlock();
                         copied = true;
                     }
@@ -172,12 +224,12 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
     STDMETHODIMP OnEvent(DWORD /*stream_idx*/, IMFMediaEvent* /*event*/) override { return S_OK; }
 
   private:
-    void copy_locked_planes(const uint8_t* src, LONG pitch, DWORD total_bytes,
+    void copy_locked_planes(const uint8_t* scan0, const uint8_t* buf_start, LONG pitch, DWORD total_bytes,
                             CapturedFrameBuffer& dst) const noexcept {
-        if (src == nullptr) {
+        if (scan0 == nullptr || buf_start == nullptr) {
             return;
         }
-        const uint32_t abs_pitch = static_cast<uint32_t>(pitch >= 0 ? pitch : -pitch);
+        const uint8_t* buf_end = buf_start + static_cast<size_t>(total_bytes);
         if (format_ == CameraPixelFormat::NV12) {
             dst.stride_y = dst.width;
             dst.stride_uv = dst.width;
@@ -186,25 +238,26 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
             uint8_t* dst_y = dst.bytes.data();
             uint8_t* dst_uv = dst.bytes.data() + static_cast<size_t>(dst.stride_y) * y_rows;
             for (uint32_t r = 0; r < y_rows; ++r) {
-                const size_t s_off = static_cast<size_t>(r) * abs_pitch;
-                if (s_off + dst.width <= total_bytes) {
-                    std::memcpy(dst_y + static_cast<size_t>(r) * dst.stride_y, src + s_off, dst.width);
+                const uint8_t* row_ptr = scan0 + static_cast<ptrdiff_t>(r) * pitch;
+                if (row_ptr >= buf_start && row_ptr + dst.width <= buf_end) {
+                    std::memcpy(dst_y + static_cast<size_t>(r) * dst.stride_y, row_ptr, dst.width);
                 }
             }
-            const size_t src_uv_base = static_cast<size_t>(abs_pitch) * y_rows;
+            const uint8_t* src_uv_base = scan0 + static_cast<ptrdiff_t>(y_rows) * pitch;
             for (uint32_t r = 0; r < uv_rows; ++r) {
-                const size_t s_off = src_uv_base + static_cast<size_t>(r) * abs_pitch;
-                if (s_off + dst.width <= total_bytes) {
-                    std::memcpy(dst_uv + static_cast<size_t>(r) * dst.stride_uv, src + s_off, dst.width);
+                const uint8_t* row_ptr = src_uv_base + static_cast<ptrdiff_t>(r) * pitch;
+                if (row_ptr >= buf_start && row_ptr + dst.width <= buf_end) {
+                    std::memcpy(dst_uv + static_cast<size_t>(r) * dst.stride_uv, row_ptr, dst.width);
                 }
             }
         } else {
-            dst.stride_y = dst.width * 4U;
+            const uint32_t row_bytes = row_bytes_for_format(format_, dst.width);
+            dst.stride_y = row_bytes;
             dst.stride_uv = 0;
             for (uint32_t r = 0; r < dst.height; ++r) {
-                const size_t s_off = static_cast<size_t>(r) * abs_pitch;
-                if (s_off + dst.stride_y <= total_bytes) {
-                    std::memcpy(dst.bytes.data() + static_cast<size_t>(r) * dst.stride_y, src + s_off, dst.stride_y);
+                const uint8_t* row_ptr = scan0 + static_cast<ptrdiff_t>(r) * pitch;
+                if (row_ptr >= buf_start && row_ptr + row_bytes <= buf_end) {
+                    std::memcpy(dst.bytes.data() + static_cast<size_t>(r) * row_bytes, row_ptr, row_bytes);
                 }
             }
         }
@@ -220,10 +273,230 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
     uint64_t seq_{0};
 };
 
+struct NativeCameraMode {
+    UINT32 width{0};
+    UINT32 height{0};
+    UINT32 fps_num{30};
+    UINT32 fps_den{1};
+    UINT32 fps_rounded{30};
+    GUID subtype{};
+    int score{0};
+};
+
+[[nodiscard]] bool subtype_to_pixel_format(const GUID& sub, CameraPixelFormat& out_fmt) noexcept {
+    if (sub == MFVideoFormat_NV12) {
+        out_fmt = CameraPixelFormat::NV12;
+        return true;
+    }
+    if (sub == MFVideoFormat_YUY2) {
+        out_fmt = CameraPixelFormat::YUY2;
+        return true;
+    }
+    if (sub == MFVideoFormat_RGB32 || sub == MFVideoFormat_ARGB32) {
+        out_fmt = CameraPixelFormat::BGRA32;
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool try_set_output_format(IMFSourceReader* reader, UINT32 width, UINT32 height, UINT32 fps_num,
+                                         UINT32 fps_den, const GUID& subtype, bool include_fps) noexcept {
+    if (reader == nullptr) {
+        return false;
+    }
+    ComPtr<IMFMediaType> target_type;
+    if (FAILED(::MFCreateMediaType(&target_type)) || !target_type) {
+        return false;
+    }
+    if (FAILED(target_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
+        FAILED(target_type->SetGUID(MF_MT_SUBTYPE, subtype)) ||
+        FAILED(::MFSetAttributeSize(target_type.Get(), MF_MT_FRAME_SIZE, width, height))) {
+        return false;
+    }
+    if (include_fps && fps_num > 0U && fps_den > 0U) {
+        (void)::MFSetAttributeRatio(target_type.Get(), MF_MT_FRAME_RATE, fps_num, fps_den);
+    }
+    return SUCCEEDED(
+        reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, target_type.Get()));
+}
+
+[[nodiscard]] bool negotiate_stream_format(IMFSourceReader* reader, uint32_t req_width, uint32_t req_height,
+                                           uint32_t req_fps, uint32_t& out_width, uint32_t& out_height,
+                                           uint32_t& out_fps, CameraPixelFormat& out_fmt) {
+    if (reader == nullptr) {
+        return false;
+    }
+
+    std::vector<NativeCameraMode> native_modes;
+    for (DWORD idx = 0; idx < 128U; ++idx) {
+        ComPtr<IMFMediaType> nt;
+        const HRESULT hr =
+            reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), idx, &nt);
+        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr) || !nt) {
+            break;
+        }
+        GUID major{};
+        GUID sub{};
+        UINT32 w = 0;
+        UINT32 h = 0;
+        UINT32 fps_num = 30;
+        UINT32 fps_den = 1;
+        if (FAILED(nt->GetGUID(MF_MT_MAJOR_TYPE, &major)) || major != MFMediaType_Video) {
+            continue;
+        }
+        if (FAILED(nt->GetGUID(MF_MT_SUBTYPE, &sub))) {
+            continue;
+        }
+        if (FAILED(::MFGetAttributeSize(nt.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0U || h == 0U ||
+            w > kMaxCamWidth || h > kMaxCamHeight) {
+            continue;
+        }
+        if (FAILED(::MFGetAttributeRatio(nt.Get(), MF_MT_FRAME_RATE, &fps_num, &fps_den)) || fps_den == 0U ||
+            fps_num == 0U) {
+            fps_num = 30U;
+            fps_den = 1U;
+        }
+        const UINT32 fps_rounded = std::max(1U, (fps_num + fps_den / 2U) / fps_den);
+        if (fps_rounded < 15U) {
+            continue;
+        }
+
+        int fmt_score = -1;
+        if (sub == MFVideoFormat_NV12) {
+            fmt_score = 40;
+        } else if (sub == MFVideoFormat_MJPG) {
+            fmt_score = 32;
+        } else if (sub == MFVideoFormat_YUY2) {
+            fmt_score = 28;
+        } else if (sub == MFVideoFormat_RGB32 || sub == MFVideoFormat_ARGB32) {
+            fmt_score = 20;
+        } else {
+            fmt_score = 8;
+        }
+
+        int res_score = 0;
+        if (w == req_width && h == req_height) {
+            res_score = 1000;
+        } else if (w == 1280U && h == 720U) {
+            res_score = 900;
+        } else if (w == 640U && h == 480U) {
+            res_score = 700;
+        } else if (w >= 640U && h >= 480U && w <= 1920U && h <= 1080U) {
+            res_score = 400 - static_cast<int>(std::abs(static_cast<int>(w) - 1280) / 16);
+        } else {
+            res_score = 100;
+        }
+
+        int fps_score = 0;
+        if (fps_rounded >= req_fps) {
+            fps_score = 200;
+        } else if (fps_rounded >= 55U) {
+            fps_score = 180;
+        } else if (fps_rounded >= 28U) {
+            fps_score = 140;
+        } else {
+            fps_score = static_cast<int>(fps_rounded);
+        }
+
+        NativeCameraMode mode{};
+        mode.width = w;
+        mode.height = h;
+        mode.fps_num = fps_num;
+        mode.fps_den = fps_den;
+        mode.fps_rounded = fps_rounded;
+        mode.subtype = sub;
+        mode.score = res_score + fps_score + fmt_score;
+        native_modes.push_back(mode);
+    }
+
+    std::stable_sort(native_modes.begin(), native_modes.end(), [](const NativeCameraMode& a, const NativeCameraMode& b) {
+        return a.score > b.score;
+    });
+
+    bool negotiated = false;
+    for (const NativeCameraMode& m : native_modes) {
+        const GUID* candidates_nv12_first[3] = {&MFVideoFormat_NV12, &MFVideoFormat_YUY2, &MFVideoFormat_RGB32};
+        const GUID* candidates_yuy2_first[3] = {&MFVideoFormat_YUY2, &MFVideoFormat_NV12, &MFVideoFormat_RGB32};
+        const GUID* candidates_rgb_first[3] = {&MFVideoFormat_RGB32, &MFVideoFormat_NV12, &MFVideoFormat_YUY2};
+        const GUID* const* order = candidates_nv12_first;
+        if (m.subtype == MFVideoFormat_YUY2) {
+            order = candidates_yuy2_first;
+        } else if (m.subtype == MFVideoFormat_RGB32 || m.subtype == MFVideoFormat_ARGB32) {
+            order = candidates_rgb_first;
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (try_set_output_format(reader, m.width, m.height, m.fps_num, m.fps_den, *order[k], true)) {
+                negotiated = true;
+                break;
+            }
+        }
+        if (negotiated) {
+            break;
+        }
+    }
+
+    if (!negotiated) {
+        struct FallbackDim {
+            UINT32 w;
+            UINT32 h;
+            UINT32 fps;
+        };
+        const FallbackDim dims[] = {
+            {req_width, req_height, req_fps},
+            {1280U, 720U, 60U},
+            {1280U, 720U, 30U},
+            {640U, 480U, 60U},
+            {640U, 480U, 30U},
+        };
+        const GUID* fmts[] = {&MFVideoFormat_NV12, &MFVideoFormat_YUY2, &MFVideoFormat_RGB32};
+        for (const FallbackDim& d : dims) {
+            for (const GUID* fmt : fmts) {
+                if (try_set_output_format(reader, d.w, d.h, d.fps, 1U, *fmt, true) ||
+                    try_set_output_format(reader, d.w, d.h, 0U, 1U, *fmt, false)) {
+                    negotiated = true;
+                    break;
+                }
+            }
+            if (negotiated) {
+                break;
+            }
+        }
+    }
+
+    ComPtr<IMFMediaType> final_type;
+    if (FAILED(reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &final_type)) ||
+        !final_type) {
+        return false;
+    }
+    GUID final_sub{};
+    if (FAILED(final_type->GetGUID(MF_MT_SUBTYPE, &final_sub)) || !subtype_to_pixel_format(final_sub, out_fmt)) {
+        return false;
+    }
+    UINT32 aw = 0;
+    UINT32 ah = 0;
+    if (SUCCEEDED(::MFGetAttributeSize(final_type.Get(), MF_MT_FRAME_SIZE, &aw, &ah)) && aw > 0U && ah > 0U &&
+        aw <= kMaxCamWidth && ah <= kMaxCamHeight) {
+        out_width = aw;
+        out_height = ah;
+    } else {
+        out_width = req_width;
+        out_height = req_height;
+    }
+    UINT32 num = req_fps;
+    UINT32 den = 1U;
+    if (SUCCEEDED(::MFGetAttributeRatio(final_type.Get(), MF_MT_FRAME_RATE, &num, &den)) && den > 0U && num > 0U) {
+        out_fps = std::max(1U, (num + den / 2U) / den);
+    } else {
+        out_fps = req_fps;
+    }
+    return true;
+}
+
 class MfCameraSource final : public ICameraSource {
   public:
     MfCameraSource(std::string symlink, uint32_t w, uint32_t h, uint32_t fps)
-        : symlink_(std::move(symlink)), width_(w), height_(h), fps_(fps) {}
+        : symlink_(std::move(symlink)), req_width_(w), req_height_(h), req_fps_(fps), width_(w), height_(h),
+          fps_(fps) {}
 
     ~MfCameraSource() override { close(); }
 
@@ -232,8 +505,10 @@ class MfCameraSource final : public ICameraSource {
         if (!mf_.ready()) {
             return AETHER_E_INTERNAL;
         }
+        width_ = req_width_;
+        height_ = req_height_;
+        fps_ = req_fps_;
 
-        // Enumerate devices and match symbolic link (or pick first device if empty)
         ComPtr<IMFAttributes> enum_attr;
         if (FAILED(::MFCreateAttributes(&enum_attr, 1))) {
             return AETHER_E_INTERNAL;
@@ -245,116 +520,137 @@ class MfCameraSource final : public ICameraSource {
             return AETHER_E_IO;
         }
 
-        ComPtr<IMFActivate> chosen;
+        struct DeviceCandidate {
+            ComPtr<IMFActivate> activate;
+            std::string friendly_name;
+            std::string symbolic_link;
+            bool is_virtual{false};
+        };
+        std::vector<DeviceCandidate> candidates;
+        candidates.reserve(count);
         for (UINT32 i = 0; i < count; ++i) {
+            DeviceCandidate dc{};
+            dc.activate = devices[i];
+            WCHAR* fname = nullptr;
+            UINT32 flen = 0;
+            if (SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &fname, &flen))) {
+                dc.friendly_name = wide_to_utf8(fname);
+                ::CoTaskMemFree(fname);
+            }
             WCHAR* slink = nullptr;
             UINT32 slen = 0;
             if (SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
                                                          &slink, &slen))) {
-                const std::string cur = wide_to_utf8(slink);
+                dc.symbolic_link = wide_to_utf8(slink);
                 ::CoTaskMemFree(slink);
-                if (!chosen || (!symlink_.empty() && cur == symlink_)) {
-                    chosen = devices[i];
-                    resolved_symlink_ = cur;
-                    if (!symlink_.empty() && cur == symlink_) {
-                        WCHAR* fname = nullptr;
-                        UINT32 flen = 0;
-                        if (SUCCEEDED(
-                                devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &fname, &flen))) {
-                            friendly_name_ = wide_to_utf8(fname);
-                            ::CoTaskMemFree(fname);
-                        }
-                        break;
-                    }
-                }
             }
-            if (!chosen) {
-                chosen = devices[i];
-            }
-            if (friendly_name_.empty()) {
-                WCHAR* fname = nullptr;
-                UINT32 flen = 0;
-                if (SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &fname, &flen))) {
-                    friendly_name_ = wide_to_utf8(fname);
-                    ::CoTaskMemFree(fname);
-                }
-            }
-        }
-        for (UINT32 i = 0; i < count; ++i) {
+            dc.is_virtual = is_likely_virtual_camera(dc.friendly_name, dc.symbolic_link);
+            candidates.push_back(std::move(dc));
             devices[i]->Release();
         }
         ::CoTaskMemFree(static_cast<void*>(devices));
 
-        if (!chosen) {
-            return AETHER_E_IO;
-        }
-        if (FAILED(chosen->ActivateObject(IID_PPV_ARGS(&media_source_)))) {
-            return AETHER_E_INTERNAL;
-        }
-
-        callback_.Attach(new MfReaderCallback(slot_, width_, height_, CameraPixelFormat::NV12));
-        ComPtr<IMFAttributes> reader_attr;
-        ::MFCreateAttributes(&reader_attr, 2);
-        reader_attr->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback_.Get());
-        reader_attr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-
-        if (FAILED(::MFCreateSourceReaderFromMediaSource(media_source_.Get(), reader_attr.Get(), &reader_))) {
-            close();
-            return AETHER_E_INTERNAL;
-        }
-
-        // Request NV12 at target dimensions/FPS, else fall back cleanly to native RGB32
-        ComPtr<IMFMediaType> target_type;
-        ::MFCreateMediaType(&target_type);
-        target_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        target_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-        MFSetAttributeSize(target_type.Get(), MF_MT_FRAME_SIZE, width_, height_);
-        MFSetAttributeRatio(target_type.Get(), MF_MT_FRAME_RATE, fps_, 1);
-
-        CameraPixelFormat fmt = CameraPixelFormat::NV12;
-        if (FAILED(reader_->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
-                                                target_type.Get()))) {
-            target_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-            fmt = CameraPixelFormat::BGRA32;
-            if (FAILED(reader_->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
-                                                    target_type.Get()))) {
-                ComPtr<IMFMediaType> cur;
-                if (SUCCEEDED(
-                        reader_->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &cur)) &&
-                    cur) {
-                    UINT32 aw = 0, ah = 0;
-                    MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &aw, &ah);
-                    GUID sub{};
-                    cur->GetGUID(MF_MT_SUBTYPE, &sub);
-                    fmt = (sub == MFVideoFormat_NV12) ? CameraPixelFormat::NV12 : CameraPixelFormat::BGRA32;
-                    width_ = aw > 0 ? aw : width_;
-                    height_ = ah > 0 ? ah : height_;
+        std::vector<size_t> ordered;
+        ordered.reserve(candidates.size());
+        std::vector<bool> used(candidates.size(), false);
+        if (!symlink_.empty()) {
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                if (candidates[i].symbolic_link == symlink_ || equals_ignore_case(candidates[i].friendly_name, symlink_)) {
+                    ordered.push_back(i);
+                    used[i] = true;
                 }
             }
         }
-        ComPtr<IMFMediaType> final_type;
-        if (SUCCEEDED(
-                reader_->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &final_type)) &&
-            final_type) {
-            UINT32 aw = 0, ah = 0;
-            if (SUCCEEDED(MFGetAttributeSize(final_type.Get(), MF_MT_FRAME_SIZE, &aw, &ah)) && aw > 0 && ah > 0) {
-                width_ = aw;
-                height_ = ah;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (!used[i] && !candidates[i].is_virtual) {
+                ordered.push_back(i);
+                used[i] = true;
             }
         }
-        callback_->update_format(width_, height_, fmt);
-        callback_->set_reader(reader_.Get());
-        callback_->set_active(true);
-
-        if (FAILED(reader_->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, nullptr,
-                                       nullptr, nullptr))) {
-            close();
-            return AETHER_E_INTERNAL;
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (!used[i]) {
+                ordered.push_back(i);
+                used[i] = true;
+            }
         }
-        return AETHER_OK;
+
+        for (size_t idx : ordered) {
+            const DeviceCandidate& dc = candidates[idx];
+            if (!dc.activate) {
+                continue;
+            }
+            if (FAILED(dc.activate->ActivateObject(IID_PPV_ARGS(&media_source_))) || !media_source_) {
+                AETHER_LOG_WARN("Tracking", "Skipping camera '%s' (ActivateObject failed)", dc.friendly_name.c_str());
+                media_source_.Reset();
+                continue;
+            }
+
+            callback_.Attach(new MfReaderCallback(slot_, req_width_, req_height_, CameraPixelFormat::NV12));
+            ComPtr<IMFAttributes> reader_attr;
+            if (SUCCEEDED(::MFCreateAttributes(&reader_attr, 3)) && reader_attr) {
+                reader_attr->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback_.Get());
+                reader_attr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                reader_attr->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+            }
+
+            if (FAILED(::MFCreateSourceReaderFromMediaSource(media_source_.Get(), reader_attr.Get(), &reader_)) ||
+                !reader_) {
+                reader_.Reset();
+                ComPtr<IMFAttributes> fallback_attr;
+                if (SUCCEEDED(::MFCreateAttributes(&fallback_attr, 2)) && fallback_attr) {
+                    fallback_attr->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback_.Get());
+                    fallback_attr->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+                }
+                if (FAILED(::MFCreateSourceReaderFromMediaSource(media_source_.Get(), fallback_attr.Get(), &reader_)) ||
+                    !reader_) {
+                    AETHER_LOG_WARN("Tracking", "Skipping camera '%s' (CreateSourceReader failed)",
+                                    dc.friendly_name.c_str());
+                    close();
+                    continue;
+                }
+            }
+
+            uint32_t neg_w = req_width_;
+            uint32_t neg_h = req_height_;
+            uint32_t neg_fps = req_fps_;
+            CameraPixelFormat neg_fmt = CameraPixelFormat::NV12;
+            if (!negotiate_stream_format(reader_.Get(), req_width_, req_height_, req_fps_, neg_w, neg_h, neg_fps,
+                                         neg_fmt)) {
+                AETHER_LOG_WARN("Tracking", "Skipping camera '%s' (format negotiation failed)",
+                                dc.friendly_name.c_str());
+                close();
+                continue;
+            }
+
+            width_ = neg_w;
+            height_ = neg_h;
+            fps_ = neg_fps;
+            resolved_symlink_ = dc.symbolic_link;
+            friendly_name_ = dc.friendly_name;
+
+            callback_->update_format(width_, height_, neg_fmt);
+            callback_->set_reader(reader_.Get());
+            callback_->set_active(true);
+
+            if (FAILED(reader_->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, nullptr,
+                                           nullptr, nullptr))) {
+                AETHER_LOG_WARN("Tracking", "Skipping camera '%s' (initial ReadSample failed)",
+                                dc.friendly_name.c_str());
+                close();
+                continue;
+            }
+
+            opened_ = true;
+            AETHER_LOG_INFO("Tracking", "Opened camera '%s' (%ux%u @ %u fps, %s)", friendly_name_.c_str(), width_,
+                            height_, fps_, pixel_format_name(neg_fmt));
+            return AETHER_OK;
+        }
+
+        return AETHER_E_IO;
     }
 
     void close() noexcept override {
+        opened_ = false;
         if (callback_) {
             callback_->set_active(false);
             callback_->set_reader(nullptr);
@@ -407,6 +703,8 @@ class MfCameraSource final : public ICameraSource {
     uint32_t height() const noexcept override { return height_; }
     uint32_t fps() const noexcept override { return fps_; }
     bool is_synthetic() const noexcept override { return false; }
+    bool is_open() const noexcept override { return opened_; }
+    std::string device_symlink() const override { return resolved_symlink_; }
     std::string source_label() const override {
         return friendly_name_.empty() ? std::string("MediaFoundation Camera") : friendly_name_;
     }
@@ -416,9 +714,13 @@ class MfCameraSource final : public ICameraSource {
     std::string symlink_{};
     std::string resolved_symlink_{};
     std::string friendly_name_{};
+    uint32_t req_width_{1280};
+    uint32_t req_height_{720};
+    uint32_t req_fps_{60};
     uint32_t width_{1280};
     uint32_t height_{720};
     uint32_t fps_{60};
+    bool opened_{false};
     LatestFrameSlot slot_{};
     ComPtr<IMFMediaSource> media_source_;
     ComPtr<IMFSourceReader> reader_;
@@ -502,12 +804,14 @@ std::vector<CameraDeviceEntry> enumerate_camera_devices() {
             entry.symbolic_link = wide_to_utf8(slink);
             ::CoTaskMemFree(slink);
         }
+        entry.likely_virtual = is_likely_virtual_camera(entry.friendly_name, entry.symbolic_link);
         list.push_back(std::move(entry));
         devices[i]->Release();
     }
     if (devices != nullptr) {
         ::CoTaskMemFree(static_cast<void*>(devices));
     }
+    std::stable_partition(list.begin(), list.end(), [](const CameraDeviceEntry& e) { return !e.likely_virtual; });
     return list;
 }
 

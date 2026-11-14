@@ -54,18 +54,32 @@ std::filesystem::path resolve_ov_cache_dir(const std::filesystem::path& configur
     return p;
 }
 
-std::unique_ptr<tracking::ICameraSource> open_camera_source_with_fallback(bool want_synthetic, bool& out_is_synthetic) {
+std::unique_ptr<tracking::ICameraSource> open_camera_source_with_fallback(bool camera_active, bool want_synthetic,
+                                                                     const std::string& preferred_link, uint32_t fps,
+                                                                     bool& out_is_synthetic) {
+    if (!camera_active) {
+        out_is_synthetic = want_synthetic;
+        return nullptr;
+    }
+    const uint32_t target_fps = (fps >= 45U) ? 60U : 30U;
     if (!want_synthetic) {
-        const auto devices = tracking::enumerate_camera_devices();
-        if (!devices.empty()) {
-            auto cam = tracking::create_mf_camera_source(devices.front().symbolic_link, 1280, 720, 60);
-            if (cam && cam->open() == AETHER_OK) {
-                out_is_synthetic = false;
-                return cam;
+        std::string chosen_link = preferred_link;
+        if (chosen_link.empty()) {
+            const auto devices = tracking::enumerate_camera_devices();
+            if (!devices.empty()) {
+                chosen_link = devices.front().symbolic_link;
             }
         }
+        auto cam = tracking::create_mf_camera_source(chosen_link, 1280, 720, target_fps);
+        if (cam && cam->open() == AETHER_OK) {
+            out_is_synthetic = false;
+            return cam;
+        }
+        AETHER_LOG_WARN("tracking", "No physical webcam opened cleanly; staying in neutral camera-stopped idle state");
+        out_is_synthetic = false;
+        return nullptr;
     }
-    auto syn = tracking::create_file_camera_source({}, true, 1280, 720, 60, 0);
+    auto syn = tracking::create_file_camera_source({}, true, 1280, 720, target_fps, 0);
     if (syn) {
         (void)syn->open();
     }
@@ -115,11 +129,13 @@ bool PipelineSkeleton::start(const HardwareInventory& hw, const PipelineConfig& 
     init_hud.enabled = cfg_.enable_live_tracking;
     init_hud.ready = false;
     init_hud.using_synthetic_camera = cfg_.use_synthetic_camera;
+    init_hud.camera_active = cfg_.camera_active;
     init_hud.selected_ep_override = cfg_.preferred_ep;
     std::snprintf(init_hud.active_ep_label, sizeof(init_hud.active_ep_label), "%s",
                   cfg_.enable_live_tracking ? "Initializing..." : "Synthetic Only");
     std::snprintf(init_hud.camera_label, sizeof(init_hud.camera_label), "%s",
-                  cfg_.use_synthetic_camera ? "Synthetic 60Hz" : "Camera Pending");
+                  !cfg_.camera_active ? "Camera Stopped"
+                                      : (cfg_.use_synthetic_camera ? "Synthetic 60Hz" : "Camera Opening..."));
     tracking_hud_buffer_.publish(init_hud);
 
     running_.store(true, std::memory_order_release);
@@ -275,7 +291,10 @@ void PipelineSkeleton::t1_entry() {
                 frame.inference_complete_us = cap_us;
                 frame.active_execution_provider = AETHER_EP_CPU;
                 frame.frame_sequence = ++seq;
-                frame.valid_flags = 0x1U;
+                frame.valid_flags = 0U;
+                for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+                    frame.joint_rotations_quat[b][3] = 1.0f;
+                }
                 pose_buffer_.publish();
                 t1_frames_.store(seq, std::memory_order_release);
 
@@ -293,6 +312,9 @@ void PipelineSkeleton::t1_entry() {
     const std::filesystem::path manifest = resolve_manifest_path(cfg_.manifest_path);
     const std::filesystem::path ov_cache = resolve_ov_cache_dir(cfg_.ov_cache_dir);
     bool use_synthetic = cfg_.use_synthetic_camera;
+    bool camera_active = cfg_.camera_active;
+    uint32_t camera_fps = (cfg_.camera_fps >= 45U) ? 60U : 30U;
+    std::string preferred_camera_link = cfg_.preferred_camera_link;
     int32_t ep_override = cfg_.preferred_ep;
 
     auto init_engine = [&](tracking::TrackingEngine& eng, std::string& out_err) -> bool {
@@ -305,11 +327,16 @@ void PipelineSkeleton::t1_entry() {
         rcfg.ov_cache_dir = ov_cache;
         rcfg.preferred_ep =
             (ep_override >= 0) ? static_cast<tracking::EpTier>(ep_override) : tracking::EpTier::TensorRt;
-        rcfg.health_budget_ms = 12.0;
+        rcfg.health_budget_ms = 22.0;
 
         bool actual_syn = use_synthetic;
-        auto cam = open_camera_source_with_fallback(use_synthetic, actual_syn);
+        auto cam = open_camera_source_with_fallback(camera_active, use_synthetic, preferred_camera_link, camera_fps,
+                                                    actual_syn);
         use_synthetic = actual_syn;
+        camera_active = (cam != nullptr && cam->is_open());
+        if (cam && !cam->device_symlink().empty()) {
+            preferred_camera_link = cam->device_symlink();
+        }
         return eng.initialize(rcfg, hw_, std::move(cam), &out_err) == AETHER_OK;
     };
 
@@ -321,6 +348,10 @@ void PipelineSkeleton::t1_entry() {
         hud.selected_ep_override = ep_override;
         if (eng != nullptr && ready) {
             const auto st = eng->snapshot_stats();
+            hud.camera_active = st.camera_active;
+            hud.camera_width = st.camera_width;
+            hud.camera_height = st.camera_height;
+            hud.camera_fps = st.camera_fps;
             hud.roi_locked = st.roi_locked;
             hud.active_ep = tracking::to_ffi_ep(st.active_ep);
             hud.frames_processed = st.frames_processed;
@@ -334,13 +365,19 @@ void PipelineSkeleton::t1_entry() {
             hud.right_hand_confidence = st.right_hand_confidence;
             std::snprintf(hud.active_ep_label, sizeof(hud.active_ep_label), "%s", st.active_ep_label.c_str());
             std::snprintf(hud.camera_label, sizeof(hud.camera_label), "%s", st.camera_label.c_str());
+            std::snprintf(hud.camera_symlink, sizeof(hud.camera_symlink), "%s", st.camera_symlink.c_str());
         } else {
+            hud.camera_active = false;
+            hud.camera_width = 0;
+            hud.camera_height = 0;
+            hud.camera_fps = 0;
+            hud.camera_symlink[0] = '\0';
             hud.roi_locked = false;
             hud.active_ep = AETHER_EP_CPU;
             std::snprintf(hud.active_ep_label, sizeof(hud.active_ep_label), "%s",
                           fallback_msg != nullptr ? fallback_msg : "Tracking Unavailable");
             std::snprintf(hud.camera_label, sizeof(hud.camera_label), "%s",
-                          use_synthetic ? "Synthetic 60Hz" : "Camera");
+                          !camera_active ? "Camera Stopped" : (use_synthetic ? "Synthetic 60Hz" : "Camera"));
         }
         tracking_hud_buffer_.publish();
     };
@@ -362,8 +399,53 @@ void PipelineSkeleton::t1_entry() {
             } else if (cmd.kind == TrackingCmdKind::ToggleCameraSource && engine_ready) {
                 const bool target_syn = !use_synthetic;
                 bool actual_syn = target_syn;
-                auto new_cam = open_camera_source_with_fallback(target_syn, actual_syn);
+                auto new_cam = open_camera_source_with_fallback(true, target_syn, preferred_camera_link, camera_fps,
+                                                                 actual_syn);
                 use_synthetic = actual_syn;
+                camera_active = (new_cam != nullptr && new_cam->is_open());
+                (void)engine->switch_camera_source(std::move(new_cam));
+                publish_hud(engine.get(), engine_ready, nullptr);
+            } else if (cmd.kind == TrackingCmdKind::SetCameraActive && engine_ready) {
+                const bool want_active = (cmd.int_arg != 0);
+                bool actual_syn = use_synthetic;
+                auto new_cam = open_camera_source_with_fallback(want_active, use_synthetic, preferred_camera_link,
+                                                                 camera_fps, actual_syn);
+                use_synthetic = actual_syn;
+                camera_active = (new_cam != nullptr && new_cam->is_open());
+                if (new_cam && !new_cam->device_symlink().empty()) {
+                    preferred_camera_link = new_cam->device_symlink();
+                }
+                (void)engine->switch_camera_source(std::move(new_cam));
+                publish_hud(engine.get(), engine_ready, nullptr);
+            } else if (cmd.kind == TrackingCmdKind::SetSyntheticCamera && engine_ready) {
+                const bool want_syn = (cmd.int_arg != 0);
+                if (want_syn != use_synthetic || (camera_active && want_syn != engine->snapshot_stats().camera_active)) {
+                    bool actual_syn = want_syn;
+                    auto new_cam = open_camera_source_with_fallback(camera_active, want_syn, preferred_camera_link,
+                                                                     camera_fps, actual_syn);
+                    use_synthetic = actual_syn;
+                    camera_active = (new_cam != nullptr && new_cam->is_open());
+                    if (new_cam && !new_cam->device_symlink().empty()) {
+                        preferred_camera_link = new_cam->device_symlink();
+                    }
+                    (void)engine->switch_camera_source(std::move(new_cam));
+                    publish_hud(engine.get(), engine_ready, nullptr);
+                }
+            } else if (cmd.kind == TrackingCmdKind::SelectCameraDevice && engine_ready) {
+                preferred_camera_link = cmd.str_arg;
+                if (cmd.int_arg >= 15) {
+                    camera_fps = static_cast<uint32_t>(cmd.int_arg);
+                }
+                use_synthetic = false;
+                camera_active = true;
+                bool actual_syn = false;
+                auto new_cam =
+                    open_camera_source_with_fallback(true, false, preferred_camera_link, camera_fps, actual_syn);
+                use_synthetic = actual_syn;
+                camera_active = (new_cam != nullptr && new_cam->is_open());
+                if (new_cam && !new_cam->device_symlink().empty()) {
+                    preferred_camera_link = new_cam->device_symlink();
+                }
                 (void)engine->switch_camera_source(std::move(new_cam));
                 publish_hud(engine.get(), engine_ready, nullptr);
             } else if (cmd.kind == TrackingCmdKind::SetEpOverride) {
@@ -400,7 +482,10 @@ void PipelineSkeleton::t1_entry() {
             frame.inference_complete_us = cap_us;
             frame.active_execution_provider = AETHER_EP_CPU;
             frame.frame_sequence = static_cast<uint32_t>(t1_frames_.fetch_add(1ULL, std::memory_order_acq_rel) + 1ULL);
-            frame.valid_flags = 0x1U;
+            frame.valid_flags = 0U;
+            for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+                frame.joint_rotations_quat[b][3] = 1.0f;
+            }
             pose_buffer_.publish();
 #if defined(_WIN32)
             if (pose_ready_event_ != nullptr) {

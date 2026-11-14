@@ -11,6 +11,7 @@ struct OneEuroParams {
     float fc_min{1.2f};
     float beta{0.45f};
     float dcutoff{1.0f};
+    float deadband{0.0f};
 };
 
 /** Scalar 1-Euro low-pass filter (`§9.2`, Casiez et al.) with measured capture `Te`. */

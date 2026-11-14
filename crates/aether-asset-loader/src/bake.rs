@@ -314,9 +314,9 @@ pub fn bake_into_arena(
         }
     }
 
-    // 4. Seam-welded smooth outline tangents (`smooth_tangent`) across coincident positions (§6.7)
+    // 4. Seam-welded smooth outline tangents (`smooth_tangent`) & body/neck shading proxy across coincident positions (§6.7)
     let mut smooth_accum: AHashMap<u64, Vec3> = AHashMap::with_capacity(v_count);
-    if bake_smooth_tangent {
+    if bake_proxy || bake_smooth_tangent {
         for sm in &avatar.submeshes {
             for tri in sm.indices.chunks_exact(3) {
                 let i0 = tri[0] as usize;
@@ -371,13 +371,23 @@ pub fn bake_into_arena(
                 acc.clamp(0.0, 0.85)
             };
 
-            // Spherized proxy normal on face (§6.7)
+            // Spherized proxy normal on face; seam-welded smooth normal on body/neck to avoid low-poly facet self-shadows (§6.7)
             let proxy = if bake_proxy && is_face_vert[i] {
                 let mut d = Vec3::from_array(rv.position) - c_face_ws;
                 d.y *= 0.35;
                 let ellip = d.normalize_or(tn);
                 let alpha = smoothstep(0.4, 0.8, head_weights[i]);
                 slerp_unit(tn, ellip, alpha)
+            } else if bake_proxy {
+                let k = quantize_weld_key(rv.position, eps);
+                let smooth_n = smooth_accum
+                    .get(&k)
+                    .map_or(tn, |acc| acc.normalize_or(tn));
+                if tn.dot(smooth_n) > 0.25 {
+                    slerp_unit(tn, smooth_n, 0.90)
+                } else {
+                    tn
+                }
             } else {
                 tn
             };

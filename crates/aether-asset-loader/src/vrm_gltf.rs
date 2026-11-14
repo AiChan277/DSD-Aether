@@ -1123,8 +1123,16 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             && let Some(mp) = props_arr.get(idx)
         {
             raw.has_vrm_mtoon = true;
+            let shader_name = mp.get("shader").and_then(Value::as_str).unwrap_or("");
+            // VRM 0.x exporters attach KHR_materials_unlit as a fallback for non-VRM viewers;
+            // restore lit MToon evaluation unless the MToon/VRM shader itself is explicitly Unlit.
+            let lower_shader = shader_name.to_ascii_lowercase();
+            let is_vrm0_unlit = lower_shader.contains("unlit");
+            raw.unlit = is_vrm0_unlit;
+
             let vp = mp.get("vectorProperties");
             let fp = mp.get("floatProperties");
+            let tp = mp.get("textureProperties");
             if let Some(vp) = vp {
                 let c = val_vec4(vp.get("_Color"), raw.base_color);
                 raw.base_color = c;
@@ -1132,16 +1140,78 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                     let s4 = val_vec4(Some(sc), [0.85, 0.72, 0.72, 1.0]);
                     raw.explicit_shade_color = Some([s4[0], s4[1], s4[2]]);
                 }
+                if let Some(ec) = vp.get("_EmissionColor") {
+                    let e4 = val_vec4(Some(ec), [0.0, 0.0, 0.0, 1.0]);
+                    raw.emissive = [e4[0], e4[1], e4[2]];
+                } else if !is_vrm0_unlit {
+                    raw.emissive = [0.0, 0.0, 0.0];
+                }
                 let rc = val_vec4(vp.get("_RimColor"), [0.0, 0.0, 0.0, 1.0]);
                 raw.rim_color = [rc[0], rc[1], rc[2]];
                 let oc = val_vec4(vp.get("_OutlineColor"), [0.1, 0.08, 0.08, 1.0]);
                 raw.outline_color = [oc[0], oc[1], oc[2]];
+            } else if !is_vrm0_unlit {
+                raw.emissive = [0.0, 0.0, 0.0];
+            }
+            if let Some(tp) = tp {
+                let tex_prop = |key: &str| -> Option<u32> {
+                    tp.get(key).and_then(Value::as_u64).map(|i| i as u32)
+                };
+                if raw.tex_base.is_none()
+                    && let Some(t) = tex_prop("_MainTex")
+                {
+                    raw.tex_base = Some(t);
+                }
+                if let Some(t) = tex_prop("_ShadeTexture") {
+                    raw.tex_shade = Some(t);
+                }
+                if let Some(t) = tex_prop("_EmissionMap") {
+                    raw.tex_emissive = Some(t);
+                }
+                if let Some(t) = tex_prop("_BumpMap") {
+                    if raw.tex_normal.is_none() {
+                        raw.tex_normal = Some(t);
+                    }
+                    if let Some(td) = textures.get_mut(t as usize) {
+                        td.srgb = false;
+                        td.usage_flags = aether_ffi::AETHER_TEX_USAGE_NORMAL;
+                    }
+                }
+                if let Some(t) = tex_prop("_RimTexture") {
+                    raw.tex_rim = Some(t);
+                }
+                if let Some(t) = tex_prop("_SphereAdd") {
+                    raw.tex_matcap = Some(t);
+                    raw.matcap_strength = 1.0;
+                    raw.matcap_add_mix = 1.0;
+                }
+                if let Some(t) = tex_prop("_OutlineWidthTexture") {
+                    raw.tex_outline_width = Some(t);
+                    if let Some(td) = textures.get_mut(t as usize) {
+                        td.srgb = false;
+                    }
+                }
+                if let Some(t) = tex_prop("_ShadingGradeTexture") {
+                    raw.tex_shading_shift = Some(t);
+                    if let Some(td) = textures.get_mut(t as usize) {
+                        td.srgb = false;
+                    }
+                }
+                if let Some(t) = tex_prop("_UvAnimMaskTexture") {
+                    raw.tex_uv_mask = Some(t);
+                    if let Some(td) = textures.get_mut(t as usize) {
+                        td.srgb = false;
+                    }
+                }
             }
             if let Some(fp) = fp {
                 raw.shading_shift =
                     fp.get("_ShadeShift").and_then(Value::as_f64).unwrap_or(0.0) as f32;
                 raw.shading_toony =
                     fp.get("_ShadeToony").and_then(Value::as_f64).unwrap_or(0.9) as f32;
+                if let Some(gi) = fp.get("_IndirectLightIntensity").and_then(Value::as_f64) {
+                    raw.gi_equalization = (gi as f32).clamp(0.0, 1.0);
+                }
                 raw.rim_fresnel_power = fp
                     .get("_RimFresnelPower")
                     .and_then(Value::as_f64)

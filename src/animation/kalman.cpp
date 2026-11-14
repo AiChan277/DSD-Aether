@@ -41,10 +41,12 @@ void KalmanScalar2State::correct(float z, float dt_s, float confidence, float si
     const float pp11 = p11_ + dt2 * q_var;
 
     if (confidence < cfg.low_conf_threshold) {
-        p_ = p_pred;
-        v_ = v_pred * cfg.low_conf_vel_damping;
+        // Zero velocity immediately on low confidence and softly decay position toward `z` without runaway extrapolation
+        const float decay_alpha = std::clamp(dt * 8.0f, 0.0f, 1.0f);
+        p_ = p_ + (z - p_) * decay_alpha;
+        v_ = 0.0f;
         p00_ = pp00;
-        p01_ = pp01;
+        p01_ = 0.0f;
         p11_ = pp11;
         return;
     }
@@ -82,7 +84,8 @@ void KalmanQuatPredictor::update(Quat q_meas, float dt_s, float confidence, cons
         qm = {-qm.x, -qm.y, -qm.z, -qm.w};
     }
     if (confidence < cfg.low_conf_threshold) {
-        omega_ = omega_ * cfg.low_conf_vel_damping;
+        omega_ = {};
+        q_cur_ = slerp(q_cur_, qm, std::clamp(dt_s * 8.0f, 0.0f, 1.0f));
         return;
     }
     const float dt = std::clamp(dt_s, 1e-4f, 0.2f);
@@ -155,15 +158,15 @@ void KalmanPosePredictor::correct(const FilteredTrackingState& meas, const Kalma
 void KalmanPosePredictor::tick_low_conf_damping(const FilteredTrackingState& latest, const KalmanConfig& cfg) noexcept {
     if ((latest.valid_flags & 0x01U) == 0U) {
         for (auto& bk : bs_kf_) {
-            bk.damp_velocity(cfg.low_conf_vel_damping);
+            bk.damp_velocity(0.0f);
         }
     }
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
         if (latest.joint_confidence[b] < cfg.low_conf_threshold) {
-            pos_kf_[b][0].damp_velocity(cfg.low_conf_vel_damping);
-            pos_kf_[b][1].damp_velocity(cfg.low_conf_vel_damping);
-            pos_kf_[b][2].damp_velocity(cfg.low_conf_vel_damping);
-            rot_kf_[b].damp_velocity(cfg.low_conf_vel_damping);
+            pos_kf_[b][0].damp_velocity(0.0f);
+            pos_kf_[b][1].damp_velocity(0.0f);
+            pos_kf_[b][2].damp_velocity(0.0f);
+            rot_kf_[b].damp_velocity(0.0f);
         }
     }
 }
@@ -173,16 +176,18 @@ void KalmanPosePredictor::predict(float horizon_s, const FilteredTrackingState& 
     out = base;
     const bool roi_reset = (base.valid_flags & 0x10U) != 0U;
     const float h = roi_reset ? 0.0f : std::clamp(horizon_s, 0.0f, cfg.max_horizon_s);
+    const float h_bs = ((base.valid_flags & 0x01U) != 0U) ? h : 0.0f;
     for (size_t i = 0; i < 52U; ++i) {
-        out.blendshapes[i] = std::clamp(bs_kf_[i].predict(h), 0.0f, 1.0f);
+        out.blendshapes[i] = std::clamp(bs_kf_[i].predict(h_bs), 0.0f, 1.0f);
     }
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        const float h_b = (base.joint_confidence[b] >= cfg.low_conf_threshold) ? h : 0.0f;
         out.joint_positions_ws[b] = {
-            pos_kf_[b][0].predict(h),
-            pos_kf_[b][1].predict(h),
-            pos_kf_[b][2].predict(h),
+            pos_kf_[b][0].predict(h_b),
+            pos_kf_[b][1].predict(h_b),
+            pos_kf_[b][2].predict(h_b),
         };
-        out.joint_rotations[b] = rot_kf_[b].predict(h, roi_reset);
+        out.joint_rotations[b] = rot_kf_[b].predict(h_b, roi_reset);
     }
 }
 

@@ -7,7 +7,10 @@
 #include "rhi/rhi_device.hpp"
 #include "ui/dev_shell.hpp"
 #include "ui/params/param_registry.hpp"
+#include "ui/params/project_settings.hpp"
 #include "ui/theme/precision_dark.hpp"
+
+#include <cstdio>
 
 #include <array>
 #include <cstdint>
@@ -229,5 +232,59 @@ struct StudioActions {
         wizard_fps = 60;
     }
 };
+
+[[nodiscard]] inline int active_camera_device_index(const HardwareInventory& hw, const DevShellTrackingView& tracking,
+                                                    const AppSettings& settings) noexcept {
+    if (hw.cameras.empty()) {
+        return -1;
+    }
+    const char* active_link = (tracking.camera_symlink != nullptr && tracking.camera_symlink[0] != '\0')
+                                  ? tracking.camera_symlink
+                                  : settings.preferred_camera_link.c_str();
+    if (active_link != nullptr && active_link[0] != '\0') {
+        for (int i = 0; i < static_cast<int>(hw.cameras.size()); ++i) {
+            const auto& cam = hw.cameras[static_cast<size_t>(i)];
+            if (cam.symbolic_link == active_link || cam.friendly_name == active_link) {
+                return i;
+            }
+        }
+    }
+    return 0;
+}
+
+inline void select_camera_device_action(const CameraDeviceInfo& cam, ParamStore& params, AppSettings& settings,
+                                        bool& settings_dirty, StudioActions& actions) noexcept {
+    settings.preferred_camera_link = cam.symbolic_link.empty() ? cam.friendly_name : cam.symbolic_link;
+    settings_dirty = true;
+    (void)params.set(ParamId::TrackingSyntheticCamera, 0.0);
+    actions.viewport.request_set_synthetic_camera = true;
+    actions.viewport.target_synthetic_camera = false;
+    actions.viewport.request_set_camera_active = true;
+    actions.viewport.target_camera_active = true;
+    actions.viewport.request_select_camera = true;
+    actions.viewport.select_camera_fps = std::max(30, params.get_int(ParamId::TrackingCameraFps));
+    std::snprintf(actions.viewport.select_camera_link.data(), actions.viewport.select_camera_link.size(), "%s",
+                  settings.preferred_camera_link.c_str());
+}
+
+inline void format_camera_status_badge(const DevShellTrackingView& tracking, char* out, size_t out_cap) noexcept {
+    if (out == nullptr || out_cap == 0U) {
+        return;
+    }
+    const double face_pct = static_cast<double>(tracking.face_confidence * 100.0f);
+    if (tracking.using_synthetic_camera) {
+        std::snprintf(out, out_cap, "Synthetic Feed (%ux%u @ %u fps) · Face %.0f%%",
+                      tracking.camera_width > 0U ? tracking.camera_width : 1280U,
+                      tracking.camera_height > 0U ? tracking.camera_height : 720U,
+                      tracking.camera_fps > 0U ? tracking.camera_fps : 60U, face_pct);
+    } else if (!tracking.camera_active) {
+        std::snprintf(out, out_cap, "Camera Stopped · Face %.0f%%", face_pct);
+    } else if (tracking.camera_width > 0U && tracking.camera_height > 0U) {
+        std::snprintf(out, out_cap, "%s (%ux%u @ %u fps) · Face %.0f%%", tracking.camera_label,
+                      tracking.camera_width, tracking.camera_height, tracking.camera_fps, face_pct);
+    } else {
+        std::snprintf(out, out_cap, "%s · Face %.0f%%", tracking.camera_label, face_pct);
+    }
+}
 
 } // namespace aether::ui

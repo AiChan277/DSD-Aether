@@ -61,6 +61,7 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
                         }
                     }
                     use_mf_file_ = true;
+                    opened_ = true;
                     return AETHER_OK;
                 }
             }
@@ -70,10 +71,12 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
             }
         }
         use_mf_file_ = false;
+        opened_ = true;
         return AETHER_OK;
     }
 
     void close() noexcept override {
+        opened_ = false;
         if (reader_) {
             reader_.Reset();
         }
@@ -186,6 +189,7 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
     uint32_t height() const noexcept override { return height_; }
     uint32_t fps() const noexcept override { return fps_; }
     bool is_synthetic() const noexcept override { return !use_mf_file_; }
+    bool is_open() const noexcept override { return opened_; }
     std::string source_label() const override {
         if (use_mf_file_) {
             return "File: " + media_path_.filename().string();
@@ -197,6 +201,7 @@ class FileOrSyntheticCameraSource final : public ICameraSource {
     std::filesystem::path media_path_{};
     bool force_synth_{false};
     bool use_mf_file_{false};
+    bool opened_{false};
     bool co_owned_{false};
     bool mf_started_{false};
     uint32_t width_{1280};

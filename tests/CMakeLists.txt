@@ -210,3 +210,46 @@ aether_add_cpp_test(dx11_backend_test cpp/dx11_backend_test.cpp)
 target_compile_definitions(dx11_backend_test PRIVATE AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(dx11_backend_test PRIVATE aether_renderer aether_rhi windowscodecs ole32)
 set_tests_properties(dx11_backend_test PROPERTIES TIMEOUT 180)
+
+# Task 4: Real user VRM snapshot + tracking/spring steady-state verification
+aether_add_cpp_test(real_vrm_verification_test cpp/real_vrm_verification_test.cpp)
+target_compile_definitions(real_vrm_verification_test PRIVATE
+    AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+    AETHER_VRM_SNAPSHOT_DIR="${CMAKE_BINARY_DIR}/tests/ui_snapshots"
+)
+target_link_libraries(real_vrm_verification_test PRIVATE
+    aether_renderer
+    aether_rhi
+    aether_animation
+    aether_tracking
+    windowscodecs
+    ole32
+)
+set_tests_properties(real_vrm_verification_test PROPERTIES TIMEOUT 180)
+
+# Ensure Vulkan tests discover vcpkg's Release Khronos validation layer (avoids Debug-CRT HotPathGuard noise
+# and enables CTest without requiring a separate system VULKAN_SDK installation).
+set(_vcpkg_vk_layer_dir "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
+if(EXISTS "${_vcpkg_vk_layer_dir}/VkLayer_khronos_validation.json")
+    foreach(_vk_test IN ITEMS
+        rhi_validation_smoke_test
+        asset_upload_vk_test
+        rhi_phase4_test
+        renderer_npr_effects_test
+        denoiser_and_rt_test
+        golden_render_test
+        dsp_sync_osc_test
+        output_spout_vcam_test
+        phase5_pipeline_m2p_test
+        studio_ui_test
+        studio_ui_snapshot_test
+        dx11_backend_test
+        real_vrm_verification_test
+    )
+        if(TEST ${_vk_test})
+            set_tests_properties(${_vk_test} PROPERTIES
+                ENVIRONMENT_MODIFICATION "VK_LAYER_PATH=path_list_prepend:${_vcpkg_vk_layer_dir}"
+            )
+        endif()
+    endforeach()
+endif()

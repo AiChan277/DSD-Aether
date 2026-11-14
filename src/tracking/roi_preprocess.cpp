@@ -301,6 +301,48 @@ void warp_bgra_scalar(const CapturedFrameBuffer& src, const AffineMap2D& map, ui
     }
 }
 
+void warp_yuy2_scalar(const CapturedFrameBuffer& src, const AffineMap2D& map, uint32_t dst_w, uint32_t dst_h,
+                      float scale_mul, float offset_add, float* dst_nchw) noexcept {
+    const uint8_t* px = src.bytes.data();
+    const size_t plane_stride = static_cast<size_t>(dst_w) * dst_h;
+    float* dst_r = dst_nchw;
+    float* dst_g = dst_nchw + plane_stride;
+    float* dst_b = dst_nchw + plane_stride * 2U;
+    const int max_x = static_cast<int>(src.width) - 1;
+    const int max_y = static_cast<int>(src.height) - 1;
+
+    for (uint32_t dy = 0; dy < dst_h; ++dy) {
+        const float fy_base = map.orig_y + map.vy * (static_cast<float>(dy) + 0.5f);
+        const float fx_base = map.orig_x + map.vx * (static_cast<float>(dy) + 0.5f);
+        const size_t row_off = static_cast<size_t>(dy) * dst_w;
+        for (uint32_t dx = 0; dx < dst_w; ++dx) {
+            const float fdx = static_cast<float>(dx) + 0.5f;
+            const float sx = fx_base + map.ux * fdx;
+            const float sy = fy_base + map.uy * fdx;
+            if (sx < 0.0f || sy < 0.0f || sx > static_cast<float>(max_x) || sy > static_cast<float>(max_y)) {
+                dst_r[row_off + dx] = offset_add;
+                dst_g[row_off + dx] = offset_add;
+                dst_b[row_off + dx] = offset_add;
+                continue;
+            }
+            const int ix = std::clamp(static_cast<int>(std::lround(sx)), 0, max_x);
+            const int iy = std::clamp(static_cast<int>(std::lround(sy)), 0, max_y);
+            const int pair_x = (ix & ~1);
+            const size_t pair_off = static_cast<size_t>(iy) * src.stride_y + static_cast<size_t>(pair_x) * 2U;
+            const float luma = static_cast<float>(px[pair_off + ((ix & 1) != 0 ? 2U : 0U)]);
+            const float u = static_cast<float>(px[pair_off + 1U]) - 128.0f;
+            const float v = static_cast<float>(px[pair_off + 3U]) - 128.0f;
+            const float c = std::max(luma - 16.0f, 0.0f) * 1.1643835f;
+            const float r01 = std::clamp((c + 1.5960268f * v) * (1.0f / 255.0f), 0.0f, 1.0f);
+            const float g01 = std::clamp((c - 0.3917623f * u - 0.8129676f * v) * (1.0f / 255.0f), 0.0f, 1.0f);
+            const float b01 = std::clamp((c + 2.0172321f * u) * (1.0f / 255.0f), 0.0f, 1.0f);
+            dst_r[row_off + dx] = r01 * scale_mul + offset_add;
+            dst_g[row_off + dx] = g01 * scale_mul + offset_add;
+            dst_b[row_off + dx] = b01 * scale_mul + offset_add;
+        }
+    }
+}
+
 } // namespace
 
 void warp_frame_to_nchw(const CapturedFrameBuffer& src, const RoiRectNorm& roi, uint32_t dst_w, uint32_t dst_h,
@@ -314,6 +356,10 @@ void warp_frame_to_nchw(const CapturedFrameBuffer& src, const RoiRectNorm& roi, 
 
     if (src.format == CameraPixelFormat::BGRA32) {
         warp_bgra_scalar(src, map, dst_w, dst_h, scale_mul, offset_add, dst_nchw);
+        return;
+    }
+    if (src.format == CameraPixelFormat::YUY2) {
+        warp_yuy2_scalar(src, map, dst_w, dst_h, scale_mul, offset_add, dst_nchw);
         return;
     }
 

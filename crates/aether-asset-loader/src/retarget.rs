@@ -1,7 +1,10 @@
 //! Coordinate/scale/rest-pose normalisation (`§6.3`), expression retarget `W` (`§6.5`),
 //! and SpringBone / MMD Bullet chain conversion (`§6.6`).
 
-use aether_ffi::{AETHER_EXPRESSION_SLOT_COUNT, AETHER_INVALID_INDEX, AETHER_WARN_UNIT_GUESS};
+use aether_ffi::{
+    AETHER_EXPRESSION_SLOT_COUNT, AETHER_INVALID_INDEX, AETHER_SOURCE_FORMAT_VRM0,
+    AETHER_WARN_UNIT_GUESS,
+};
 use glam::{Mat4, Quat, Vec3};
 use unicode_normalization::UnicodeNormalization;
 
@@ -77,12 +80,81 @@ pub fn compute_joint_world_positions(joints: &[crate::ir::RawJoint]) -> Vec<Vec3
         .collect()
 }
 
+/// Detects real VRM 0.x (`-Z` forward) rigs where anatomical Left sits at `-X` (`< Right.x`)
+/// and normalizes all geometry, morphs, joints, inverse bind matrices, colliders, and spring gravity
+/// by 180 deg around Y (` diag(-1, 1, -1) `) so every avatar uses AETHER's `+Z` forward convention.
+fn normalise_vrm0_forward_if_needed(avatar: &mut ParsedAvatar, matched: &HumanoidMatchResult) {
+    if avatar.source_format != AETHER_SOURCE_FORMAT_VRM0 {
+        return;
+    }
+    let world_pos = compute_joint_world_positions(&avatar.joints);
+    let mut needs_flip = false;
+    for &(h_l, h_r) in &[(18usize, 22usize), (17usize, 21usize), (1usize, 5usize), (15usize, 16usize)] {
+        let jl = matched.humanoid_to_joint[h_l];
+        let jr = matched.humanoid_to_joint[h_r];
+        if jl != 0xFFFF && jr != 0xFFFF {
+            let l_idx = usize::from(jl);
+            let r_idx = usize::from(jr);
+            if l_idx < world_pos.len() && r_idx < world_pos.len() {
+                let dx = world_pos[l_idx].x - world_pos[r_idx].x;
+                if dx.abs() > 0.01 {
+                    needs_flip = dx < 0.0;
+                    break;
+                }
+            }
+        }
+    }
+    if !needs_flip {
+        return;
+    }
+
+    for v in &mut avatar.vertices {
+        v.position[0] = -v.position[0];
+        v.position[2] = -v.position[2];
+        v.normal[0] = -v.normal[0];
+        v.normal[2] = -v.normal[2];
+    }
+    for m in &mut avatar.morphs {
+        m.centroid_x = -m.centroid_x;
+        for d in &mut m.deltas {
+            d.d_pos[0] = -d.d_pos[0];
+            d.d_pos[2] = -d.d_pos[2];
+            d.d_norm[0] = -d.d_norm[0];
+            d.d_norm[2] = -d.d_norm[2];
+        }
+    }
+    for j in &mut avatar.joints {
+        j.local_translation[0] = -j.local_translation[0];
+        j.local_translation[2] = -j.local_translation[2];
+        j.local_rotation[0] = -j.local_rotation[0];
+        j.local_rotation[2] = -j.local_rotation[2];
+        if let Some(ref mut ibm) = j.inverse_bind_matrix {
+            for &idx in &[1usize, 3, 4, 6, 9, 11, 12, 14] {
+                ibm[idx] = -ibm[idx];
+            }
+        }
+    }
+    for c in &mut avatar.colliders {
+        c.offset[0] = -c.offset[0];
+        c.offset[2] = -c.offset[2];
+        c.tail[0] = -c.tail[0];
+        c.tail[2] = -c.tail[2];
+    }
+    for sp in &mut avatar.spring_chains {
+        for node in &mut sp.joints {
+            node.gravity_dir[0] = -node.gravity_dir[0];
+            node.gravity_dir[2] = -node.gravity_dir[2];
+        }
+    }
+}
+
 /// Normalises units (height -> ~[0.3, 3.0] m, ground feet `y = 0`), A-pose -> T-pose delta quaternions,
 /// and synthesises `3x4` inverse bind matrices (`§6.3`).
 pub fn normalise_avatar_pose(
     avatar: &mut ParsedAvatar,
     matched: &HumanoidMatchResult,
 ) -> (Vec<NormalisedJointPose>, [f32; 3], [f32; 3], f32) {
+    normalise_vrm0_forward_if_needed(avatar, matched);
     // 1. Measure raw AABB height across both mesh vertices and skeleton joints so head/bust meshes on a full rig don't trigger a false 10x scale guess.
     let (mut min_p, mut max_p) = compute_aabb(&avatar.vertices);
     let mut joint_min_y = f32::INFINITY;

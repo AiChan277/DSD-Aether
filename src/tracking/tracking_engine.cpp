@@ -19,7 +19,7 @@ AetherStatus TrackingEngine::initialize(const TrackingRouterConfig& router_cfg, 
         return rst;
     }
     camera_ = std::move(source);
-    if (camera_) {
+    if (camera_ && !camera_->is_open()) {
         const AetherStatus cst = camera_->open();
         if (cst != AETHER_OK) {
             AETHER_LOG_WARN("tracking", "Camera source failed to open (status=%d); falling back to idle frame mode",
@@ -59,7 +59,7 @@ AetherStatus TrackingEngine::switch_camera_source(std::unique_ptr<ICameraSource>
     camera_ = std::move(next_source);
     face_roi_ = RoiRectNorm{};
     roi_locked_.store(false, std::memory_order_release);
-    if (camera_) {
+    if (camera_ && !camera_->is_open()) {
         return camera_->open();
     }
     return AETHER_OK;
@@ -72,11 +72,16 @@ void TrackingEngine::step_synthetic_idle_frame(LockFreeTripleBuffer<AetherTracki
     frame.inference_complete_us = aether::now_us();
     frame.active_execution_provider = static_cast<uint32_t>(router_.active_ep());
     frame.frame_sequence = ++frame_seq_;
-    frame.valid_flags = (frame_seq_ == 1U) ? 0x10U : 0U;
+    frame.valid_flags = 0U;
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
         frame.joint_rotations_quat[b][3] = 1.0f;
     }
     out_buffer.publish(frame);
+    last_face_conf_.store(0.0f, std::memory_order_relaxed);
+    last_body_conf_.store(0.0f, std::memory_order_relaxed);
+    last_lhand_conf_.store(0.0f, std::memory_order_relaxed);
+    last_rhand_conf_.store(0.0f, std::memory_order_relaxed);
+    roi_locked_.store(false, std::memory_order_release);
 }
 
 bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_buffer, uint32_t wait_timeout_ms,
@@ -213,7 +218,17 @@ TrackingStatsSnapshot TrackingEngine::snapshot_stats() const {
     s.rolling_infer_ms = router_.rolling_avg_ms();
     s.active_ep = router_.active_ep();
     s.active_ep_label = router_.active_ep_label();
-    s.camera_label = camera_ ? camera_->source_label() : std::string("None");
+    const bool cam_open = camera_ && camera_->is_open();
+    s.camera_active = cam_open;
+    if (cam_open) {
+        s.camera_label = camera_->source_label();
+        s.camera_symlink = camera_->device_symlink();
+        s.camera_width = camera_->width();
+        s.camera_height = camera_->height();
+        s.camera_fps = camera_->fps();
+    } else {
+        s.camera_label = "Camera Stopped";
+    }
     s.demotion_count = router_.demotion_count();
     s.face_confidence = last_face_conf_.load(std::memory_order_relaxed);
     s.upper_body_confidence = last_body_conf_.load(std::memory_order_relaxed);

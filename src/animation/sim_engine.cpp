@@ -70,6 +70,8 @@ void SimEngine::reset(const RestSkeletonMetrics& rest) noexcept {
     solved_body_ = {};
     ik_world_pos_.fill({});
     ik_world_rot_.fill(Quat::identity());
+    bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
+    bone_rot_ws_.fill(Quat::identity());
     last_seen_frame_seq_ = 0;
     last_tick_us_ = 0;
     spring_accum_s_ = 0.0f;
@@ -88,6 +90,8 @@ void SimEngine::set_rest_metrics(const RestSkeletonMetrics& rest) noexcept {
                              rm.rest_local_positions[AETHER_BONE_RIGHT_FOOT];
     vis_solver_.set_rest_anchors(hips_rest, l_foot_rest, r_foot_rest);
     spring_.configure_default_skirt_and_hair(rm);
+    bone_pos_ws_.fill(rm.rest_local_positions[AETHER_BONE_HEAD]);
+    bone_rot_ws_.fill(Quat::identity());
 }
 
 void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyncPacket& dsp,
@@ -144,12 +148,8 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
         (spring_.joint_count() > 0) ? (64U + spring_.joint_count()) : AETHER_HUMANOID_BONE_COUNT;
     const uint32_t total_bones =
         std::min(kMaxBones, std::max<uint32_t>(AETHER_HUMANOID_BONE_COUNT, active_spring_bones));
-    for (size_t b = AETHER_HUMANOID_BONE_COUNT; b < total_bones; ++b) {
-        bone_pos_ws_[b] = bone_pos_ws_[AETHER_BONE_HEAD];
-        bone_rot_ws_[b] = Quat::identity();
-    }
 
-    // 5. Fixed-timestep SpringBone Verlet (with clamped accumulator + SIMD AVX2/scalar)
+    // 5. Fixed-timestep SpringBone Verlet (preserve previous virtual bone poses on render-only frames)
     const Vec3 wind_ws{0.0f, 0.0f, 0.0f};
     const float drag_scale = 1.0f;
     (void)graph_out;

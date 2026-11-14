@@ -26,8 +26,8 @@ class InspectorPanel {
               const DevShellAvatarView& avatar, const DevShellTrackingView& tracking,
               const DevShellRenderView& render_view, const DevShellOutputView& output_view,
               const StudioHostStatus& host_status, std::span<const LoadedPluginVm> plugins,
-              const UiSelection& selection, ParamStore& params, UndoStack& undo, const UiFontSet& fonts,
-              PropertyRowActions& row_actions, StudioActions& actions);
+              const UiSelection& selection, ParamStore& params, UndoStack& undo, AppSettings& settings,
+              bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions, StudioActions& actions);
 
   private:
     bool focus_output_pending_{false};

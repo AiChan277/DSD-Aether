@@ -86,7 +86,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         fg.proj, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
-    float3 ray_origin = world_pos + world_n * (0.002 + 0.0005 * abs(true_view_z));
+    float3 ray_origin = world_pos + world_n * (0.011 + 0.0015 * abs(true_view_z));
 
     uint frame_idx = fg.state_u32.x;
     float j0 = ign_blue_noise(tid.xy, frame_idx);
@@ -95,7 +95,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     // Exclude HairCast instances (0x04) from face-SDF pixels so anime face shadows stay clean (§10.6)
     uint trace_mask = (misc.y > 0.5) ? 0xFBu : 0xFFu;
 
-    // 1) Soft cone directional RT shadows (Primary Key light + additional RT casters)
+    // 1) Soft cone directional RT shadows (2 antithetic stratified samples on casters for smooth penumbra)
     float shadow_vis = 1.0;
     float min_t_norm = 1.0;
     float weight_sum = 0.0;
@@ -110,23 +110,48 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             continue;
         }
         float3 ldir = compute_world_light_dir(l, world_pos);
-        float3 rdir = sample_cone(ldir, max(l.direction_radius.w, 0.02), j0, j1);
+        float ndl_ray = dot(world_n, ldir);
         float lw = max(luminance(l.color_intensity.rgb), 0.1);
-
-        RayDesc r = {};
-        r.Origin = ray_origin;
-        r.Direction = rdir;
-        r.TMin = 0.003;
-        r.TMax = 2.8;
-
-        RayQuery<RAY_FLAG_NONE> q;
-        q.TraceRayInline(g_Tlas, RAY_FLAG_NONE, trace_mask, r);
-        q.Proceed();
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            min_t_norm = min(min_t_norm, clamp(q.CommittedRayT() / 0.45, 0.0, 1.0));
-        } else {
+        // Back-facing pixels behind the terminator (which MToon wrap-shading keeps lit) would trace
+        // through the mesh's own chord triangles; smoothly fade RT self-occlusion across [0.02, 0.22].
+        float term_fade = smoothstep(0.02, 0.22, ndl_ray);
+        if (term_fade <= 0.001) {
             vis_accum += lw;
+            weight_sum += lw;
+            continue;
         }
+        float cone_r = max(l.direction_radius.w, 0.02);
+        float tmin_bias = 0.018 + 0.028 * (1.0 - saturate(ndl_ray));
+        float3 light_origin = ray_origin + ldir * (0.008 * (1.0 - saturate(ndl_ray)));
+
+        RayDesc r0 = {};
+        r0.Origin = light_origin;
+        r0.Direction = sample_cone(ldir, cone_r, j0, j1);
+        r0.TMin = tmin_bias;
+        r0.TMax = 2.8;
+
+        RayQuery<RAY_FLAG_NONE> q0;
+        q0.TraceRayInline(g_Tlas, RAY_FLAG_NONE, trace_mask, r0);
+        q0.Proceed();
+        float s0 = 1.0;
+        if (q0.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            min_t_norm = min(min_t_norm, clamp(q0.CommittedRayT() / 0.45, 0.0, 1.0));
+            s0 = 0.0;
+        }
+
+        RayDesc r1 = {};
+        r1.Origin = light_origin;
+        r1.Direction = sample_cone(ldir, cone_r, frac(j0 + 0.5), frac(j1 + 0.5));
+        r1.TMin = tmin_bias;
+        r1.TMax = 2.8;
+
+        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q1;
+        q1.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, trace_mask, r1);
+        q1.Proceed();
+        float s1 = (q1.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0 : 1.0;
+
+        float vis = lerp(1.0, 0.5 * (s0 + s1), term_fade);
+        vis_accum += lw * vis;
         weight_sum += lw;
     }
     if (weight_sum > 1e-5) {
@@ -148,7 +173,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         RayDesc rr = {};
         rr.Origin = ray_origin;
         rr.Direction = j_rim;
-        rr.TMin = 0.004;
+        rr.TMin = 0.012;
         rr.TMax = max(fg.light_params.y, 0.45);
         RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> qr;
         qr.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFFu, rr);
@@ -167,7 +192,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         RayDesc rb = {};
         rb.Origin = ray_origin;
         rb.Direction = bdir;
-        rb.TMin = 0.004;
+        rb.TMin = 0.012;
         rb.TMax = max(fg.light_params.z, 0.25);
         RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> qb;
         qb.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFFu, rb);

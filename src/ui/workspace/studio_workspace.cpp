@@ -11,6 +11,7 @@
 #include <array>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string_view>
@@ -101,6 +102,20 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
     config_dir_ = paths_.app_data_dir.empty() ? default_config_dir() : std::filesystem::path(paths_.app_data_dir);
 
     std::string ref_vrm = resolve_asset_path(paths_, "samples/reference.vrm");
+    if (!std::filesystem::exists(ref_vrm) && allow_disk_config_) {
+#if defined(_WIN32)
+        char* userprofile = nullptr;
+        size_t up_len = 0;
+        if (_dupenv_s(&userprofile, &up_len, "USERPROFILE") == 0 && userprofile != nullptr) {
+            std::filesystem::path dl_vrm =
+                std::filesystem::path(userprofile) / "Downloads" / "8590256991748008892.vrm";
+            if (std::filesystem::is_regular_file(dl_vrm)) {
+                ref_vrm = dl_vrm.string();
+            }
+            std::free(userprofile);
+        }
+#endif
+    }
     std::string vrm1 = resolve_asset_path(paths_, "samples/sample_vrm1.vrm");
     std::string fbx = resolve_asset_path(paths_, "samples/sample_humanoid.fbx");
     std::string pmx = resolve_asset_path(paths_, "samples/sample_mmd.pmx");
@@ -128,6 +143,8 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
             wizard_.open(hw_, rhi::SelectedGpuInfo{}, host_status_.on_air);
         }
     }
+    last_synced_ep_mode_ = params_.get_int(ParamId::TrackingEpMode);
+    last_synced_synthetic_cam_ = params_.get_bool(ParamId::TrackingSyntheticCamera);
 
     set_high_contrast_theme(params_.get_bool(ParamId::AppHighContrast));
     if (ImGui::GetCurrentContext() != nullptr) {
@@ -401,10 +418,15 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     }
 
     const int ep_mode = params_.get_int(ParamId::TrackingEpMode);
-    if (ep_mode == 0) {
-        v.request_ep_override = -1;
-    } else if (ep_mode >= 1 && ep_mode <= 4) {
-        v.request_ep_override = ep_mode - 1;
+    if (ep_mode != last_synced_ep_mode_) {
+        last_synced_ep_mode_ = ep_mode;
+        v.request_ep_override = tracking_ep_mode_to_router_override(ep_mode);
+    }
+    const bool synth_cam = params_.get_bool(ParamId::TrackingSyntheticCamera);
+    if (synth_cam != last_synced_synthetic_cam_) {
+        last_synced_synthetic_cam_ = synth_cam;
+        v.request_set_synthetic_camera = true;
+        v.target_synthetic_camera = synth_cam;
     }
 }
 
@@ -736,8 +758,9 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     // Z5 Top Menu & Mode Bar
     bool mode_changed = false;
     StudioMode requested_mode = mode_;
-    const TopMenuAction top_act = telemetry_bar_.draw_top_bar(now_s, requested_mode, mode_changed, rhi, ffi_layout_ok,
-                                                              host_status_, undo_, fonts_, scale, actions);
+    const TopMenuAction top_act =
+        telemetry_bar_.draw_top_bar(now_s, requested_mode, mode_changed, rhi, ffi_layout_ok, host_status_, undo_, hw_,
+                                    tracking, params_, settings_, settings_dirty_, fonts_, scale, actions);
     if (mode_changed) {
         switch_mode(requested_mode);
     }
@@ -833,14 +856,14 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     }
 
     // Z2 Viewport (ViewportPanel manages its own ImGui::Begin("Viewport")/End)
-    viewport_panel_.draw(mode_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused, params_, undo_,
-                         fonts_, scale, actions);
+    viewport_panel_.draw(mode_, hw_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused, params_,
+                         undo_, settings_, settings_dirty_, fonts_, scale, actions);
 
     // Z3 Inspector (InspectorPanel manages its own ImGui::Begin("Inspector")/End)
     PropertyRowActions row_actions{};
     inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
-                          output_view, host_status_, plugins_, selection_, params_, undo_, fonts_, row_actions,
-                          actions);
+                          output_view, host_status_, plugins_, selection_, params_, undo_, settings_, settings_dirty_,
+                          fonts_, row_actions, actions);
     if (const ImGuiWindow* hov = GImGui != nullptr ? GImGui->HoveredWindow : nullptr;
         hov != nullptr && hov->RootWindow != nullptr) {
         const char* rname = hov->RootWindow->Name;

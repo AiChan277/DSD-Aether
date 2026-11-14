@@ -14,6 +14,8 @@ namespace aether::ui {
 
 TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& mode_changed, const rhi::RhiDevice& rhi,
                                          bool ffi_layout_ok, const StudioHostStatus& host_status, const UndoStack& undo,
+                                         const HardwareInventory& hw, const DevShellTrackingView& tracking,
+                                         ParamStore& params, AppSettings& settings, bool& settings_dirty,
                                          const UiFontSet& fonts, float dpi_scale, StudioActions& actions) {
     TopMenuAction menu_act = TopMenuAction::None;
     mode_changed = false;
@@ -80,6 +82,44 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(tr("Tracking"))) {
+            char cam_status[192]{};
+            format_camera_status_badge(tracking, cam_status, sizeof(cam_status));
+            ImGui::TextColored(tracking.camera_active ? t.status_ok : t.text_tertiary, "%s", cam_status);
+            ImGui::TextColored(t.text_tertiary, "%s · %.1f ms", tracking.active_ep_label,
+                               static_cast<double>(tracking.inference_ms));
+            ImGui::Separator();
+            const bool cam_on = tracking.camera_active;
+            if (ImGui::MenuItem(cam_on ? tr("Stop Camera") : tr("Start Camera"), nullptr, cam_on)) {
+                actions.viewport.request_set_camera_active = true;
+                actions.viewport.target_camera_active = !cam_on;
+            }
+            if (ImGui::BeginMenu(tr("Camera Device"))) {
+                if (hw.cameras.empty()) {
+                    ImGui::MenuItem(tr("No Webcam Detected"), nullptr, false, false);
+                } else {
+                    const int active_idx = active_camera_device_index(hw, tracking, settings);
+                    for (int i = 0; i < static_cast<int>(hw.cameras.size()); ++i) {
+                        const auto& cam = hw.cameras[static_cast<size_t>(i)];
+                        char lbl[192]{};
+                        std::snprintf(lbl, sizeof(lbl), "%s%s##cam_%d", cam.friendly_name.c_str(),
+                                      cam.likely_virtual ? " [Virtual]" : "", i);
+                        const bool selected = (i == active_idx) && !tracking.using_synthetic_camera;
+                        if (ImGui::MenuItem(lbl, nullptr, selected)) {
+                            select_camera_device_action(cam, params, settings, settings_dirty, actions);
+                        }
+                    }
+                }
+                ImGui::Separator();
+                const bool syn_on = params.get_bool(ParamId::TrackingSyntheticCamera);
+                if (ImGui::MenuItem(tr("Use Synthetic Feed"), nullptr, syn_on)) {
+                    (void)params.set(ParamId::TrackingSyntheticCamera, syn_on ? 0.0 : 1.0);
+                    actions.viewport.request_set_synthetic_camera = true;
+                    actions.viewport.target_synthetic_camera = !syn_on;
+                    settings_dirty = true;
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(tr("Hardware Optimizer..."), nullptr, false, !host_status.on_air)) {
                 menu_act = TopMenuAction::OpenWizard;
             }

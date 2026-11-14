@@ -44,9 +44,13 @@ struct TrackingHudSnapshot {
     bool enabled{false};
     bool ready{false};
     bool using_synthetic_camera{true};
+    bool camera_active{false};
     bool roi_locked{false};
     uint32_t active_ep{AETHER_EP_CPU};
     int32_t selected_ep_override{-1};
+    uint32_t camera_width{0};
+    uint32_t camera_height{0};
+    uint32_t camera_fps{0};
     uint64_t frames_processed{0};
     uint64_t demotion_count{0};
     float preprocess_ms{0.0f};
@@ -58,23 +62,31 @@ struct TrackingHudSnapshot {
     float right_hand_confidence{0.0f};
     char active_ep_label[64]{"Initializing..."};
     char camera_label[128]{"Synthetic 60Hz"};
+    char camera_symlink[256]{};
 };
 
 enum class TrackingCmdKind : uint8_t {
     CalibrateNeutral = 0,
     ToggleCameraSource = 1,
     SetEpOverride = 2,
+    SetCameraActive = 3,
+    SelectCameraDevice = 4,
+    SetSyntheticCamera = 5,
 };
 
 struct TrackingControlCommand {
     TrackingCmdKind kind{TrackingCmdKind::CalibrateNeutral};
     int32_t int_arg{0};
+    char str_arg[256]{};
 };
 
 struct PipelineConfig {
     bool enable_live_tracking{false};
     bool use_synthetic_camera{true};
+    bool camera_active{true};
+    uint32_t camera_fps{60};
     int32_t preferred_ep{-1};
+    std::string preferred_camera_link{};
     std::filesystem::path manifest_path{};
     std::filesystem::path ov_cache_dir{};
     rhi::RhiDevice* output_device{nullptr};
