@@ -2,6 +2,7 @@ add_library(aether_animation STATIC
     one_euro.cpp
     kalman.cpp
     visibility_first.cpp
+    hand_collision.cpp
     ik_solvers.cpp
     spring_bone.cpp
     expression_mixer.cpp

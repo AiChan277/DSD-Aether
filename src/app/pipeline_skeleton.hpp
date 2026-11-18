@@ -76,6 +76,7 @@ struct TrackingHudSnapshot {
     float audio_open_y{0.0f};
     char audio_device_label[96]{"System Default"};
     char audio_device_id[192]{};
+    bool hand_tracking_enabled{false};
 };
 
 enum class TrackingCmdKind : uint8_t {
@@ -86,6 +87,7 @@ enum class TrackingCmdKind : uint8_t {
     SelectCameraDevice = 4,
     SetSyntheticCamera = 5,
     SelectAudioDevice = 6,
+    SetHandTracking = 7,
 };
 
 struct TrackingControlCommand {
@@ -187,6 +189,15 @@ class PipelineSkeleton {
     void set_tracking_paused(bool paused) noexcept { tracking_paused_.store(paused, std::memory_order_release); }
     [[nodiscard]] bool tracking_paused() const noexcept { return tracking_paused_.load(std::memory_order_acquire); }
 
+    /** Enables or disables optional hand tracking + arm IK + collision avoidance cleanly across T1 & T2 (`HR-02`). */
+    void set_hand_tracking_enabled(bool enabled) noexcept {
+        hand_tracking_enabled_.store(enabled, std::memory_order_release);
+        send_tracking_command({TrackingCmdKind::SetHandTracking, enabled ? 1 : 0, {}});
+    }
+    [[nodiscard]] bool hand_tracking_enabled() const noexcept {
+        return hand_tracking_enabled_.load(std::memory_order_acquire);
+    }
+
   private:
     void t1_entry();
     void t2_entry();
@@ -214,6 +225,7 @@ class PipelineSkeleton {
 
     std::atomic<bool> running_{false};
     std::atomic<bool> tracking_paused_{false};
+    std::atomic<bool> hand_tracking_enabled_{false};
     std::atomic<AetherHostHandle> plugin_host_{nullptr};
     std::atomic<uint64_t> t1_frames_{0};
     std::atomic<uint64_t> t2_ticks_{0};

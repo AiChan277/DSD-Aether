@@ -17,7 +17,23 @@ FsOut vs_fullscreen(uint vid : SV_VertexID) {
 
 [shader("fragment")]
 float4 ps_compose(FsOut i) : SV_Target0 {
-    float4 fg = g_SampledImages[g_Pc.param0].Sample(g_Samplers[kSamplerLinearClamp], i.uv);
+    float x0 = g_Pc.fparam0;
+    float y0 = g_Pc.fparam1;
+    float x1 = max(x0 + 1e-4, g_Pc.fparam2);
+    float y1 = max(y0 + 1e-4, g_Pc.fparam3);
+    if (i.uv.x < x0 || i.uv.x > x1 || i.uv.y < y0 || i.uv.y > y1) {
+        if ((g_Pc.param1 & 2u) != 0u) {
+            return float4(11.0 / 255.0, 13.0 / 255.0, 18.0 / 255.0, 1.0); // #0B0D12 broadcast matte
+        }
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    float du = asfloat(g_Pc.param2);
+    float dv = asfloat(g_Pc.param3);
+    if (du <= 0.0) du = 1.0;
+    if (dv <= 0.0) dv = 1.0;
+    float2 frame_uv = float2((i.uv.x - x0) / (x1 - x0), (i.uv.y - y0) / (y1 - y0));
+    float2 src_uv = float2(0.5, 0.5) + (frame_uv - float2(0.5, 0.5)) * float2(du, dv);
+    float4 fg = g_SampledImages[g_Pc.param0].Sample(g_Samplers[kSamplerLinearClamp], src_uv);
     float a = saturate(fg.a);
     float3 bg_lin = float3(0.0, 0.0, 0.0);
     if ((g_Pc.param1 & 1u) != 0u) {

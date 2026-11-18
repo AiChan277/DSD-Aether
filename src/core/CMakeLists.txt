@@ -21,6 +21,7 @@ add_library(aether_core STATIC
     telemetry.cpp
     telemetry.hpp
     triple_buffer.hpp
+    viewport_aspect.hpp
 )
 
 aether_apply_cxx_flags(aether_core)

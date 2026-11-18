@@ -700,8 +700,8 @@ void LandmarkPoseSolver::reset() noexcept {
     neutral_mouth_height_ratio_ = 0.0616f;
     neutral_mouth_width_ratio_ = 0.5525f;
     neutral_plane_pitch_ratio_ = 0.42f;
-    neutral_brow_l_ = {0.268f, 0.279f, 0.183f};
-    neutral_brow_r_ = {0.268f, 0.279f, 0.183f};
+    neutral_brow_l_ = {0.268f, 0.275f, 0.279f, 0.235f, 0.183f};
+    neutral_brow_r_ = {0.268f, 0.275f, 0.279f, 0.235f, 0.183f};
     lm_filters_.fill(LandmarkFilter2D{});
     filtered_lm_buf_.fill(0.0f);
     last_lm_filter_ts_us_ = 0ULL;
@@ -832,11 +832,13 @@ RoiRectNorm LandmarkPoseSolver::estimate_face_roi_from_m1(const float* m1_body_l
 
 void LandmarkPoseSolver::populate_tracking_frame(
     const RoiRectNorm& face_roi, const float* m2_landmarks_478x3, float face_flag, const float* m3_blendshapes_52,
-    const float* m1_body_world_39x3, const float* m1_body_lm_39x5, float pose_flag, bool /*run_left_hand*/,
-    bool /*run_right_hand*/, const float* /*m1_hands_lm_2x63*/, const float* /*m1_hands_flag_2*/,
-    const float* /*m1_hands_handed_2*/, uint64_t capture_timestamp_us, uint64_t inference_complete_us, EpTier active_ep,
-    uint32_t frame_sequence, bool roi_reset_this_frame, AetherTrackingFrame& out_frame, uint32_t cam_w,
-    uint32_t cam_h) noexcept {
+    const float* m1_body_world_39x3, const float* m1_body_lm_39x5, float pose_flag, bool run_left_hand,
+    bool run_right_hand, const float* m1_hands_lm_2x63, const float* m1_hands_flag_2, const float* m1_hands_handed_2,
+    uint64_t capture_timestamp_us, uint64_t inference_complete_us, EpTier active_ep, uint32_t frame_sequence,
+    bool roi_reset_this_frame, AetherTrackingFrame& out_frame, uint32_t cam_w, uint32_t cam_h,
+    bool enable_hand_tracking, const CapturedFrameBuffer* raw_frame, const RoiRectNorm* left_hand_roi,
+    const RoiRectNorm* right_hand_roi, const float* m1_hands_world_2x63) noexcept {
+    (void)m1_hands_handed_2;
     out_frame = AetherTrackingFrame{};
     out_frame.capture_timestamp_us = capture_timestamp_us;
     out_frame.inference_complete_us = inference_complete_us;
@@ -847,6 +849,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
     overlay_.face_roi = face_roi;
     overlay_.neutral_calibrated = neutral_calibrated_;
     overlay_.stable_lock_frames = stable_lock_frames_;
+    overlay_.hand_tracking_enabled = enable_hand_tracking;
 
     uint32_t valid_flags = roi_reset_this_frame ? 0x10U : 0U;
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
@@ -977,10 +980,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
         const float fx_cam = static_cast<float>(std::max(cam_w, 1U));
         const float cx_cam = 0.5f * static_cast<float>(std::max(cam_w, 1U));
         const float cy_cam = 0.5f * static_cast<float>(std::max(cam_h, 1U));
-        const auto unproject_from = [&](const float* pts_478x3, int idx) noexcept -> Vec3 {
-            float u_px = 0.0f;
-            float v_px = 0.0f;
-            map_m2_crop_to_cam_px(pts_478x3[idx * 3 + 0], pts_478x3[idx * 3 + 1], face_roi, cam_w, cam_h, u_px, v_px);
+        const auto unproject_cam_px = [&](float u_px, float v_px, int idx) noexcept -> Vec3 {
             const float ox = (u_px - cx_cam) / fx_cam;
             const float oy = (cy_cam - v_px) / fx_cam;
             float z_ref = 0.045f;
@@ -1002,6 +1002,12 @@ void LandmarkPoseSolver::populate_tracking_frame(
             }
             d = std::clamp(d, 0.12f, 3.0f);
             return origin_local + dir_local * d;
+        };
+        const auto unproject_from = [&](const float* pts_478x3, int idx) noexcept -> Vec3 {
+            float u_px = 0.0f;
+            float v_px = 0.0f;
+            map_m2_crop_to_cam_px(pts_478x3[idx * 3 + 0], pts_478x3[idx * 3 + 1], face_roi, cam_w, cam_h, u_px, v_px);
+            return unproject_cam_px(u_px, v_px, idx);
         };
         const auto unproject_local = [&](int idx) noexcept -> Vec3 { return unproject_from(lm, idx); };
         const auto unproject_raw_local = [&](int idx) noexcept -> Vec3 {
@@ -1054,19 +1060,17 @@ void LandmarkPoseSolver::populate_tracking_frame(
         const float mar_open = dist_xy(p_13, p_14) / std::max(0.005f, dist_xy(p_78, p_308));
         const float mouth_width_ratio = dist_xy(p_61, p_291) / iod_local;
 
-        // Eyebrow heights (inner, mid, outer) above rigid upper eye-corner baseline, normalized by iod_local
-        const float eye_r_base_y = 0.5f * (p_33.y + p_133.y); // subject right (image-left: 107 in, 105 mid, 70 out)
-        const float eye_l_base_y = 0.5f * (p_263.y + p_362.y); // subject left (image-right: 336 in, 334 mid, 300 out)
-        const std::array<float, 3> brow_r_cur{
-            (unproject_local(107).y - eye_r_base_y) / iod_local,
-            (unproject_local(105).y - eye_r_base_y) / iod_local,
-            (unproject_local(70).y - eye_r_base_y) / iod_local,
-        };
-        const std::array<float, 3> brow_l_cur{
-            (unproject_local(336).y - eye_l_base_y) / iod_local,
-            (unproject_local(334).y - eye_l_base_y) / iod_local,
-            (unproject_local(300).y - eye_l_base_y) / iod_local,
-        };
+        // 5-point per-brow heights (inner -> outer) above rigid upper eye-corner baseline, normalized by iod_local
+        const float eye_r_base_y = 0.5f * (p_33.y + p_133.y);  // subject right (image-left: 107 in .. 70 out)
+        const float eye_l_base_y = 0.5f * (p_263.y + p_362.y); // subject left (image-right: 336 in .. 300 out)
+        static constexpr std::array<uint16_t, 5U> kBrowR5 = {107U, 66U, 105U, 63U, 70U};
+        static constexpr std::array<uint16_t, 5U> kBrowL5 = {336U, 296U, 334U, 293U, 300U};
+        std::array<float, 5> brow_r_cur{};
+        std::array<float, 5> brow_l_cur{};
+        for (size_t bi = 0U; bi < 5U; ++bi) {
+            brow_r_cur[bi] = (unproject_local(kBrowR5[bi]).y - eye_r_base_y) / iod_local;
+            brow_l_cur[bi] = (unproject_local(kBrowL5[bi]).y - eye_l_base_y) / iod_local;
+        }
 
         if (calibrate_next_ || (!neutral_calibrated_ && stable_lock_frames_ >= kAutoNeutralStableFrames)) {
             neutral_head_quat_[0] = q_raw.x;
@@ -1137,9 +1141,76 @@ void LandmarkPoseSolver::populate_tracking_frame(
         out_frame.joint_positions_ws[AETHER_BONE_HEAD][3] = std::clamp(face_flag, 0.0f, 1.0f);
         out_frame.joint_positions_ws[AETHER_BONE_NECK][3] = std::clamp(face_flag, 0.0f, 1.0f);
 
+        // 8-point eye contour polygons (in full-res pixels + normalized overlay) and full-res iris centroid refinement
+        static constexpr std::array<uint16_t, 8U> kImgLeftEyePolyIdx = {33U, 160U, 159U, 158U, 133U, 153U, 145U, 144U};
+        static constexpr std::array<uint16_t, 8U> kImgRightEyePolyIdx = {362U, 385U, 386U, 387U, 263U, 373U, 374U, 380U};
+        const float inv_w = 1.0f / static_cast<float>(std::max(cam_w, 1U));
+        const float inv_h = 1.0f / static_cast<float>(std::max(cam_h, 1U));
+        std::array<float, 8U * 2U> eye_r_poly_px{};
+        std::array<float, 8U * 2U> eye_l_poly_px{};
+        for (size_t ei = 0U; ei < 8U; ++ei) {
+            float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+            map_m2_crop_to_cam_px(lm[kImgLeftEyePolyIdx[ei] * 3U + 0U], lm[kImgLeftEyePolyIdx[ei] * 3U + 1U], face_roi,
+                                  cam_w, cam_h, u0, v0);
+            map_m2_crop_to_cam_px(lm[kImgRightEyePolyIdx[ei] * 3U + 0U], lm[kImgRightEyePolyIdx[ei] * 3U + 1U], face_roi,
+                                  cam_w, cam_h, u1, v1);
+            eye_r_poly_px[ei * 2U + 0U] = u0;
+            eye_r_poly_px[ei * 2U + 1U] = v0;
+            eye_l_poly_px[ei * 2U + 0U] = u1;
+            eye_l_poly_px[ei * 2U + 1U] = v1;
+            overlay_.left_eye_poly_norm[ei * 2U + 0U] = std::clamp(u0 * inv_w, 0.0f, 1.0f);
+            overlay_.left_eye_poly_norm[ei * 2U + 1U] = std::clamp(v0 * inv_h, 0.0f, 1.0f);
+            overlay_.right_eye_poly_norm[ei * 2U + 0U] = std::clamp(u1 * inv_w, 0.0f, 1.0f);
+            overlay_.right_eye_poly_norm[ei * 2U + 1U] = std::clamp(v1 * inv_h, 0.0f, 1.0f);
+        }
+        overlay_.eye_poly_valid = true;
+
+        for (size_t bi = 0U; bi < 5U; ++bi) {
+            float ub0 = 0.0f, vb0 = 0.0f, ub1 = 0.0f, vb1 = 0.0f;
+            static constexpr std::array<uint16_t, 5U> kHudImgLeftBrow5 = {70U, 63U, 105U, 66U, 107U};
+            map_m2_crop_to_cam_px(lm[kHudImgLeftBrow5[bi] * 3U + 0U], lm[kHudImgLeftBrow5[bi] * 3U + 1U], face_roi,
+                                  cam_w, cam_h, ub0, vb0);
+            map_m2_crop_to_cam_px(lm[kBrowL5[bi] * 3U + 0U], lm[kBrowL5[bi] * 3U + 1U], face_roi, cam_w, cam_h, ub1, vb1);
+            overlay_.left_brow_pts_norm[bi * 2U + 0U] = std::clamp(ub0 * inv_w, 0.0f, 1.0f);
+            overlay_.left_brow_pts_norm[bi * 2U + 1U] = std::clamp(vb0 * inv_h, 0.0f, 1.0f);
+            overlay_.right_brow_pts_norm[bi * 2U + 0U] = std::clamp(ub1 * inv_w, 0.0f, 1.0f);
+            overlay_.right_brow_pts_norm[bi * 2U + 1U] = std::clamp(vb1 * inv_h, 0.0f, 1.0f);
+        }
+        overlay_.brow_pts_valid = true;
+
+        float ul_iris = 0.0f, vl_iris = 0.0f, ur_iris = 0.0f, vr_iris = 0.0f;
+        map_m2_crop_to_cam_px(lm[468U * 3U + 0U], lm[468U * 3U + 1U], face_roi, cam_w, cam_h, ul_iris, vl_iris);
+        map_m2_crop_to_cam_px(lm[473U * 3U + 0U], lm[473U * 3U + 1U], face_roi, cam_w, cam_h, ur_iris, vr_iris);
+        if (raw_frame != nullptr && raw_frame->width == cam_w && raw_frame->height == cam_h &&
+            !raw_frame->bytes.empty()) {
+            if (ear_l > 0.14f) {
+                float ref_u = ul_iris;
+                float ref_v = vl_iris;
+                if (refine_eye_iris_fullres(*raw_frame, eye_r_poly_px.data(), ref_u, ref_v)) {
+                    ul_iris = 0.25f * ul_iris + 0.75f * ref_u;
+                    vl_iris = 0.25f * vl_iris + 0.75f * ref_v;
+                }
+            }
+            if (ear_r > 0.14f) {
+                float ref_u = ur_iris;
+                float ref_v = vr_iris;
+                if (refine_eye_iris_fullres(*raw_frame, eye_l_poly_px.data(), ref_u, ref_v)) {
+                    ur_iris = 0.25f * ur_iris + 0.75f * ref_u;
+                    vr_iris = 0.25f * vr_iris + 0.75f * ref_v;
+                }
+            }
+        }
+        overlay_.iris_centers_norm = {
+            std::clamp(ul_iris * inv_w, 0.0f, 1.0f),
+            std::clamp(vl_iris * inv_h, 0.0f, 1.0f),
+            std::clamp(ur_iris * inv_w, 0.0f, 1.0f),
+            std::clamp(vr_iris * inv_h, 0.0f, 1.0f),
+        };
+        overlay_.iris_valid = true;
+
         // Iris landmarks in head-local canonical space (+X image-right, +Y up -> negate dy for image-down pitch)
-        const Vec3 p_468 = unproject_local(468);
-        const Vec3 p_473 = unproject_local(473);
+        const Vec3 p_468 = unproject_cam_px(ul_iris, vl_iris, 468);
+        const Vec3 p_473 = unproject_cam_px(ur_iris, vr_iris, 473);
         const auto compute_raw_eye_gaze = [&](const Vec3& p_iris, const Vec3& p_out, const Vec3& p_in,
                                               const Vec3& p_top, const Vec3& p_bot, float& out_gx,
                                               float& out_gy) noexcept {
@@ -1165,12 +1236,16 @@ void LandmarkPoseSolver::populate_tracking_frame(
             }
         }
 
-        // Warudo & Live2D Ballistic Blink State Machine + Pitch-Compensated EAR + Saccadic Gaze Stabilizer
+        // Warudo & Live2D Dual-Stiffness C2 Blink Spring + Pitch-Compensated EAR + Pursuit/Saccade Gaze Stabilizer
         BlinkGazeInput blink_in{};
         blink_in.ear_left = ear_r;               // 263/362 = subject's LEFT eye
         blink_in.ear_right = ear_l;              // 33/133  = subject's RIGHT eye
         blink_in.neutral_ear_left_hint = neutral_ear_r_;
         blink_in.neutral_ear_right_hint = neutral_ear_l_;
+        blink_in.raw_squint_left = out_frame.arkit_blendshapes[5];
+        blink_in.raw_squint_right = out_frame.arkit_blendshapes[12];
+        blink_in.raw_cheek_squint_left = out_frame.arkit_blendshapes[47];
+        blink_in.raw_cheek_squint_right = out_frame.arkit_blendshapes[48];
         blink_in.gaze_gx_left = l_eye_gx;        // 473     = subject's LEFT iris
         blink_in.gaze_gy_left = l_eye_gy;
         blink_in.gaze_gx_right = r_eye_gx;       // 468     = subject's RIGHT iris
@@ -1181,6 +1256,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
         blink_in.has_landmarks = true;
         blink_in.roi_reset = roi_reset_this_frame;
         const BlinkGazeOutput blink_out = blink_gaze_.update(blink_in);
+        overlay_.gaze_vec = {blink_out.gaze_gx, blink_out.gaze_gy};
 
         const float yaw_e = std::clamp(blink_out.gaze_gx * 0.28f, -0.5f, 0.5f) * 0.55f;
         const float pitch_e = std::clamp(blink_out.gaze_gy * 0.28f, -0.5f, 0.5f) * 0.35f;
@@ -1210,6 +1286,15 @@ void LandmarkPoseSolver::populate_tracking_frame(
 
         out_frame.arkit_blendshapes[0] = std::clamp(blink_out.blink_left, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[7] = std::clamp(blink_out.blink_right, 0.0f, 1.0f);
+        // Separated EyeSquint (5/12), Gaze-coupled EyeWide (6/13), and CheekRaise (47/48)
+        out_frame.arkit_blendshapes[5] = blink_out.eye_squint_left;
+        out_frame.arkit_blendshapes[12] = blink_out.eye_squint_right;
+        out_frame.arkit_blendshapes[6] =
+            std::clamp(std::max(out_frame.arkit_blendshapes[6], blink_out.brow_lift_from_gaze), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[13] =
+            std::clamp(std::max(out_frame.arkit_blendshapes[13], blink_out.brow_lift_from_gaze), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[47] = blink_out.cheek_raise_left;
+        out_frame.arkit_blendshapes[48] = blink_out.cheek_raise_right;
 
         // Build Live2DParameters in head-local canonical space
         animation::Live2DParameters live2d{};
@@ -1224,27 +1309,37 @@ void LandmarkPoseSolver::populate_tracking_frame(
         live2d.param_eye_ball_x = std::clamp(blink_out.gaze_gx, -1.0f, 1.0f);
         live2d.param_eye_ball_y = std::clamp(-blink_out.gaze_gy, -1.0f, 1.0f);
 
-        // Task 4: Full 3-point Live2D Eyebrow tracking (`ParamBrowLY/RY`, `Angle`, `Form`) + ARKit slots `41..45`
-        const float d_l_in = brow_l_cur[0] - neutral_brow_l_[0];
-        const float d_l_mid = brow_l_cur[1] - neutral_brow_l_[1];
-        const float d_l_out = brow_l_cur[2] - neutral_brow_l_[2];
-        const float d_r_in = brow_r_cur[0] - neutral_brow_r_[0];
-        const float d_r_mid = brow_r_cur[1] - neutral_brow_r_[1];
-        const float d_r_out = brow_r_cur[2] - neutral_brow_r_[2];
-        live2d.param_brow_l_y = std::clamp((d_l_in + d_l_mid + d_l_out) / (3.0f * 0.085f), -1.0f, 1.0f);
-        live2d.param_brow_r_y = std::clamp((d_r_in + d_r_mid + d_r_out) / (3.0f * 0.085f), -1.0f, 1.0f);
-        live2d.param_brow_l_angle = std::clamp((d_l_in - d_l_out) / 0.070f, -1.0f, 1.0f);
-        live2d.param_brow_r_angle = std::clamp((d_r_in - d_r_out) / 0.070f, -1.0f, 1.0f);
-        const float brow_l_arch = (d_l_mid - 0.5f * (d_l_in + d_l_out)) / 0.045f;
-        const float brow_r_arch = (d_r_mid - 0.5f * (d_r_in + d_r_out)) / 0.045f;
+        // Task 4: Full 5-point per-brow Live2D Eyebrow tracking (`ParamBrowLY/RY`, `Angle`, `Form`) + ARKit slots `41..45`
+        std::array<float, 5> dl{};
+        std::array<float, 5> dr{};
+        float sum_l = 0.0f;
+        float sum_r = 0.0f;
+        for (size_t bi = 0U; bi < 5U; ++bi) {
+            dl[bi] = brow_l_cur[bi] - neutral_brow_l_[bi];
+            dr[bi] = brow_r_cur[bi] - neutral_brow_r_[bi];
+            sum_l += dl[bi];
+            sum_r += dr[bi];
+        }
+        const float l_in = 0.5f * (dl[0] + dl[1]);
+        const float l_mid = dl[2];
+        const float l_out = 0.5f * (dl[3] + dl[4]);
+        const float r_in = 0.5f * (dr[0] + dr[1]);
+        const float r_mid = dr[2];
+        const float r_out = 0.5f * (dr[3] + dr[4]);
+        live2d.param_brow_l_y = std::clamp(sum_l / (5.0f * 0.085f), -1.0f, 1.0f);
+        live2d.param_brow_r_y = std::clamp(sum_r / (5.0f * 0.085f), -1.0f, 1.0f);
+        live2d.param_brow_l_angle = std::clamp((l_in - l_out) / 0.070f, -1.0f, 1.0f);
+        live2d.param_brow_r_angle = std::clamp((r_in - r_out) / 0.070f, -1.0f, 1.0f);
+        const float brow_l_arch = (l_mid - 0.5f * (l_in + l_out)) / 0.045f;
+        const float brow_r_arch = (r_mid - 0.5f * (r_in + r_out)) / 0.045f;
         live2d.param_brow_l_form = std::clamp(0.65f * live2d.param_brow_l_y + 0.35f * brow_l_arch, -1.0f, 1.0f);
         live2d.param_brow_r_form = std::clamp(0.65f * live2d.param_brow_r_y + 0.35f * brow_r_arch, -1.0f, 1.0f);
 
         const float brow_down_l_g = std::clamp(-live2d.param_brow_l_y, 0.0f, 1.0f);
         const float brow_down_r_g = std::clamp(-live2d.param_brow_r_y, 0.0f, 1.0f);
-        const float brow_in_up_g = std::clamp(0.5f * (d_l_in + d_r_in) / 0.085f, 0.0f, 1.0f);
-        const float brow_out_l_g = std::clamp(d_l_out / 0.085f, 0.0f, 1.0f);
-        const float brow_out_r_g = std::clamp(d_r_out / 0.085f, 0.0f, 1.0f);
+        const float brow_in_up_g = std::clamp(0.5f * (l_in + r_in) / 0.085f, 0.0f, 1.0f);
+        const float brow_out_l_g = std::clamp(l_out / 0.085f, 0.0f, 1.0f);
+        const float brow_out_r_g = std::clamp(r_out / 0.085f, 0.0f, 1.0f);
         const float m3_w = (m3_blendshapes_52 != nullptr) ? 0.30f : 0.0f;
         const float g_w = 1.0f - m3_w;
         out_frame.arkit_blendshapes[41] = std::clamp(g_w * brow_down_l_g + m3_w * out_frame.arkit_blendshapes[41], 0.0f, 1.0f);
@@ -1321,9 +1416,6 @@ void LandmarkPoseSolver::populate_tracking_frame(
             // Inner lips loop (60..67, 8 pts)
             78, 81, 13, 311, 308, 402, 14, 178,
         };
-        const float inv_w = 1.0f / static_cast<float>(std::max(cam_w, 1U));
-        const float inv_h = 1.0f / static_cast<float>(std::max(cam_h, 1U));
-        overlay_.keypoint_count = 68U;
         for (uint32_t k = 0; k < 68U; ++k) {
             const uint16_t idx = kHud68Indices[k];
             float u = 0.0f;
@@ -1332,18 +1424,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
             overlay_.keypoints_norm[k * 2U + 0U] = std::clamp(u * inv_w, 0.0f, 1.0f);
             overlay_.keypoints_norm[k * 2U + 1U] = std::clamp(v * inv_h, 0.0f, 1.0f);
         }
-        {
-            float ul = 0.0f, vl = 0.0f, ur = 0.0f, vr = 0.0f;
-            map_m2_crop_to_cam_px(lm[468U * 3U + 0U], lm[468U * 3U + 1U], face_roi, cam_w, cam_h, ul, vl);
-            map_m2_crop_to_cam_px(lm[473U * 3U + 0U], lm[473U * 3U + 1U], face_roi, cam_w, cam_h, ur, vr);
-            overlay_.iris_centers_norm = {
-                std::clamp(ul * inv_w, 0.0f, 1.0f),
-                std::clamp(vl * inv_h, 0.0f, 1.0f),
-                std::clamp(ur * inv_w, 0.0f, 1.0f),
-                std::clamp(vr * inv_h, 0.0f, 1.0f),
-            };
-            overlay_.iris_valid = true;
-        }
+        overlay_.keypoint_count = 68U;
         if (hp.valid) {
             const float fx = static_cast<float>(std::max(cam_w, 1U));
             const float fy = fx;
@@ -1380,9 +1461,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
         last_lm_filter_ts_us_ = 0ULL;
     }
 
-    // 2. Upper-Body Pose (TASK 1: hands/arms IK completely bypassed — arms stay in relaxed A-Pose)
+    // 2. Upper-Body & Hand Tracking (Task 5: cleanly bypassed & locked to relaxed A-Pose when disabled)
     const float body_conf = std::clamp(pose_flag, 0.0f, 1.0f);
     out_frame.upper_body_confidence = body_conf;
+    float x_sign = 1.0f;
     if (m1_body_world_39x3 != nullptr && m1_body_lm_39x5 != nullptr && body_conf >= 0.30f) {
         valid_flags |= 0x08U;
         const Vec3 hips_ws{0.0f, 0.90f, 0.0f};
@@ -1391,13 +1473,183 @@ void LandmarkPoseSolver::populate_tracking_frame(
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][2] = hips_ws.z;
         out_frame.joint_positions_ws[AETHER_BONE_HIPS][3] = body_conf;
         out_frame.joint_positions_ws[AETHER_BONE_SPINE][3] = body_conf;
-        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.0f;
-        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.0f;
+        x_sign = (m1_body_world_39x3[11 * 3 + 0] >= m1_body_world_39x3[12 * 3 + 0]) ? 1.0f : -1.0f;
     }
 
-    // 3. Hand tracking disabled (Task 1): lock hand confidences cleanly to zero
-    out_frame.left_hand_confidence = 0.0f;
-    out_frame.right_hand_confidence = 0.0f;
+    if (!enable_hand_tracking) {
+        out_frame.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.0f;
+        out_frame.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.0f;
+        out_frame.left_hand_confidence = 0.0f;
+        out_frame.right_hand_confidence = 0.0f;
+        out_frame.valid_flags = valid_flags;
+        return;
+    }
+
+    const auto solve_hand_side = [&](bool is_left, size_t slot_idx, bool run_slot, int pose_wrist_idx,
+                                     const RoiRectNorm* hand_roi, uint32_t hand_bone, uint32_t finger_base_bone,
+                                     bool& out_detected, std::array<float, 4U>& out_obb, float& out_angle,
+                                     std::array<float, 2U>& out_palm_ctr, std::array<float, 2U>& out_palm_n2d,
+                                     std::array<float, 21U * 2U>& out_kp21, float& out_hand_conf) noexcept {
+        out_detected = false;
+        out_hand_conf = 0.0f;
+
+        // Seed wrist world position from M1_body 3D world landmarks when wrist visibility passes gate
+        float wrist_conf = 0.0f;
+        if (m1_body_world_39x3 != nullptr && m1_body_lm_39x5 != nullptr && body_conf >= 0.30f) {
+            const float w_vis = sigmoid(m1_body_lm_39x5[pose_wrist_idx * 5 + 3]);
+            const float w_pres = sigmoid(m1_body_lm_39x5[pose_wrist_idx * 5 + 4]);
+            const float w_min = std::min(w_vis, w_pres);
+            if (w_min >= 0.35f) {
+                const float mx = m1_body_world_39x3[pose_wrist_idx * 3 + 0];
+                const float my = m1_body_world_39x3[pose_wrist_idx * 3 + 1];
+                const float mz = m1_body_world_39x3[pose_wrist_idx * 3 + 2];
+                if (std::isfinite(mx) && std::isfinite(my) && std::isfinite(mz)) {
+                    out_frame.joint_positions_ws[hand_bone][0] = std::clamp(x_sign * mx, -0.75f, 0.75f);
+                    out_frame.joint_positions_ws[hand_bone][1] = std::clamp(0.90f - my, 0.35f, 1.85f);
+                    out_frame.joint_positions_ws[hand_bone][2] = std::clamp(0.08f - mz, -0.45f, 0.65f);
+                    wrist_conf = std::clamp(body_conf * w_min, 0.0f, 1.0f);
+                }
+            }
+        }
+
+        const float slot_flag =
+            (run_slot && m1_hands_flag_2 != nullptr) ? std::clamp(m1_hands_flag_2[slot_idx], 0.0f, 1.0f) : 0.0f;
+        const bool has_m1_hand = (slot_flag >= 0.45f && m1_hands_lm_2x63 != nullptr);
+        if (has_m1_hand) {
+            out_detected = true;
+            valid_flags |= is_left ? 0x02U : 0x04U;
+            out_hand_conf = std::max(wrist_conf, slot_flag);
+            out_frame.joint_positions_ws[hand_bone][3] = std::clamp(out_hand_conf, 0.45f, 1.0f);
+
+            const RoiRectNorm roi =
+                (hand_roi != nullptr && hand_roi->valid) ? *hand_roi : RoiRectNorm{0.5f, 0.5f, 1.0f, 1.0f, 0.0f, true};
+            const float* hlm = m1_hands_lm_2x63 + slot_idx * 63U;
+            const float cos_r = std::cos(roi.rotation_rad);
+            const float sin_r = std::sin(roi.rotation_rad);
+            for (size_t k = 0U; k < 21U; ++k) {
+                const float nx = (hlm[k * 3U + 0U] / 224.0f) - 0.5f;
+                const float ny = (hlm[k * 3U + 1U] / 224.0f) - 0.5f;
+                const float ux = roi.cx + (nx * cos_r - ny * sin_r) * roi.width;
+                const float vy = roi.cy + (nx * sin_r + ny * cos_r) * roi.height;
+                out_kp21[k * 2U + 0U] = std::clamp(ux, 0.0f, 1.0f);
+                out_kp21[k * 2U + 1U] = std::clamp(vy, 0.0f, 1.0f);
+            }
+
+            // Compute Oriented Bounding Box (OBB), palm centroid & 2D palm direction
+            const float p0x = out_kp21[0], p0y = out_kp21[1];
+            const float p9x = out_kp21[9U * 2U + 0U], p9y = out_kp21[9U * 2U + 1U];
+            const float dx_mid = p9x - p0x;
+            const float dy_mid = p9y - p0y;
+            const float dlen = std::hypot(dx_mid, dy_mid);
+            out_angle = (dlen > 1e-4f) ? std::atan2(dy_mid, dx_mid) : 0.0f;
+            out_palm_n2d = (dlen > 1e-4f) ? std::array<float, 2U>{dx_mid / dlen, dy_mid / dlen}
+                                          : std::array<float, 2U>{0.0f, -1.0f};
+            out_palm_ctr = {
+                0.20f * (out_kp21[0] + out_kp21[5U * 2U] + out_kp21[9U * 2U] + out_kp21[13U * 2U] + out_kp21[17U * 2U]),
+                0.20f * (out_kp21[1] + out_kp21[5U * 2U + 1U] + out_kp21[9U * 2U + 1U] + out_kp21[13U * 2U + 1U] +
+                         out_kp21[17U * 2U + 1U]),
+            };
+
+            const float ca = std::cos(out_angle);
+            const float sa = std::sin(out_angle);
+            float u_min = 1e9f, u_max = -1e9f, v_min = 1e9f, v_max = -1e9f;
+            for (size_t k = 0U; k < 21U; ++k) {
+                const float px = out_kp21[k * 2U + 0U];
+                const float py = out_kp21[k * 2U + 1U];
+                const float u = px * ca + py * sa;
+                const float v = -px * sa + py * ca;
+                u_min = std::min(u_min, u);
+                u_max = std::max(u_max, u);
+                v_min = std::min(v_min, v);
+                v_max = std::max(v_max, v);
+            }
+            const float u_mid = 0.5f * (u_min + u_max);
+            const float v_mid = 0.5f * (v_min + v_max);
+            out_obb[0] = std::clamp(u_mid * ca - v_mid * sa, 0.0f, 1.0f);
+            out_obb[1] = std::clamp(u_mid * sa + v_mid * ca, 0.0f, 1.0f);
+            out_obb[2] = std::max(0.015f, (u_max - u_min) * 1.12f);
+            out_obb[3] = std::max(0.015f, (v_max - v_min) * 1.12f);
+
+            // Solve 5-finger flexion curl (0..85 deg) & splay (-15..+15 deg) in 3D hand coordinates
+            std::array<Vec3, 21> p3{};
+            bool use_world = false;
+            if (m1_hands_world_2x63 != nullptr) {
+                const float* hw = m1_hands_world_2x63 + slot_idx * 63U;
+                const Vec3 w_test{hw[9U * 3U + 0U] - hw[0], hw[9U * 3U + 1U] - hw[1], hw[9U * 3U + 2U] - hw[2]};
+                if (animation::length_sq(w_test) > 1e-6f && std::isfinite(w_test.x)) {
+                    use_world = true;
+                    for (size_t k = 0U; k < 21U; ++k) {
+                        p3[k] = {x_sign * hw[k * 3U + 0U], -hw[k * 3U + 1U], -hw[k * 3U + 2U]};
+                    }
+                }
+            }
+            if (!use_world) {
+                for (size_t k = 0U; k < 21U; ++k) {
+                    p3[k] = {x_sign * ((hlm[k * 3U + 0U] / 224.0f) - 0.5f),
+                             -((hlm[k * 3U + 1U] / 224.0f) - 0.5f), -hlm[k * 3U + 2U] / 224.0f};
+                }
+            }
+
+            const Vec3 palm_fwd = animation::normalize_safe(p3[9] - p3[0], {0.0f, 1.0f, 0.0f});
+            const Vec3 palm_lat = animation::normalize_safe(p3[5] - p3[17], {is_left ? -1.0f : 1.0f, 0.0f, 0.0f});
+            const Vec3 palm_norm = animation::normalize_safe(animation::cross(palm_lat, palm_fwd), {0.0f, 0.0f, 1.0f});
+            const Vec3 palm_ortho_lat = animation::normalize_safe(animation::cross(palm_fwd, palm_norm), palm_lat);
+
+            const Quat wrist_rot = animation::quat_from_to({is_left ? 1.0f : -1.0f, 0.0f, 0.0f}, palm_fwd);
+            out_frame.joint_rotations_quat[hand_bone][0] = wrist_rot.x;
+            out_frame.joint_rotations_quat[hand_bone][1] = wrist_rot.y;
+            out_frame.joint_rotations_quat[hand_bone][2] = wrist_rot.z;
+            out_frame.joint_rotations_quat[hand_bone][3] = wrist_rot.w;
+
+            constexpr std::array<size_t, 5> kBases = {1U, 5U, 9U, 13U, 17U};
+            constexpr float kMaxCurlRad = 85.0f * animation::kDegToRad;
+            constexpr float kMaxSplayRad = 15.0f * animation::kDegToRad;
+            for (size_t f = 0U; f < 5U; ++f) {
+                const size_t b0 = kBases[f];
+                const Vec3 d_ref = (f == 0U) ? palm_fwd : animation::normalize_safe(p3[b0] - p3[0], palm_fwd);
+                const Vec3 d0 = animation::normalize_safe(p3[b0 + 1U] - p3[b0], d_ref);
+                const Vec3 d1 = animation::normalize_safe(p3[b0 + 2U] - p3[b0 + 1U], d0);
+                const Vec3 d2 = animation::normalize_safe(p3[b0 + 3U] - p3[b0 + 2U], d1);
+
+                const auto angle_between = [](Vec3 a, Vec3 c) noexcept -> float {
+                    return std::acos(std::clamp(animation::dot(a, c), -1.0f, 1.0f));
+                };
+                const float curl[3] = {
+                    std::clamp(angle_between(d_ref, d0), 0.0f, kMaxCurlRad),
+                    std::clamp(angle_between(d0, d1), 0.0f, kMaxCurlRad),
+                    std::clamp(angle_between(d1, d2), 0.0f, kMaxCurlRad),
+                };
+                const float lat_comp = animation::dot(d0, palm_ortho_lat);
+                const float fwd_comp = std::max(0.20f, std::abs(animation::dot(d0, palm_fwd)));
+                const float splay = std::clamp(std::atan2(lat_comp, fwd_comp), -kMaxSplayRad, kMaxSplayRad);
+                for (size_t seg = 0U; seg < 3U; ++seg) {
+                    const uint32_t j_id = finger_base_bone + static_cast<uint32_t>(f * 3U + seg);
+                    const float curl_z = is_left ? -curl[seg] : curl[seg];
+                    const float splay_y = (seg == 0U) ? (is_left ? splay : -splay) : 0.0f;
+                    const Quat qf = animation::from_euler_xyz(0.0f, splay_y, curl_z);
+                    out_frame.joint_rotations_quat[j_id][0] = qf.x;
+                    out_frame.joint_rotations_quat[j_id][1] = qf.y;
+                    out_frame.joint_rotations_quat[j_id][2] = qf.z;
+                    out_frame.joint_rotations_quat[j_id][3] = qf.w;
+                }
+            }
+        } else if (wrist_conf >= 0.45f) {
+            out_hand_conf = wrist_conf * 0.75f;
+            out_frame.joint_positions_ws[hand_bone][3] = out_hand_conf;
+            valid_flags |= is_left ? 0x02U : 0x04U;
+        } else {
+            out_frame.joint_positions_ws[hand_bone][3] = 0.0f;
+        }
+    };
+
+    solve_hand_side(true, 0U, run_left_hand, 15, left_hand_roi, AETHER_BONE_LEFT_HAND, AETHER_BONE_LEFT_THUMB_PROXIMAL,
+                    overlay_.left_hand_detected, overlay_.left_hand_bbox_obb, overlay_.left_hand_angle_rad,
+                    overlay_.left_palm_center_norm, overlay_.left_palm_normal_2d, overlay_.left_hand_keypoints_norm,
+                    out_frame.left_hand_confidence);
+    solve_hand_side(false, 1U, run_right_hand, 16, right_hand_roi, AETHER_BONE_RIGHT_HAND,
+                    AETHER_BONE_RIGHT_THUMB_PROXIMAL, overlay_.right_hand_detected, overlay_.right_hand_bbox_obb,
+                    overlay_.right_hand_angle_rad, overlay_.right_palm_center_norm, overlay_.right_palm_normal_2d,
+                    overlay_.right_hand_keypoints_norm, out_frame.right_hand_confidence);
     out_frame.valid_flags = valid_flags;
 }
 

@@ -70,11 +70,32 @@ float BlinkGazeStabilizer::EarTracker::evaluate_openness(float ear_raw, float pi
     return std::clamp((ear_corr - closed_floor) / denom, 0.0f, 1.0f);
 }
 
+namespace {
+
+[[nodiscard]] float smooth_damp_c2(float current, float target, float& velocity, float smooth_time_s,
+                                   float dt_s) noexcept {
+    const float st = std::max(0.0005f, smooth_time_s);
+    const float omega = 2.0f / st;
+    const float x = omega * dt_s;
+    const float exp_f = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+    const float change = current - target;
+    const float temp = (velocity + omega * change) * dt_s;
+    velocity = (velocity - omega * temp) * exp_f;
+    float out = target + (change + temp) * exp_f;
+    if ((target - current > 0.0f) == (out > target)) {
+        out = target;
+        velocity = (out - target) / std::max(dt_s, 1e-4f);
+    }
+    return out;
+}
+
+} // namespace
+
 void BlinkGazeStabilizer::ChannelState::reset() noexcept {
     phase = BlinkPhase::Open;
     phase_time = 0.0f;
     blink = 0.0f;
-    start_blink = 0.0f;
+    blink_vel = 0.0f;
     prev_open = 1.0f;
     has_prev = false;
 }
@@ -95,56 +116,61 @@ void BlinkGazeStabilizer::ChannelState::step(float open_raw, float dt_s) noexcep
     if (phase == BlinkPhase::Open) {
         if (fast_trigger) {
             phase = BlinkPhase::Closing;
-            start_blink = blink;
             phase_time = safe_dt;
         } else {
-            // Wide-Open Lock (> 0.68 -> 0.0) & Schmitt hysteresis across [0.42, 0.68] hold Open at Blink = 0.0
-            blink = 0.0f;
+            // C2 settle to 0.0 when open so any residual velocity decays smoothly
+            if (blink <= 0.002f && std::abs(blink_vel) < 0.05f) {
+                blink = 0.0f;
+                blink_vel = 0.0f;
+            } else {
+                const float tail = std::clamp((0.15f - blink) / 0.15f, 0.0f, 1.0f);
+                const float tau_open = BlinkGazeStabilizer::kOpeningSpringTauS * (1.0f + 0.65f * tail);
+                blink = std::clamp(smooth_damp_c2(blink, 0.0f, blink_vel, tau_open, safe_dt), 0.0f, 1.0f);
+            }
             return;
         }
     } else if (phase == BlinkPhase::Opening && fast_trigger && phase_time >= 0.020f) {
-        // Immediate re-blink trigger if eyelids drop again mid-recovery
+        // Immediate re-blink trigger preserving continuous velocity (C2 smooth reversal)
         phase = BlinkPhase::Closing;
-        start_blink = blink;
         phase_time = safe_dt;
     } else {
         phase_time += safe_dt;
     }
 
     if (phase == BlinkPhase::Closing) {
-        if (phase_time >= BlinkGazeStabilizer::kClosingDurS) {
-            const float carry = phase_time - BlinkGazeStabilizer::kClosingDurS;
+        blink = std::clamp(smooth_damp_c2(blink, 1.0f, blink_vel, BlinkGazeStabilizer::kClosingSpringTauS, safe_dt),
+                           0.0f, 1.0f);
+        if ((blink >= 0.96f && phase_time >= BlinkGazeStabilizer::kClosingDurS) || blink >= 0.992f) {
             phase = BlinkPhase::ClosedHold;
-            phase_time = carry;
+            phase_time = 0.0f;
             blink = 1.0f;
+            blink_vel = 0.0f;
         } else {
-            const float u = std::clamp(phase_time / BlinkGazeStabilizer::kClosingDurS, 0.0f, 1.0f);
-            blink = std::clamp(start_blink + (1.0f - start_blink) * (u * u * u), 0.0f, 1.0f);
             return;
         }
     }
 
     if (phase == BlinkPhase::ClosedHold) {
         blink = 1.0f;
+        blink_vel = 0.0f;
         if (phase_time >= BlinkGazeStabilizer::kClosedHoldDurS && open_raw >= 0.45f) {
-            const float carry = phase_time - BlinkGazeStabilizer::kClosedHoldDurS;
             phase = BlinkPhase::Opening;
-            phase_time = carry;
+            phase_time = 0.0f;
         } else {
             return;
         }
     }
 
     if (phase == BlinkPhase::Opening) {
-        if (phase_time >= BlinkGazeStabilizer::kOpeningDurS) {
+        // Dual-stiffness opening spring (55 ms) with soft cushion over the final 15% of lid recovery
+        const float tail = std::clamp((0.15f - blink) / 0.15f, 0.0f, 1.0f);
+        const float tau_open = BlinkGazeStabilizer::kOpeningSpringTauS * (1.0f + 0.20f * tail);
+        blink = std::clamp(smooth_damp_c2(blink, 0.0f, blink_vel, tau_open, safe_dt), 0.0f, 1.0f);
+        if (blink <= 0.006f && phase_time >= BlinkGazeStabilizer::kOpeningDurS) {
             phase = BlinkPhase::Open;
             phase_time = 0.0f;
             blink = 0.0f;
-        } else {
-            // Smooth cubic ease-out openness: 1 - (1 - t)^3 -> blink = (1 - t)^3
-            const float u = std::clamp(phase_time / BlinkGazeStabilizer::kOpeningDurS, 0.0f, 1.0f);
-            const float inv = 1.0f - u;
-            blink = std::clamp(inv * inv * inv, 0.0f, 1.0f);
+            blink_vel = 0.0f;
         }
     }
 }
@@ -158,8 +184,14 @@ void BlinkGazeStabilizer::reset() noexcept {
     wink_hold_s_ = 0.0f;
     gaze_x_ = 0.0f;
     gaze_y_ = 0.0f;
+    gaze_vel_x_ = 0.0f;
+    gaze_vel_y_ = 0.0f;
     gaze_anchor_x_ = 0.0f;
     gaze_anchor_y_ = 0.0f;
+    squint_l_ = 0.0f;
+    squint_r_ = 0.0f;
+    cheek_l_ = 0.0f;
+    cheek_r_ = 0.0f;
     gaze_saccade_active_ = false;
     has_prev_yaw_ = false;
     prev_yaw_rad_ = 0.0f;
@@ -175,8 +207,14 @@ BlinkGazeOutput BlinkGazeStabilizer::update(const BlinkGazeInput& in) noexcept {
         wink_hold_s_ = 0.0f;
         gaze_x_ = 0.0f;
         gaze_y_ = 0.0f;
+        gaze_vel_x_ = 0.0f;
+        gaze_vel_y_ = 0.0f;
         gaze_anchor_x_ = 0.0f;
         gaze_anchor_y_ = 0.0f;
+        squint_l_ = 0.0f;
+        squint_r_ = 0.0f;
+        cheek_l_ = 0.0f;
+        cheek_r_ = 0.0f;
         gaze_saccade_active_ = false;
         has_prev_yaw_ = false;
         return out;
@@ -213,19 +251,21 @@ BlinkGazeOutput BlinkGazeStabilizer::update(const BlinkGazeInput& in) noexcept {
     ch_r_.step(open_r, safe_dt);
     ch_sync_.step(synced_open, safe_dt);
 
+    float raw_blink_l = 0.0f;
+    float raw_blink_r = 0.0f;
     if (deliberate_wink) {
-        out.blink_left = ch_l_.blink;
-        out.blink_right = ch_r_.blink;
+        raw_blink_l = ch_l_.blink;
+        raw_blink_r = ch_r_.blink;
         out.phase_left = ch_l_.phase;
         out.phase_right = ch_r_.phase;
     } else {
-        out.blink_left = ch_sync_.blink;
-        out.blink_right = ch_sync_.blink;
+        raw_blink_l = ch_sync_.blink;
+        raw_blink_r = ch_sync_.blink;
         out.phase_left = ch_sync_.phase;
         out.phase_right = ch_sync_.phase;
     }
 
-    // Saccadic Iris Gaze Filter: deadband 0.035, smooth saccade steps with head turns, recenter during blinks
+    // Pursuit & Saccadic Iris Gaze Filter: 0.020 deadband + 32 ms C2 spring, recenter during blinks
     const float raw_gx = head_turned ? ((in.head_yaw_rad >= 0.0f) ? in.gaze_gx_right : in.gaze_gx_left)
                                      : (0.5f * (in.gaze_gx_left + in.gaze_gx_right));
     const float raw_gy = head_turned ? ((in.head_yaw_rad >= 0.0f) ? in.gaze_gy_right : in.gaze_gy_left)
@@ -237,12 +277,10 @@ BlinkGazeOutput BlinkGazeStabilizer::update(const BlinkGazeInput& in) noexcept {
     prev_yaw_rad_ = in.head_yaw_rad;
     has_prev_yaw_ = true;
 
-    const float blink_max = std::max(out.blink_left, out.blink_right);
+    const float blink_max = std::max(raw_blink_l, raw_blink_r);
     if (blink_max > 0.5f) {
-        // Recenter eyeballs cleanly behind closed eyelids
-        const float recenter_a = 1.0f - std::exp(-safe_dt / 0.040f);
-        gaze_x_ += (0.0f - gaze_x_) * recenter_a;
-        gaze_y_ += (0.0f - gaze_y_) * recenter_a;
+        gaze_x_ = smooth_damp_c2(gaze_x_, 0.0f, gaze_vel_x_, 0.045f, safe_dt);
+        gaze_y_ = smooth_damp_c2(gaze_y_, 0.0f, gaze_vel_y_, 0.045f, safe_dt);
         gaze_anchor_x_ = gaze_x_;
         gaze_anchor_y_ = gaze_y_;
         gaze_saccade_active_ = false;
@@ -252,14 +290,16 @@ BlinkGazeOutput BlinkGazeStabilizer::update(const BlinkGazeInput& in) noexcept {
             gaze_saccade_active_ = true;
         }
         if (gaze_saccade_active_) {
-            const float sac_a = 1.0f - std::exp(-safe_dt / 0.025f);
-            gaze_x_ += (clamped_gx - gaze_x_) * sac_a;
-            gaze_y_ += (clamped_gy - gaze_y_) * sac_a;
+            gaze_x_ = smooth_damp_c2(gaze_x_, clamped_gx, gaze_vel_x_, kGazeSpringTauS, safe_dt);
+            gaze_y_ = smooth_damp_c2(gaze_y_, clamped_gy, gaze_vel_y_, kGazeSpringTauS, safe_dt);
             gaze_anchor_x_ = gaze_x_;
             gaze_anchor_y_ = gaze_y_;
-            if (std::hypot(clamped_gx - gaze_x_, clamped_gy - gaze_y_) <= 0.012f) {
+            if (std::hypot(clamped_gx - gaze_x_, clamped_gy - gaze_y_) <= 0.008f &&
+                std::hypot(gaze_vel_x_, gaze_vel_y_) < 0.08f) {
                 gaze_x_ = clamped_gx;
                 gaze_y_ = clamped_gy;
+                gaze_vel_x_ = 0.0f;
+                gaze_vel_y_ = 0.0f;
                 gaze_anchor_x_ = gaze_x_;
                 gaze_anchor_y_ = gaze_y_;
                 gaze_saccade_active_ = false;
@@ -267,11 +307,36 @@ BlinkGazeOutput BlinkGazeStabilizer::update(const BlinkGazeInput& in) noexcept {
         } else {
             gaze_x_ = gaze_anchor_x_;
             gaze_y_ = gaze_anchor_y_;
+            gaze_vel_x_ = 0.0f;
+            gaze_vel_y_ = 0.0f;
         }
     }
 
     out.gaze_gx = gaze_x_;
     out.gaze_gy = gaze_y_;
+
+    // Live2D Eyelid-Follows-Gaze (-22% EyeOpen on down gaze, +12% eyeWide/brow lift hint on up gaze)
+    const float down_gaze = std::max(0.0f, out.gaze_gy);
+    const float up_gaze = std::max(0.0f, -out.gaze_gy);
+    out.blink_left = std::clamp(raw_blink_l + kGazeDownLidFollow * down_gaze * (1.0f - raw_blink_l), 0.0f, 1.0f);
+    out.blink_right = std::clamp(raw_blink_r + kGazeDownLidFollow * down_gaze * (1.0f - raw_blink_r), 0.0f, 1.0f);
+    out.brow_lift_from_gaze = kGazeUpLidFollow * up_gaze * (1.0f - blink_max);
+
+    // Separated EyeSquint & CheekRaise smoothing independent of binary/ballistic EyeOpen blinks
+    const auto filter_sq = [](float val) noexcept -> float {
+        const float c = std::clamp(std::isfinite(val) ? val : 0.0f, 0.0f, 1.0f);
+        return (c < 0.03f) ? 0.0f : c;
+    };
+    const float a_sq = 1.0f - std::exp(-safe_dt / 0.045f);
+    const float a_chk = 1.0f - std::exp(-safe_dt / 0.055f);
+    squint_l_ += (filter_sq(in.raw_squint_left) * (1.0f - 0.50f * raw_blink_l) - squint_l_) * a_sq;
+    squint_r_ += (filter_sq(in.raw_squint_right) * (1.0f - 0.50f * raw_blink_r) - squint_r_) * a_sq;
+    cheek_l_ += (std::clamp(in.raw_cheek_squint_left, 0.0f, 1.0f) - cheek_l_) * a_chk;
+    cheek_r_ += (std::clamp(in.raw_cheek_squint_right, 0.0f, 1.0f) - cheek_r_) * a_chk;
+    out.eye_squint_left = std::clamp(squint_l_, 0.0f, 1.0f);
+    out.eye_squint_right = std::clamp(squint_r_, 0.0f, 1.0f);
+    out.cheek_raise_left = std::clamp(cheek_l_, 0.0f, 1.0f);
+    out.cheek_raise_right = std::clamp(cheek_r_, 0.0f, 1.0f);
     return out;
 }
 

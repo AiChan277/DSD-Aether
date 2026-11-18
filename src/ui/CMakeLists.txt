@@ -15,6 +15,8 @@ add_library(aether_ui STATIC
     panels/outliner/outliner_panel.hpp
     panels/telemetry/telemetry_bar.cpp
     panels/telemetry/telemetry_bar.hpp
+    panels/viewport/camera_presets.cpp
+    panels/viewport/camera_presets.hpp
     panels/viewport/viewport_panel.cpp
     panels/viewport/viewport_panel.hpp
     params/param_registry.cpp

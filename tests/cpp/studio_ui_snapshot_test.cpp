@@ -213,11 +213,14 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         }
         for (uint32_t i = 0; i < 5U; ++i) {
             const float t = static_cast<float>(i) / 4.0f;
-            rig.tracking.live_preview_keypoints[17U + i] = {0.39f + t * 0.08f,
-                                                            0.35f - 0.025f * std::sin(t * 3.14159265f)};
-            rig.tracking.live_preview_keypoints[22U + i] = {0.53f + t * 0.08f,
-                                                            0.35f - 0.025f * std::sin(t * 3.14159265f)};
+            const std::array<float, 2> lb = {0.39f + t * 0.08f, 0.35f - 0.025f * std::sin(t * 3.14159265f)};
+            const std::array<float, 2> rb = {0.53f + t * 0.08f, 0.35f - 0.025f * std::sin(t * 3.14159265f)};
+            rig.tracking.live_preview_keypoints[17U + i] = lb;
+            rig.tracking.live_preview_keypoints[22U + i] = rb;
+            rig.tracking.live_preview_left_brow_pts[i] = lb;
+            rig.tracking.live_preview_right_brow_pts[i] = rb;
         }
+        rig.tracking.live_preview_brow_pts_valid = true;
         for (uint32_t i = 0; i < 4U; ++i) {
             rig.tracking.live_preview_keypoints[27U + i] = {0.50f, 0.39f + 0.04f * static_cast<float>(i)};
         }
@@ -233,9 +236,16 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
             rig.tracking.live_preview_keypoints[42U + i] = {0.57f + 0.032f * std::cos(a),
                                                             0.41f + 0.018f * std::sin(a)};
         }
+        for (uint32_t i = 0; i < 8U; ++i) {
+            const float a = static_cast<float>(i) * 6.2831853f / 8.0f;
+            rig.tracking.live_preview_left_eye_poly[i] = {0.43f + 0.032f * std::cos(a), 0.41f + 0.016f * std::sin(a)};
+            rig.tracking.live_preview_right_eye_poly[i] = {0.57f + 0.032f * std::cos(a), 0.41f + 0.016f * std::sin(a)};
+        }
+        rig.tracking.live_preview_eye_poly_valid = true;
         rig.tracking.live_preview_iris_valid = true;
         rig.tracking.live_preview_iris_centers[0] = {0.43f, 0.41f};
         rig.tracking.live_preview_iris_centers[1] = {0.57f, 0.41f};
+        rig.tracking.live_preview_gaze_vec = {0.14f, -0.04f};
         for (uint32_t i = 0; i < 12U; ++i) {
             const float a = static_cast<float>(i) * 6.2831853f / 12.0f;
             rig.tracking.live_preview_keypoints[48U + i] = {0.50f + 0.055f * std::cos(a),

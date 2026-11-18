@@ -1,6 +1,7 @@
 #include "app/application.hpp"
 
 #include "aether_ffi_contract.h"
+#include "animation/math_quat.hpp"
 #include "app/input_events.hpp"
 #include "app/pipeline_skeleton.hpp"
 #include "core/clock.hpp"
@@ -22,6 +23,7 @@
 #include "rhi/rhi_device.hpp"
 #include "rhi/rhi_swapchain.hpp"
 #include "ui/dev_shell.hpp"
+#include "ui/panels/viewport/camera_presets.hpp"
 #include "ui/params/project_settings.hpp"
 #include "ui/theme/precision_dark.hpp"
 #include "ui/theme/tokens.hpp"
@@ -347,6 +349,42 @@ animation::RestSkeletonMetrics build_rest_metrics_from_avatar(const renderer::Gp
         avatar.desc, avatar.joints.data(), avatar.joints.size(), avatar.joint_rest_world_pos.data(),
         avatar.joint_rest_world_pos.size(), avatar.colliders.data(), avatar.colliders.size(), avatar.springs.data(),
         avatar.springs.size(), avatar.has_split_brow_morphs);
+}
+
+struct AvatarBoneHeights {
+    float hips_y{0.85f};
+    float chest_y{1.20f};
+    float head_y{1.46f};
+};
+
+AvatarBoneHeights extract_avatar_bone_heights(const renderer::GpuAvatar& avatar) noexcept {
+    const float min_y = avatar.desc.aabb_min[1];
+    const float max_y = avatar.desc.aabb_max[1];
+    const float span_h = std::max(0.40f, max_y - min_y);
+    auto lookup_y = [&](uint16_t bone_id, float& out_y) noexcept -> bool {
+        if (bone_id >= AETHER_HUMANOID_BONE_COUNT) {
+            return false;
+        }
+        const uint16_t j = avatar.desc.humanoid_to_joint[bone_id];
+        if (j < avatar.joint_rest_world_pos.size()) {
+            out_y = avatar.joint_rest_world_pos[j][1];
+            return std::isfinite(out_y);
+        }
+        return false;
+    };
+
+    AvatarBoneHeights bh{};
+    if (!lookup_y(AETHER_BONE_HIPS, bh.hips_y)) {
+        bh.hips_y = min_y + span_h * 0.52f;
+    }
+    if (!lookup_y(AETHER_BONE_CHEST, bh.chest_y) && !lookup_y(AETHER_BONE_UPPER_CHEST, bh.chest_y) &&
+        !lookup_y(AETHER_BONE_SPINE, bh.chest_y)) {
+        bh.chest_y = min_y + span_h * 0.72f;
+    }
+    if (!lookup_y(AETHER_BONE_HEAD, bh.head_y) && !lookup_y(AETHER_BONE_NECK, bh.head_y)) {
+        bh.head_y = min_y + span_h * 0.88f;
+    }
+    return bh;
 }
 
 void pump_t3_inputs(WindowSharedState& shared, ui::DevShellInputEcho& echo, ImGuiIO& io) noexcept {
@@ -944,6 +982,9 @@ int run_application(const AppLaunchOptions& opts) {
         CrashHandler::shutdown();
         return 6;
     }
+    if (opts.smoke_frames == 0 && boot_params.get_bool(ui::ParamId::TrackingHandEnabled)) {
+        pipeline->set_hand_tracking_enabled(true);
+    }
 
     auto native_mgr = std::make_unique<native_plugin::NativePluginManager>();
     AsyncFileDialogJob dialog_job{};
@@ -1175,6 +1216,12 @@ int run_application(const AppLaunchOptions& opts) {
         std::unique_ptr<renderer::GpuAvatar> current_avatar;
         std::string last_loaded_avatar_path = opts.avatar_path;
         renderer::PreviewCamera camera{};
+        renderer::CameraTransitionState cam_transition_{};
+        AvatarBoneHeights avatar_bone_heights{};
+        std::array<float, 3> cur_render_avatar_pos{0.0f, 0.0f, 0.0f};
+        float cur_render_avatar_rot_y_deg{0.0f};
+        float cur_render_avatar_scale{1.0f};
+        uint64_t prev_loop_begin_us = 0ULL;
 
         // Engine garbage collector (ADR-0015/0016): GPU objects replaced while frames are in flight are retired
         // against the frame timeline and destroyed only after the GPU has passed that epoch.
@@ -1300,6 +1347,7 @@ int run_application(const AppLaunchOptions& opts) {
         };
 
         auto recreate_vulkan_stack = [&](bool is_device_lost, const char* toast_title, const char* toast_msg) -> bool {
+            const bool prev_hand_en = pipeline->hand_tracking_enabled();
             if (!is_device_lost) {
                 pipe_cfg.use_synthetic_camera = track_hud.using_synthetic_camera;
                 pipe_cfg.camera_active = track_hud.camera_active;
@@ -1366,6 +1414,9 @@ int run_application(const AppLaunchOptions& opts) {
                 AETHER_LOG_FATAL("rhi", "Pipeline restart after GPU recreate failed");
                 return false;
             }
+            if (prev_hand_en) {
+                pipeline->set_hand_tracking_enabled(true);
+            }
             RECT cr{};
             ::GetClientRect(hwnd, &cr);
             const uint32_t sw_w = static_cast<uint32_t>(std::max<LONG>(cr.right - cr.left, 64));
@@ -1425,6 +1476,11 @@ int run_application(const AppLaunchOptions& opts) {
         while (!shared.quit_requested.load(std::memory_order_acquire)) {
             const uint64_t loop_begin_us = now_us();
             const double frame_now_s = static_cast<double>(loop_begin_us) * 1e-6;
+            const float frame_dt_s =
+                (prev_loop_begin_us != 0ULL && loop_begin_us > prev_loop_begin_us)
+                    ? std::clamp(static_cast<float>(loop_begin_us - prev_loop_begin_us) * 1e-6f, 1e-4f, 0.05f)
+                    : (1.0f / 60.0f);
+            prev_loop_begin_us = loop_begin_us;
 
             // Rebuild fonts/style cleanly BETWEEN frames when DPI or UI Scale changed (`WM_DPICHANGED` / Preferences).
             if (shared.dpi_changed_pending.exchange(false, std::memory_order_acq_rel) ||
@@ -1777,7 +1833,9 @@ int run_application(const AppLaunchOptions& opts) {
                     dx11_bridge.bind_avatar(current_avatar.get());
                     (void)configure_dx11_for_avatar();
                     baked_face_sdf_applied = false;
+                    avatar_bone_heights = extract_avatar_bone_heights(*current_avatar);
                     camera = renderer::fit_camera_to_avatar(*current_avatar);
+                    cam_transition_.cancel();
                     pipeline->push_rest_skeleton(build_rest_metrics_from_avatar(*current_avatar));
                     push_avatar_scene_items_to_ui(*current_avatar, shell.workspace());
                     shell.workspace().push_toast(ui::ToastSeverity::Success, "Avatar Loaded",
@@ -1831,6 +1889,10 @@ int run_application(const AppLaunchOptions& opts) {
                 pipeline->set_audio_lipsync_params(vp_actions.audio_assist_enabled, vp_actions.mic_gain,
                                                    vp_actions.mic_noise_gate_db);
                 vp_actions.audio_lipsync_dirty = false;
+            }
+            if (vp_actions.request_set_hand_tracking) {
+                pipeline->set_hand_tracking_enabled(vp_actions.target_hand_tracking_enabled);
+                vp_actions.request_set_hand_tracking = false;
             }
             if (vp_actions.request_ep_override != -99) {
                 pipeline->send_tracking_command({TrackingCmdKind::SetEpOverride, vp_actions.request_ep_override});
@@ -1889,9 +1951,80 @@ int run_application(const AppLaunchOptions& opts) {
                     }
                 }
             }
+            const bool has_manual_cam_input = (vp_actions.orbit_yaw_delta != 0.0f) ||
+                                              (vp_actions.orbit_pitch_delta != 0.0f) ||
+                                              (vp_actions.zoom_delta != 0.0f) || (vp_actions.pan_dx != 0.0f) ||
+                                              (vp_actions.pan_dy != 0.0f) || (vp_actions.request_focal_mm > 0.0f);
             if (vp_actions.reset_camera && current_avatar != nullptr) {
-                camera = renderer::fit_camera_to_avatar(*current_avatar);
+                renderer::PreviewCamera goal = renderer::fit_camera_to_avatar(*current_avatar);
+                if (vp_actions.request_focal_mm > 0.0f) {
+                    const float new_fovy =
+                        2.0f * std::atan(12.0f / std::max(8.0f, vp_actions.request_focal_mm));
+                    goal.distance = std::clamp(
+                        goal.distance * std::tan(goal.fovy_rad * 0.5f) / std::tan(new_fovy * 0.5f), 0.25f, 60.0f);
+                    goal.fovy_rad = new_fovy;
+                    vp_actions.request_focal_mm = 0.0f;
+                }
+                if (vp_actions.camera_transition_speed_s > 1e-4f && opts.smoke_frames == 0U) {
+                    cam_transition_.start(camera, goal, vp_actions.camera_transition_speed_s);
+                } else {
+                    camera = goal;
+                    cam_transition_.cancel();
+                }
                 vp_actions.reset_camera = false;
+                vp_actions.request_apply_camera_preset = false;
+            } else if (vp_actions.request_apply_camera_preset) {
+                vp_actions.request_apply_camera_preset = false;
+                renderer::PreviewCamera goal = camera;
+                goal.target_x = vp_actions.target_cam_x;
+                goal.target_y = vp_actions.target_cam_y;
+                goal.target_z = vp_actions.target_cam_z;
+                goal.yaw_rad = vp_actions.target_cam_yaw_rad;
+                goal.pitch_rad = std::clamp(vp_actions.target_cam_pitch_rad, -1.45f, 1.45f);
+                goal.distance = std::clamp(vp_actions.target_cam_distance, 0.25f, 60.0f);
+                goal.fovy_rad = std::clamp(vp_actions.target_cam_fovy_rad, 0.05f, 1.50f);
+                if (vp_actions.request_builtin_preset >= 0 && current_avatar != nullptr) {
+                    const float vp_aspect =
+                        (vp_actions.desired_vp_h > 0U)
+                            ? (static_cast<float>(vp_actions.desired_vp_w) /
+                               static_cast<float>(vp_actions.desired_vp_h))
+                            : (16.0f / 9.0f);
+                    const ui::CameraFramingPreset p = ui::compute_builtin_framing_preset(
+                        vp_actions.request_builtin_preset, avatar_bone_heights.hips_y,
+                        avatar_bone_heights.chest_y, avatar_bone_heights.head_y, vp_actions.avatar_pos,
+                        vp_actions.avatar_scale, vp_aspect);
+                    goal.target_x = p.target_x;
+                    goal.target_y = p.target_y;
+                    goal.target_z = p.target_z;
+                    goal.yaw_rad = p.yaw_rad;
+                    goal.pitch_rad = p.pitch_rad;
+                    goal.distance = p.distance;
+                    goal.fovy_rad = p.fovy_rad;
+                }
+                vp_actions.request_builtin_preset = -1;
+                if (vp_actions.camera_transition_speed_s > 1e-4f && opts.smoke_frames == 0U) {
+                    if (vp_actions.target_preset_has_avatar_xform) {
+                        cam_transition_.start_with_avatar(
+                            camera, goal, cur_render_avatar_pos, cur_render_avatar_rot_y_deg,
+                            cur_render_avatar_scale, vp_actions.target_preset_avatar_pos,
+                            vp_actions.target_preset_avatar_rot_y_deg, vp_actions.target_preset_avatar_scale,
+                            vp_actions.camera_transition_speed_s);
+                    } else {
+                        cam_transition_.start(camera, goal, vp_actions.camera_transition_speed_s);
+                    }
+                } else {
+                    camera = goal;
+                    if (vp_actions.target_preset_has_avatar_xform) {
+                        cur_render_avatar_pos = vp_actions.target_preset_avatar_pos;
+                        cur_render_avatar_rot_y_deg = vp_actions.target_preset_avatar_rot_y_deg;
+                        cur_render_avatar_scale = vp_actions.target_preset_avatar_scale;
+                    }
+                    cam_transition_.cancel();
+                }
+                vp_actions.target_preset_has_avatar_xform = false;
+            }
+            if (has_manual_cam_input) {
+                cam_transition_.cancel();
             }
             if (vp_actions.request_focal_mm > 0.0f) {
                 // Focal length on a 24 mm-high sensor; dolly to keep the subject's framed size constant.
@@ -1907,6 +2040,14 @@ int run_application(const AppLaunchOptions& opts) {
             camera.target_x += vp_actions.pan_dx * camera.distance * std::cos(camera.yaw_rad);
             camera.target_z -= vp_actions.pan_dx * camera.distance * std::sin(camera.yaw_rad);
             camera.target_y += vp_actions.pan_dy * camera.distance;
+            if (cam_transition_.active) {
+                (void)cam_transition_.step(frame_dt_s, camera, &cur_render_avatar_pos, &cur_render_avatar_rot_y_deg,
+                                           &cur_render_avatar_scale);
+            } else {
+                cur_render_avatar_pos = vp_actions.avatar_pos;
+                cur_render_avatar_rot_y_deg = vp_actions.avatar_rot_y_deg;
+                cur_render_avatar_scale = vp_actions.avatar_scale;
+            }
             vp_actions.orbit_yaw_delta = 0.0f;
             vp_actions.orbit_pitch_delta = 0.0f;
             vp_actions.pan_dx = 0.0f;
@@ -2183,9 +2324,10 @@ int run_application(const AppLaunchOptions& opts) {
             render_req.show_orbit_orb = vp_actions.show_orbit_orb;
             render_req.render_csm_shadow = true;
             render_req.outline_width_scale = npr_renderer.lighting().outline_width_scale;
-            render_req.avatar_pos = vp_actions.avatar_pos;
-            render_req.avatar_rot_y_deg = vp_actions.avatar_rot_y_deg;
-            render_req.avatar_scale = vp_actions.avatar_scale;
+            render_req.avatar_pos = cur_render_avatar_pos;
+            render_req.avatar_rot_y_deg = cur_render_avatar_rot_y_deg;
+            render_req.avatar_scale = cur_render_avatar_scale;
+            render_req.viewport_aspect_mode = vp_actions.viewport_aspect_mode;
             if (skin_snap.frame_sequence != 0ULL) {
                 render_req.spring_colliders = skin_snap.spring_colliders.data();
                 render_req.spring_collider_count = skin_snap.spring_collider_count;
@@ -2239,7 +2381,15 @@ int run_application(const AppLaunchOptions& opts) {
                 };
                 avatar_view.camera_target = {camera.target_x, camera.target_y, camera.target_z};
                 avatar_view.camera_fovy_rad = camera.fovy_rad;
+                avatar_view.camera_yaw_rad = camera.yaw_rad;
+                avatar_view.camera_pitch_rad = camera.pitch_rad;
+                avatar_view.camera_distance = camera.distance;
                 avatar_view.has_camera = true;
+                avatar_view.bone_hips_y = avatar_bone_heights.hips_y;
+                avatar_view.bone_chest_y = avatar_bone_heights.chest_y;
+                avatar_view.bone_head_y = avatar_bone_heights.head_y;
+                avatar_view.broadcast_width = active_out_cfg.width;
+                avatar_view.broadcast_height = active_out_cfg.height;
                 if (current_avatar != nullptr) {
                     const float min_y = current_avatar->desc.aabb_min[1];
                     const float max_y = current_avatar->desc.aabb_max[1];
@@ -2409,6 +2559,7 @@ int run_application(const AppLaunchOptions& opts) {
                     tracking_view.audio_device_id = track_hud.audio_device_id;
                     tracking_view.neutral_calibrated = track_hud.neutral_calibrated;
                     tracking_view.stable_lock_frames = track_hud.stable_lock_frames;
+                    tracking_view.hand_tracking_enabled = track_hud.hand_tracking_enabled;
                     tracking_view.head_euler_deg = {track_hud.head_euler_deg[0], track_hud.head_euler_deg[1],
                                                     track_hud.head_euler_deg[2]};
                     if (track_hud.camera_active && !track_hud.using_synthetic_camera && preview_img_initialized &&
@@ -2437,12 +2588,48 @@ int run_application(const AppLaunchOptions& opts) {
                             tracking_view.live_preview_iris_centers[1] = {ov.iris_centers_norm[2],
                                                                           ov.iris_centers_norm[3]};
                         }
+                        tracking_view.live_preview_eye_poly_valid = ov.eye_poly_valid;
+                        if (ov.eye_poly_valid) {
+                            for (size_t e = 0; e < 8U; ++e) {
+                                tracking_view.live_preview_left_eye_poly[e] = {ov.left_eye_poly_norm[e * 2U + 0U],
+                                                                               ov.left_eye_poly_norm[e * 2U + 1U]};
+                                tracking_view.live_preview_right_eye_poly[e] = {ov.right_eye_poly_norm[e * 2U + 0U],
+                                                                                ov.right_eye_poly_norm[e * 2U + 1U]};
+                            }
+                        }
+                        tracking_view.live_preview_brow_pts_valid = ov.brow_pts_valid;
+                        if (ov.brow_pts_valid) {
+                            for (size_t b = 0; b < 5U; ++b) {
+                                tracking_view.live_preview_left_brow_pts[b] = {ov.left_brow_pts_norm[b * 2U + 0U],
+                                                                               ov.left_brow_pts_norm[b * 2U + 1U]};
+                                tracking_view.live_preview_right_brow_pts[b] = {ov.right_brow_pts_norm[b * 2U + 0U],
+                                                                                ov.right_brow_pts_norm[b * 2U + 1U]};
+                            }
+                        }
+                        tracking_view.live_preview_gaze_vec = ov.gaze_vec;
                         tracking_view.live_preview_axes_valid = ov.head_axes_valid;
                         if (ov.head_axes_valid) {
                             for (size_t a = 0; a < 4U; ++a) {
                                 tracking_view.live_preview_head_axes[a] = {ov.head_axes_norm[a * 2U + 0U],
                                                                            ov.head_axes_norm[a * 2U + 1U]};
                             }
+                        }
+                        tracking_view.hand_tracking_enabled = ov.hand_tracking_enabled || track_hud.hand_tracking_enabled;
+                        tracking_view.left_hand_detected = ov.left_hand_detected;
+                        tracking_view.right_hand_detected = ov.right_hand_detected;
+                        tracking_view.left_hand_bbox_obb = ov.left_hand_bbox_obb;
+                        tracking_view.left_hand_angle_rad = ov.left_hand_angle_rad;
+                        tracking_view.left_palm_center = ov.left_palm_center_norm;
+                        tracking_view.left_palm_normal_2d = ov.left_palm_normal_2d;
+                        tracking_view.right_hand_bbox_obb = ov.right_hand_bbox_obb;
+                        tracking_view.right_hand_angle_rad = ov.right_hand_angle_rad;
+                        tracking_view.right_palm_center = ov.right_palm_center_norm;
+                        tracking_view.right_palm_normal_2d = ov.right_palm_normal_2d;
+                        for (size_t h = 0; h < 21U; ++h) {
+                            tracking_view.left_hand_keypoints[h] = {ov.left_hand_keypoints_norm[h * 2U + 0U],
+                                                                    ov.left_hand_keypoints_norm[h * 2U + 1U]};
+                            tracking_view.right_hand_keypoints[h] = {ov.right_hand_keypoints_norm[h * 2U + 0U],
+                                                                     ov.right_hand_keypoints_norm[h * 2U + 1U]};
                         }
                         tracking_view.neutral_calibrated = ov.neutral_calibrated;
                         tracking_view.stable_lock_frames = ov.stable_lock_frames;

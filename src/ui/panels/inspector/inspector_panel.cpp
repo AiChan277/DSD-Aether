@@ -1,6 +1,8 @@
 #include "ui/panels/inspector/inspector_panel.hpp"
 
 #include "ui/modals/graphics_settings_modal.hpp"
+#include "ui/panels/viewport/camera_presets.hpp"
+#include "ui/panels/viewport/viewport_panel.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/theme/tr.hpp"
@@ -56,7 +58,7 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                           const StudioHostStatus& host_status, std::span<const LoadedPluginVm> plugins,
                           const UiSelection& selection, ParamStore& params, UndoStack& undo, AppSettings& settings,
                           bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions,
-                          StudioActions& actions) {
+                          StudioActions& actions, ViewportPanel* viewport_for_presets) {
     const PrecisionDarkTokens& t = tokens();
     const bool focus_output = focus_output_pending_;
     if (focus_output) {
@@ -123,6 +125,101 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 ImGui::EndDisabled();
                 if (render_view.baked_face_sdf_applied) {
                     draw_status_badge(fonts, icons::kDomainSdf, tr("Baked UV Face SDF active"), t.status_ok);
+                }
+            }
+            ImGui::Spacing();
+        }
+
+        // Camera & Framing Presets (Tasks 1 & 3)
+        const bool expand_camera = (selection.kind == SelectionKind::Camera);
+        if (section_header(tr("Camera & Framing"), expand_camera, false)) {
+            if (begin_property_table("##camera_framing")) {
+                if (draw_property_row(ParamId::AppViewportAspect, params, undo, fonts, row_actions) ||
+                    draw_property_row(ParamId::AppCameraTransitionSpeed, params, undo, fonts, row_actions)) {
+                    settings_dirty = true;
+                }
+                end_property_table();
+            }
+            if (viewport_for_presets != nullptr) {
+                ImGui::Spacing();
+                const float avail_w = std::max(120.0f, ImGui::GetContentRegionAvail().x);
+                const float spacing_x = ImGui::GetStyle().ItemSpacing.x;
+                const float half_w = std::floor((avail_w - spacing_x) * 0.5f);
+                const int32_t active_bi = viewport_for_presets->active_builtin_preset();
+                for (int32_t i = 0; i < static_cast<int32_t>(kBuiltinFramingPresetCount); ++i) {
+                    const bool is_active = (active_bi == i);
+                    if (is_active) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, t.accent_button);
+                        ImGui::PushStyleColor(ImGuiCol_Text, t.text_on_accent);
+                    }
+                    char btn_lbl[48]{};
+                    std::snprintf(btn_lbl, sizeof(btn_lbl), "%s##cam_bi_%d", builtin_framing_preset_shortcut(i), i);
+                    if (ImGui::Button(btn_lbl, ImVec2(half_w, 0.0f))) {
+                        viewport_for_presets->apply_builtin_preset(i, avatar, params, actions);
+                    }
+                    if (is_active) {
+                        ImGui::PopStyleColor(2);
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                        ImGui::SetTooltip("%s (%s)", builtin_framing_preset_name(i),
+                                          builtin_framing_preset_shortcut(i));
+                    }
+                    if ((i % 2) == 0 && i + 1 < static_cast<int32_t>(kBuiltinFramingPresetCount)) {
+                        ImGui::SameLine();
+                    }
+                }
+                ImGui::Spacing();
+                if (ImGui::Button(tr("Reset Camera"), ImVec2(half_w, 0.0f))) {
+                    viewport_for_presets->reset_camera(actions);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button(tr("+ Save Preset"), ImVec2(half_w, 0.0f))) {
+                    viewport_for_presets->open_save_preset_modal();
+                }
+
+                const auto& customs = viewport_for_presets->preset_bank().custom_presets();
+                if (!customs.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextColored(t.text_secondary, "%s", tr("Custom Presets"));
+                    const float btn_save_w = ImGui::CalcTextSize("Save").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    const float btn_del_w = ImGui::CalcTextSize("x").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                    const float name_w = std::max(60.0f, avail_w - btn_save_w - btn_del_w - spacing_x * 2.0f);
+                    for (size_t i = 0; i < customs.size(); ++i) {
+                        const auto& cp = customs[i];
+                        const bool is_cur = (viewport_for_presets->active_preset_name() == cp.name && active_bi < 0);
+                        char apply_lbl[80]{};
+                        std::snprintf(apply_lbl, sizeof(apply_lbl), "%s##cp_apply_%zu", cp.name.c_str(), i);
+                        if (is_cur) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, t.accent_button);
+                            ImGui::PushStyleColor(ImGuiCol_Text, t.text_on_accent);
+                        }
+                        if (ImGui::Button(apply_lbl, ImVec2(name_w, 0.0f))) {
+                            viewport_for_presets->apply_custom_preset(i, params, undo, actions);
+                        }
+                        if (is_cur) {
+                            ImGui::PopStyleColor(2);
+                        }
+                        ImGui::SameLine();
+                        char save_lbl[32]{};
+                        std::snprintf(save_lbl, sizeof(save_lbl), "Save##cp_save_%zu", i);
+                        if (ImGui::Button(save_lbl, ImVec2(btn_save_w, 0.0f))) {
+                            viewport_for_presets->save_custom_preset_from_current(cp.name, avatar, params);
+                            break;
+                        }
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                            ImGui::SetTooltip("%s", tr("Overwrite this preset with current camera & AvatarRoot"));
+                        }
+                        ImGui::SameLine();
+                        char del_lbl[32]{};
+                        std::snprintf(del_lbl, sizeof(del_lbl), "x##cp_del_%zu", i);
+                        if (ImGui::Button(del_lbl, ImVec2(btn_del_w, 0.0f))) {
+                            viewport_for_presets->preset_bank().remove_at(i, viewport_for_presets->persist_presets());
+                            break;
+                        }
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                            ImGui::SetTooltip("%s", tr("Delete custom preset"));
+                        }
+                    }
                 }
             }
             ImGui::Spacing();
@@ -223,6 +320,11 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 }
                 draw_property_row(ParamId::TrackingAntiFlicker, params, undo, fonts, row_actions);
                 draw_property_row(ParamId::TrackingExposureLock, params, undo, fonts, row_actions);
+                if (draw_property_row(ParamId::TrackingHandEnabled, params, undo, fonts, row_actions)) {
+                    actions.viewport.request_set_hand_tracking = true;
+                    actions.viewport.target_hand_tracking_enabled = params.get_bool(ParamId::TrackingHandEnabled);
+                    settings_dirty = true;
+                }
                 if (draw_property_row(ParamId::TrackingAudioAssist, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::TrackingMicGain, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::TrackingMicNoiseGate, params, undo, fonts, row_actions)) {

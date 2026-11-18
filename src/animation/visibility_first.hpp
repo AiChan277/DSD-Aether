@@ -108,8 +108,19 @@ class VisibilityFirstSolver {
     Vec3 l_wrist_vel_{};
     Vec3 r_wrist_pos_{};
     Vec3 r_wrist_vel_{};
+    Vec3 l_hand_track_pos_{};
+    Vec3 l_hand_track_vel_{};
+    Vec3 r_hand_track_pos_{};
+    Vec3 r_hand_track_vel_{};
     float l_clavicle_lag_{0.0f};
     float r_clavicle_lag_{0.0f};
+    float hand_enable_t_{0.0f};
+    float hand_enable_blend_{0.0f};
+    float held_l_hand_w_{0.0f};
+    float held_r_hand_w_{0.0f};
+    std::array<Quat, 15U> l_finger_rot_{};
+    std::array<Quat, 15U> r_finger_rot_{};
+    bool fingers_primed_{false};
 
     // 60 Hz analytical critically-damped kinematic chain springs (Spine -> Chest -> Neck -> Head)
     struct SpringVec3State {

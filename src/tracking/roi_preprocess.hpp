@@ -45,4 +45,12 @@ void fill_letterbox_bands_nchw(float* dst_nchw, uint32_t dst_w, uint32_t dst_h, 
 void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, uint32_t dst_h,
                                  uint8_t* dst_rgba) noexcept;
 
+/**
+ * Refines an M2 iris center `(io_cx_px, io_cy_px)` on full-resolution camera pixels (`1280x720`) inside the 8-point
+ * eye polygon (`eye_poly_px_8x2` in source pixels) via dark-iris intensity-weighted centroiding with specular glare
+ * rejection. Supports NV12, YUY2, and BGRA with zero heap allocations.
+ */
+[[nodiscard]] bool refine_eye_iris_fullres(const CapturedFrameBuffer& src, const float* eye_poly_px_8x2,
+                                           float& io_cx_px, float& io_cy_px) noexcept;
+
 } // namespace aether::tracking

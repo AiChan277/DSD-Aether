@@ -1,10 +1,12 @@
 #include "aether_ffi_contract.h"
+#include "animation/hand_collision.hpp"
 #include "animation/sim_engine.hpp"
 #include "animation/spring_bone.hpp"
 #include "core/clock.hpp"
 #include "core/hot_path_guard.hpp"
 #include "renderer/asset_upload/asset_job.hpp"
 #include "renderer/npr_renderer.hpp"
+#include "renderer/preview_pass.hpp"
 #include "rhi/rhi_device.hpp"
 #include "test_png_io.hpp"
 #include "tracking/blink_gaze_filter.hpp"
@@ -1509,7 +1511,7 @@ TEST_CASE("Task 6.2: Warudo Ballistic Blink State Machine, Blink Link, Pitch Com
     CHECK(mid_gaze_during_blink < gaze_before_blink * 0.7f);
 
     float end_blink = 1.0f;
-    for (int i = 0; i < 12; ++i) { // reopen
+    for (int i = 0; i < 16; ++i) { // reopen
         in.ear_left = in.ear_right = 0.28f;
         end_blink = bg.update(in).blink_left;
     }
@@ -1817,4 +1819,130 @@ TEST_CASE("Task 6.5: Realistic 30 Hz camera -> 240 Hz tick -> 60 Hz pacing has z
             kRadToDeg);
     CHECK(max_accel_r < 0.08);
     CHECK(t2_head_deg.back() > 12.5);
+}
+
+TEST_CASE("Real VRM 8590256991748008892.vrm Camera SmoothDamp transition & Self-Collision-Free Hand IK",
+          "[vrm][presets][hands][collision][task6]") {
+    LoadedVrmFixture fx;
+    if (!load_real_vrm_fixture(fx)) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    // 1) CameraTransitionState SmoothDamp over 0.22s on 8590256991748008892.vrm bone heights + cancel guard
+    {
+        using namespace aether::renderer;
+        const PreviewCamera base = fit_camera_to_avatar(*fx.avatar);
+        const uint16_t head_j = fx.avatar->desc.humanoid_to_joint[AETHER_BONE_HEAD];
+        const uint16_t chest_j = fx.avatar->desc.humanoid_to_joint[AETHER_BONE_CHEST];
+        const float head_y =
+            (head_j < fx.avatar->joint_rest_world_pos.size()) ? fx.avatar->joint_rest_world_pos[head_j][1] : 1.46f;
+        const float chest_y =
+            (chest_j < fx.avatar->joint_rest_world_pos.size()) ? fx.avatar->joint_rest_world_pos[chest_j][1] : 1.20f;
+        CHECK(head_y > chest_y);
+
+        PreviewCamera cam = base;
+        PreviewCamera goal = base;
+        goal.target_y = head_y - 0.04f;
+        goal.distance = std::max(0.55f, (head_y - chest_y) * 2.8f);
+        goal.yaw_rad = 0.05f;
+
+        CameraTransitionState tr{};
+        tr.start(cam, goal, 0.22f);
+        REQUIRE(tr.active);
+        for (int f = 0; f < 30; ++f) {
+            (void)tr.step(1.0f / 60.0f, cam);
+        }
+        CHECK_FALSE(tr.active);
+        CHECK(std::abs(cam.target_y - goal.target_y) < 1e-3f);
+        CHECK(std::abs(cam.distance - goal.distance) < 2e-3f);
+
+        // Starting another transition and cancelling midway freezes cleanly at current pose
+        tr.start(cam, base, 0.22f);
+        (void)tr.step(1.0f / 60.0f, cam);
+        const PreviewCamera mid = cam;
+        tr.cancel();
+        CHECK_FALSE(tr.active);
+        CHECK_FALSE(tr.step(1.0f / 60.0f, cam));
+        CHECK(std::abs(cam.distance - mid.distance) < 1e-6f);
+    }
+
+    // 2) Sweep overlapping hand IK targets straight into 8590256991748008892.vrm torso/head/opposite wrist
+    using namespace aether::animation;
+    SimEngine engine;
+    engine.reset(fx.rm);
+    SimEngineConfig scfg{};
+    scfg.visibility.enable_idle_breathing = false;
+    scfg.visibility.enable_hand_ik = true;
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+
+    AetherTrackingFrame tf{};
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        tf.joint_rotations_quat[b][3] = 1.0f;
+    }
+    tf.valid_flags = 0x0FU;
+    tf.upper_body_confidence = 0.96f;
+    tf.left_hand_confidence = 0.96f;
+    tf.right_hand_confidence = 0.96f;
+
+    uint64_t tick = 1;
+    // Settle initial frame so FK torso/head heights match loaded VRM exactly
+    for (int f = 0; f < 10; ++f) {
+        tf.frame_sequence = static_cast<uint32_t>(tick);
+        tf.capture_timestamp_us = tick++ * 16667ULL;
+        engine.tick(tf, dsp, gout, tf.capture_timestamp_us, 0.0f, scfg, skin);
+    }
+    const Vec3 vrm_chest = engine.bone_pos_ws()[AETHER_BONE_CHEST];
+    const Vec3 vrm_head = engine.bone_pos_ws()[AETHER_BONE_HEAD];
+
+    float min_sd_vrm = 1e9f;
+    const std::array<std::pair<Vec3, Vec3>, 3> vrm_sweeps = {{
+        {vrm_chest, vrm_chest},                                            // Straight through VRM chest capsule (+3.5 cm margin)
+        {vrm_head, vrm_head},                                              // Straight through VRM neck/head capsule
+        {{vrm_chest.x - 0.03f, vrm_chest.y, vrm_chest.z + 0.14f},
+         {vrm_chest.x + 0.03f, vrm_chest.y, vrm_chest.z + 0.14f}},         // Bilateral hand overlap
+    }};
+    for (const auto& sw : vrm_sweeps) {
+        tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = sw.first.x;
+        tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = sw.first.y;
+        tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = sw.first.z;
+        tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.96f;
+        tf.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = sw.second.x;
+        tf.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = sw.second.y;
+        tf.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = sw.second.z;
+        tf.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.96f;
+        for (int s = 0; s < 25; ++s) {
+            tf.frame_sequence = static_cast<uint32_t>(tick);
+            tf.capture_timestamp_us = tick++ * 16667ULL;
+            engine.tick(tf, dsp, gout, tf.capture_timestamp_us, 0.0f, scfg, skin);
+            std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> fk_ws{};
+            for (size_t bi = 0; bi < AETHER_HUMANOID_BONE_COUNT; ++bi) {
+                fk_ws[bi] = engine.bone_pos_ws()[bi];
+            }
+            BodySelfCollisionField field;
+            field.build_from_fk(fk_ws, false, false);
+            min_sd_vrm = std::min(min_sd_vrm, field.min_signed_distance(fk_ws, true, true));
+        }
+    }
+    CHECK(min_sd_vrm >= -1e-4f);
+
+    // Toggle hand tracking OFF -> smoothly transitions arms back toward relaxed A-Pose within 0.6s
+    tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = vrm_chest.x + 0.30f;
+    tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = vrm_head.y - 0.05f;
+    tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = vrm_chest.z + 0.25f;
+    for (int f = 0; f < 25; ++f) {
+        tf.frame_sequence = static_cast<uint32_t>(tick);
+        tf.capture_timestamp_us = tick++ * 16667ULL;
+        engine.tick(tf, dsp, gout, tf.capture_timestamp_us, 0.0f, scfg, skin);
+    }
+    const float raised_y = engine.bone_pos_ws()[AETHER_BONE_LEFT_HAND].y;
+    scfg.visibility.enable_hand_ik = false;
+    for (int f = 0; f < 36; ++f) {
+        tf.frame_sequence = static_cast<uint32_t>(tick);
+        tf.capture_timestamp_us = tick++ * 16667ULL;
+        engine.tick(tf, dsp, gout, tf.capture_timestamp_us, 0.0f, scfg, skin);
+    }
+    const float settled_y = engine.bone_pos_ws()[AETHER_BONE_LEFT_HAND].y;
+    CHECK(settled_y < raised_y - 0.10f);
 }

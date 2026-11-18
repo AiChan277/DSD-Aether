@@ -384,6 +384,7 @@ void PipelineSkeleton::t1_entry() {
             hud.roi_locked = st.roi_locked;
             hud.neutral_calibrated = st.neutral_calibrated;
             hud.stable_lock_frames = st.stable_lock_frames;
+            hud.hand_tracking_enabled = eng->hand_tracking_enabled();
             hud.active_ep = tracking::to_ffi_ep(st.active_ep);
             hud.frames_processed = st.frames_processed;
             hud.demotion_count = st.demotion_count;
@@ -411,6 +412,7 @@ void PipelineSkeleton::t1_entry() {
             hud.roi_locked = false;
             hud.neutral_calibrated = false;
             hud.stable_lock_frames = 0;
+            hud.hand_tracking_enabled = hand_tracking_enabled_.load(std::memory_order_acquire);
             std::memset(hud.head_euler_deg, 0, sizeof(hud.head_euler_deg));
             hud.active_ep = AETHER_EP_CPU;
             std::snprintf(hud.active_ep_label, sizeof(hud.active_ep_label), "%s",
@@ -516,6 +518,13 @@ void PipelineSkeleton::t1_entry() {
             } else if (cmd.kind == TrackingCmdKind::SelectAudioDevice) {
                 if (audio_lipsync_) {
                     audio_lipsync_->select_device(cmd.str_arg);
+                }
+                publish_hud(engine.get(), engine_ready, engine_ready ? nullptr : init_err.c_str());
+            } else if (cmd.kind == TrackingCmdKind::SetHandTracking) {
+                const bool enabled = (cmd.int_arg != 0);
+                hand_tracking_enabled_.store(enabled, std::memory_order_release);
+                if (engine) {
+                    engine->set_hand_tracking_enabled(enabled);
                 }
                 publish_hud(engine.get(), engine_ready, engine_ready ? nullptr : init_err.c_str());
             }
@@ -632,6 +641,7 @@ void PipelineSkeleton::t2_entry() {
             const animation::AudioLipSyncFrame audio_frame =
                 audio_lipsync_ ? audio_lipsync_->latest() : animation::AudioLipSyncFrame{};
             const animation::AudioLipSyncFrame* const opt_audio = audio_lipsync_ ? &audio_frame : nullptr;
+            sim_cfg.visibility.enable_hand_ik = hand_tracking_enabled_.load(std::memory_order_acquire);
             if (sim_engine_) {
                 sim_engine_->tick(latest_pose, dsp_pkt, graph_out, t2_start, -1.0f, sim_cfg, snap.frame, opt_audio,
                                   0.65f);

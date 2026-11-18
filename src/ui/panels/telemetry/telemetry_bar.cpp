@@ -70,6 +70,17 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(tr("View"))) {
+            const bool hud_on = params.get_bool(ParamId::AppTrackingHudVisible);
+            if (ImGui::MenuItem(tr("Tracking HUD"), nullptr, hud_on)) {
+                (void)params.set(ParamId::AppTrackingHudVisible, hud_on ? 0.0 : 1.0);
+                settings_dirty = true;
+            }
+            const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
+            if (ImGui::MenuItem(tr("Light Orb"), "Alt+L", orb_on)) {
+                (void)params.set(ParamId::AppOrbitOrbVisible, orb_on ? 0.0 : 1.0);
+                settings_dirty = true;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(tr("Command Palette..."), "Ctrl+K")) {
                 menu_act = TopMenuAction::OpenPalette;
             }
@@ -118,6 +129,25 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
                     settings_dirty = true;
                 }
                 ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            const bool hand_on = params.get_bool(ParamId::TrackingHandEnabled);
+            if (ImGui::MenuItem(tr("Enable Hand Tracking"), nullptr, hand_on)) {
+                const bool next_hand = !hand_on;
+                (void)params.set(ParamId::TrackingHandEnabled, next_hand ? 1.0 : 0.0);
+                actions.viewport.request_set_hand_tracking = true;
+                actions.viewport.target_hand_tracking_enabled = next_hand;
+                settings_dirty = true;
+            }
+            const bool hud_on = params.get_bool(ParamId::AppTrackingHudVisible);
+            if (ImGui::MenuItem(tr("Tracking HUD"), nullptr, hud_on)) {
+                (void)params.set(ParamId::AppTrackingHudVisible, hud_on ? 0.0 : 1.0);
+                settings_dirty = true;
+            }
+            const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
+            if (ImGui::MenuItem(tr("Light Orb"), "Alt+L", orb_on)) {
+                (void)params.set(ParamId::AppOrbitOrbVisible, orb_on ? 0.0 : 1.0);
+                settings_dirty = true;
             }
             ImGui::Separator();
             if (ImGui::MenuItem(tr("Hardware Optimizer..."), nullptr, false, !host_status.on_air)) {

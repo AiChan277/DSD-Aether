@@ -37,7 +37,7 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
                              const AudioLipSyncFrame* in_audio, float audio_assist_weight) noexcept {
     const float safe_dt = std::clamp(dt_s, 1e-4f, 0.1f);
     const SmoothTimes st{};
-    constexpr float kBrowDeadzone = 0.04f;
+    constexpr float kBrowDeadzone = 0.015f;
     const bool audio_fusion = (in_audio != nullptr && in_audio->assist_active && in_audio->device_available);
     const bool audio_vad = audio_fusion && (in_audio->vad > 0.0f);
     const float cam_open_y_raw =
@@ -49,7 +49,7 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
     const bool silence_lock_mouth = audio_fusion && !audio_vad && (cam_open_y_raw < 0.22f);
     const bool silent_smile_preserved = silence_lock_mouth && (cam_form_raw > 0.20f);
 
-    // Warudo per-channel SmoothDamp on camera signals (blink 28 ms, mouth/vowels 38-45 ms, brows 55 ms + 0.04 deadzone)
+    // Warudo per-channel SmoothDamp on camera signals (blink 28 ms, mouth/vowels 38-45 ms, brows 45 ms + 0.015 deadzone)
     for (size_t i = 0; i < kArkitSlotCount; ++i) {
         float target = std::clamp(arkit_cam[i], 0.0f, 1.0f);
         if (is_brow_arkit_slot(i)) {

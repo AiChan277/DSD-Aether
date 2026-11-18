@@ -1,4 +1,5 @@
 #include "animation/ik_solvers.hpp"
+#include "animation/hand_collision.hpp"
 #include "animation/visibility_first.hpp"
 
 #include <algorithm>
@@ -291,17 +292,77 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
     };
 
     const Vec3 forward_chest = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {0.0f, 0.0f, 1.0f});
-    const Vec3 l_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {0.35f, -0.45f, -0.82f});
-    const Vec3 r_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {-0.35f, -0.45f, -0.82f});
-    if (body_pose.left_wrist_track_weight >= 0.05f) {
-        apply_arm_ik(AETHER_BONE_LEFT_SHOULDER, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM,
-                     AETHER_BONE_LEFT_HAND, body_pose.left_wrist_target_ws, l_elbow_pole,
-                     body_pose.left_wrist_track_weight);
-    }
-    if (body_pose.right_wrist_track_weight >= 0.05f) {
-        apply_arm_ik(AETHER_BONE_RIGHT_SHOULDER, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM,
-                     AETHER_BONE_RIGHT_HAND, body_pose.right_wrist_target_ws, r_elbow_pole,
-                     body_pose.right_wrist_track_weight);
+    Vec3 l_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {0.35f, -0.45f, -0.82f});
+    Vec3 r_elbow_pole = rotate_vec(out_world_rotations[AETHER_BONE_UPPER_CHEST], {-0.35f, -0.45f, -0.82f});
+    const bool l_active = (body_pose.left_wrist_track_weight >= 0.05f);
+    const bool r_active = (body_pose.right_wrist_track_weight >= 0.05f);
+    if (l_active || r_active) {
+        Vec3 l_target = body_pose.left_wrist_target_ws;
+        Vec3 r_target = body_pose.right_wrist_target_ws;
+
+        // Stage 1: Pre-IK tangential wrist slide against chest (+3.5 cm margin), neck/head, and passive/bilateral arm
+        BodySelfCollisionField field{};
+        field.build_from_fk(out_world_positions, !l_active, !r_active);
+        field.resolve_pre_ik_wrists(l_active, l_target, r_active, r_target);
+
+        for (int iter = 0; iter < 4; ++iter) {
+            if (l_active) {
+                apply_arm_ik(AETHER_BONE_LEFT_SHOULDER, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM,
+                             AETHER_BONE_LEFT_HAND, l_target, l_elbow_pole, body_pose.left_wrist_track_weight);
+            }
+            if (r_active) {
+                apply_arm_ik(AETHER_BONE_RIGHT_SHOULDER, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM,
+                             AETHER_BONE_RIGHT_HAND, r_target, r_elbow_pole, body_pose.right_wrist_track_weight);
+            }
+            compute_fk();
+
+            // Stage 2: Post-IK forearm/elbow push-out + 2-bone IK refinement until min signed distance >= 0
+            field.build_from_fk(out_world_positions, true, true);
+            bool any_penetration = false;
+            if (l_active) {
+                Vec3 n_fore{};
+                Vec3 n_hand{};
+                const float sd_fore =
+                    field.query_segment(out_world_positions[AETHER_BONE_LEFT_LOWER_ARM],
+                                        out_world_positions[AETHER_BONE_LEFT_HAND],
+                                        BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::LeftArm, 1.0f,
+                                        &n_fore);
+                const float sd_hand =
+                    field.query_point(out_world_positions[AETHER_BONE_LEFT_HAND],
+                                      BodySelfCollisionField::kHandSphereRadiusM, CollisionCapsuleKind::LeftArm, 1.0f,
+                                      &n_hand);
+                const float worst = std::min(sd_fore, sd_hand);
+                if (worst < 0.0f) {
+                    const Vec3 push_n = (sd_fore < sd_hand) ? n_fore : n_hand;
+                    l_target = l_target + push_n * (-worst + 0.004f);
+                    l_elbow_pole = normalize_safe(l_elbow_pole + push_n * 0.45f, l_elbow_pole);
+                    any_penetration = true;
+                }
+            }
+            if (r_active) {
+                Vec3 n_fore{};
+                Vec3 n_hand{};
+                const float sd_fore =
+                    field.query_segment(out_world_positions[AETHER_BONE_RIGHT_LOWER_ARM],
+                                        out_world_positions[AETHER_BONE_RIGHT_HAND],
+                                        BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::RightArm, -1.0f,
+                                        &n_fore);
+                const float sd_hand =
+                    field.query_point(out_world_positions[AETHER_BONE_RIGHT_HAND],
+                                      BodySelfCollisionField::kHandSphereRadiusM, CollisionCapsuleKind::RightArm, -1.0f,
+                                      &n_hand);
+                const float worst = std::min(sd_fore, sd_hand);
+                if (worst < 0.0f) {
+                    const Vec3 push_n = (sd_fore < sd_hand) ? n_fore : n_hand;
+                    r_target = r_target + push_n * (-worst + 0.004f);
+                    r_elbow_pole = normalize_safe(r_elbow_pole + push_n * 0.45f, r_elbow_pole);
+                    any_penetration = true;
+                }
+            }
+            if (!any_penetration) {
+                break;
+            }
+        }
     }
 
     const Vec3 knee_pole = normalize_safe(Vec3{forward_chest.x, -0.05f, std::max(0.5f, forward_chest.z)});

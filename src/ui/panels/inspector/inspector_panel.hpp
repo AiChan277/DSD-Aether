@@ -9,6 +9,8 @@
 
 namespace aether::ui {
 
+class ViewportPanel;
+
 /**
  * Z3 Properties Inspector (`§12.4`, `§12.5`, `§12.12`, broadcast overhaul §1 BUG-05/06).
  * Default dock width 325 px * dpi. Every collapsible section is a DaVinci Resolve-style 2-column
@@ -27,7 +29,8 @@ class InspectorPanel {
               const DevShellRenderView& render_view, const DevShellOutputView& output_view,
               const StudioHostStatus& host_status, std::span<const LoadedPluginVm> plugins,
               const UiSelection& selection, ParamStore& params, UndoStack& undo, AppSettings& settings,
-              bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions, StudioActions& actions);
+              bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions, StudioActions& actions,
+              ViewportPanel* viewport_for_presets = nullptr);
 
   private:
     bool focus_output_pending_{false};

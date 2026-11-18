@@ -1,4 +1,5 @@
 #include "animation/expression_mixer.hpp"
+#include "animation/hand_collision.hpp"
 #include "animation/ik_solvers.hpp"
 #include "animation/kalman.hpp"
 #include "animation/motion_filters.hpp"
@@ -906,4 +907,161 @@ TEST_CASE("Task 1 & Task 3: Hand tracking/arm IK stay bypassed and Live2D vowel 
     CHECK(std::abs(dst.param_brow_r_form - src.param_brow_r_form) < 1e-4f);
     CHECK(std::abs(dst.param_mouth_open_y - src.param_mouth_open_y) < 1e-4f);
     CHECK(std::abs(dst.param_mouth_form - src.param_mouth_form) < 1e-4f);
+}
+
+TEST_CASE("Eyebrow 0.045s SmoothDamp + 0.015 deadzone filter suppresses micro-jitter cleanly",
+          "[animation][brows][task4]") {
+    SmoothTimes st{};
+    CHECK(std::abs(st.brow - 0.045f) < 1e-6f);
+
+    ExpressionMixer mixer;
+    mixer.reset();
+
+    float out_morphs[kMaxMorphs]{};
+    float mouth_blend = 0.0f;
+    float cam_arkit[52]{};
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    Live2DParameters in_l2d{};
+    Live2DParameters out_l2d{};
+
+    // Micro jitter < 0.015 inside eyebrow curve stays deadzoned near neutral
+    float max_jitter_brow = 0.0f;
+    for (int f = 0; f < 30; ++f) {
+        const float j = (f % 2 == 0) ? 0.011f : -0.010f;
+        in_l2d = {};
+        in_l2d.param_brow_l_y = j;
+        in_l2d.param_brow_r_y = -j;
+        in_l2d.param_brow_l_form = j;
+        std::fill(std::begin(cam_arkit), std::end(cam_arkit), 0.0f);
+        cam_arkit[43] = 0.01f; // browInnerUp sub-deadzone
+        mixer.update(cam_arkit, dsp, gout, 1.0f / 60.0f, out_morphs, mouth_blend, nullptr, true, &in_l2d, &out_l2d);
+        max_jitter_brow = std::max(max_jitter_brow, std::abs(out_l2d.param_brow_l_y));
+    }
+    CHECK(max_jitter_brow < 0.01f);
+
+    // Deliberate brow raise tracks smoothly toward target without overshoot
+    for (int f = 0; f < 25; ++f) {
+        in_l2d = {};
+        in_l2d.param_brow_l_y = 0.78f;
+        in_l2d.param_brow_r_y = 0.72f;
+        in_l2d.param_brow_l_angle = 0.30f;
+        std::fill(std::begin(cam_arkit), std::end(cam_arkit), 0.0f);
+        cam_arkit[43] = 0.75f;
+        cam_arkit[44] = 0.75f;
+        cam_arkit[45] = 0.70f;
+        mixer.update(cam_arkit, dsp, gout, 1.0f / 60.0f, out_morphs, mouth_blend, nullptr, true, &in_l2d, &out_l2d);
+        CHECK(out_l2d.param_brow_l_y <= 0.79f);
+    }
+    mixer.update(cam_arkit, dsp, gout, 1.0f / 60.0f, out_morphs, mouth_blend, nullptr, true, &in_l2d, &out_l2d);
+    CHECK(out_l2d.param_brow_l_y > 0.65f);
+    CHECK(out_l2d.param_brow_r_y > 0.60f);
+}
+
+TEST_CASE("Hand tracker self-collision avoidance maintains >= 0 signed distance and 0.35s disable returns to A-Pose",
+          "[animation][ik][hands][collision][task5]") {
+    const RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
+    SimEngine engine;
+    engine.reset(rm);
+    SimEngineConfig cfg{};
+    cfg.visibility.enable_idle_breathing = false;
+    cfg.visibility.enable_hand_ik = false;
+
+    AetherDspSyncPacket dsp{};
+    AetherGraphOutputs gout{};
+    SkinningFrame skin{};
+
+    AetherTrackingFrame raw{};
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+        raw.joint_rotations_quat[b][3] = 1.0f;
+    }
+    raw.valid_flags = 0x09U;
+    raw.upper_body_confidence = 0.96f;
+    raw.joint_positions_ws[AETHER_BONE_HIPS][1] = 0.90f;
+    raw.joint_positions_ws[AETHER_BONE_HIPS][3] = 0.96f;
+    raw.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.49f;
+    raw.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+
+    // 1) Settle idle A-Pose with Hand Tracking OFF
+    for (int f = 0; f < 45; ++f) {
+        raw.frame_sequence = static_cast<uint32_t>(f + 1);
+        raw.capture_timestamp_us = static_cast<uint64_t>(f + 1) * 16667ULL;
+        engine.tick(raw, dsp, gout, raw.capture_timestamp_us, 0.0f, cfg, skin);
+    }
+    const float idle_l_drop = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
+    const float idle_r_drop = arm_drop_deg(engine, AETHER_BONE_RIGHT_UPPER_ARM, AETHER_BONE_RIGHT_LOWER_ARM);
+    CHECK(idle_l_drop > 60.0f);
+    CHECK(idle_r_drop > 60.0f);
+
+    // 2) Enable Hand Tracking and sweep aggressive self-intersecting wrist targets into Chest, Head, & Bilateral overlap
+    cfg.visibility.enable_hand_ik = true;
+    raw.valid_flags = 0x0FU;
+    raw.left_hand_confidence = 0.95f;
+    raw.right_hand_confidence = 0.95f;
+
+    const std::array<std::pair<Vec3, Vec3>, 4> hazards = {{
+        {{0.02f, 1.24f, 0.01f}, {-0.02f, 1.24f, 0.01f}}, // Straight into Chest center
+        {{0.01f, 1.49f, 0.02f}, {-0.01f, 1.49f, 0.02f}}, // Straight into Neck/Head
+        {{-0.05f, 1.20f, 0.14f}, {0.05f, 1.20f, 0.14f}}, // Crossing bilateral wrists
+        {{0.00f, 1.15f, -0.02f}, {0.00f, 1.30f, 0.00f}}, // Midline spine & sternum penetration
+    }};
+
+    uint64_t tick_idx = 46;
+    float worst_sd = 1e9f;
+    for (const auto& hz : hazards) {
+        raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = hz.first.x;
+        raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = hz.first.y;
+        raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = hz.first.z;
+        raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][3] = 0.96f;
+        raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = hz.second.x;
+        raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = hz.second.y;
+        raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = hz.second.z;
+        raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][3] = 0.96f;
+
+        for (int s = 0; s < 25; ++s) {
+            raw.frame_sequence = static_cast<uint32_t>(tick_idx);
+            raw.capture_timestamp_us = tick_idx++ * 16667ULL;
+            engine.tick(raw, dsp, gout, raw.capture_timestamp_us, 0.0f, cfg, skin);
+
+            std::array<Vec3, AETHER_HUMANOID_BONE_COUNT> fk_ws{};
+            for (size_t bi = 0; bi < AETHER_HUMANOID_BONE_COUNT; ++bi) {
+                fk_ws[bi] = engine.bone_pos_ws()[bi];
+            }
+            BodySelfCollisionField field;
+            field.build_from_fk(fk_ws, false, false);
+            const float sd = field.min_signed_distance(fk_ws, true, true);
+            worst_sd = std::min(worst_sd, sd);
+        }
+    }
+    CHECK(worst_sd >= -1e-4f);
+
+    // 3) Raise arms outward cleanly while active, then disable Hand Tracking -> smooth 0.35s cubic transition back to A-Pose
+    raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = 0.32f;
+    raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = 1.26f;
+    raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = 0.24f;
+    raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] = -0.32f;
+    raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][1] = 1.26f;
+    raw.joint_positions_ws[AETHER_BONE_RIGHT_HAND][2] = 0.24f;
+    for (int f = 0; f < 30; ++f) {
+        raw.frame_sequence = static_cast<uint32_t>(tick_idx);
+        raw.capture_timestamp_us = tick_idx++ * 16667ULL;
+        engine.tick(raw, dsp, gout, raw.capture_timestamp_us, 0.0f, cfg, skin);
+    }
+    const float lifted_drop = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
+    CHECK(lifted_drop < idle_l_drop - 10.0f);
+
+    cfg.visibility.enable_hand_ik = false;
+    float prev_drop = lifted_drop;
+    float max_step_drop = 0.0f;
+    // 0.35s at 60Hz = 21 frames; check smoothness across transition and full settle by 36 frames (0.60s)
+    for (int f = 0; f < 36; ++f) {
+        raw.frame_sequence = static_cast<uint32_t>(tick_idx);
+        raw.capture_timestamp_us = tick_idx++ * 16667ULL;
+        engine.tick(raw, dsp, gout, raw.capture_timestamp_us, 0.0f, cfg, skin);
+        const float cur_drop = arm_drop_deg(engine, AETHER_BONE_LEFT_UPPER_ARM, AETHER_BONE_LEFT_LOWER_ARM);
+        max_step_drop = std::max(max_step_drop, std::abs(cur_drop - prev_drop));
+        prev_drop = cur_drop;
+    }
+    CHECK(max_step_drop < 12.0f); // No abrupt snap on toggle
+    CHECK(std::abs(prev_drop - idle_l_drop) < 2.0f);
 }

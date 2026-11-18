@@ -31,6 +31,13 @@ struct TrackingOverlaySnapshot {
     // Normalized [0..1] camera coords: [0]=subject right iris (468, image-left), [1]=subject left iris (473, image-right)
     std::array<float, 2U * 2U> iris_centers_norm{};
     bool iris_valid{false};
+    std::array<float, 8U * 2U> left_eye_poly_norm{};
+    std::array<float, 8U * 2U> right_eye_poly_norm{};
+    bool eye_poly_valid{false};
+    std::array<float, 5U * 2U> left_brow_pts_norm{};
+    std::array<float, 5U * 2U> right_brow_pts_norm{};
+    bool brow_pts_valid{false};
+    std::array<float, 2U> gaze_vec{0.0f, 0.0f};
     // 4 points in normalized [0..1] camera coords: [0]=nose origin, [1]=+X (right), [2]=+Y (up), [3]=+Z (fwd)
     std::array<float, 4U * 2U> head_axes_norm{};
     bool head_axes_valid{false};
@@ -38,6 +45,19 @@ struct TrackingOverlaySnapshot {
     bool neutral_calibrated{false};
     uint32_t stable_lock_frames{0};
     HeadEulerDeg head_euler_deg{};
+    bool hand_tracking_enabled{false};
+    bool left_hand_detected{false};
+    bool right_hand_detected{false};
+    std::array<float, 4U> left_hand_bbox_obb{};
+    float left_hand_angle_rad{0.0f};
+    std::array<float, 2U> left_palm_center_norm{};
+    std::array<float, 2U> left_palm_normal_2d{};
+    std::array<float, 21U * 2U> left_hand_keypoints_norm{};
+    std::array<float, 4U> right_hand_bbox_obb{};
+    float right_hand_angle_rad{0.0f};
+    std::array<float, 2U> right_palm_center_norm{};
+    std::array<float, 2U> right_palm_normal_2d{};
+    std::array<float, 21U * 2U> right_hand_keypoints_norm{};
     animation::Live2DParameters live2d{};
 };
 
@@ -124,7 +144,11 @@ class LandmarkPoseSolver {
                                  const float* m1_hands_handed_2, uint64_t capture_timestamp_us,
                                  uint64_t inference_complete_us, EpTier active_ep, uint32_t frame_sequence,
                                  bool roi_reset_this_frame, AetherTrackingFrame& out_frame,
-                                 uint32_t cam_w = 1280U, uint32_t cam_h = 720U) noexcept;
+                                 uint32_t cam_w = 1280U, uint32_t cam_h = 720U,
+                                 bool enable_hand_tracking = false, const CapturedFrameBuffer* raw_frame = nullptr,
+                                 const RoiRectNorm* left_hand_roi = nullptr,
+                                 const RoiRectNorm* right_hand_roi = nullptr,
+                                 const float* m1_hands_world_2x63 = nullptr) noexcept;
 
     [[nodiscard]] const TrackingOverlaySnapshot& overlay_snapshot() const noexcept { return overlay_; }
     [[nodiscard]] bool neutral_calibrated() const noexcept { return neutral_calibrated_; }
@@ -153,8 +177,8 @@ class LandmarkPoseSolver {
     float neutral_mouth_height_ratio_{0.0616f};
     float neutral_mouth_width_ratio_{0.5525f};
     float neutral_plane_pitch_ratio_{0.42f};
-    std::array<float, 3> neutral_brow_l_{0.268f, 0.279f, 0.183f};
-    std::array<float, 3> neutral_brow_r_{0.268f, 0.279f, 0.183f};
+    std::array<float, 5> neutral_brow_l_{0.268f, 0.275f, 0.279f, 0.235f, 0.183f};
+    std::array<float, 5> neutral_brow_r_{0.268f, 0.275f, 0.279f, 0.235f, 0.183f};
 
     std::array<LandmarkFilter2D, 478U> lm_filters_{};
     std::array<float, 478U * 3U> filtered_lm_buf_{};

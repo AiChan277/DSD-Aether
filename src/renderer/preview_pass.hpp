@@ -102,4 +102,28 @@ class PreviewPass {
 /** Helper to frame a normalized avatar's AABB cleanly inside `PreviewCamera`. */
 [[nodiscard]] PreviewCamera fit_camera_to_avatar(const GpuAvatar& avatar) noexcept;
 
+/** Critically-damped (`SmoothDamp`) camera & avatar root transition controller for framing presets & reset. */
+struct CameraTransitionState {
+    PreviewCamera target_cam{};
+    PreviewCamera vel_cam{};
+    std::array<float, 3> target_avatar_pos{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> vel_avatar_pos{0.0f, 0.0f, 0.0f};
+    float target_avatar_rot_y_deg{0.0f};
+    float vel_avatar_rot_y_deg{0.0f};
+    float target_avatar_scale{1.0f};
+    float vel_avatar_scale{0.0f};
+    float smooth_time_s{0.22f};
+    bool animate_avatar{false};
+    bool active{false};
+
+    void start(const PreviewCamera& current_cam, const PreviewCamera& goal_cam, float transition_time_s) noexcept;
+    void start_with_avatar(const PreviewCamera& current_cam, const PreviewCamera& goal_cam,
+                           const std::array<float, 3>& cur_pos, float cur_rot_y_deg, float cur_scale,
+                           const std::array<float, 3>& goal_pos, float goal_rot_y_deg, float goal_scale,
+                           float transition_time_s) noexcept;
+    void cancel() noexcept;
+    bool step(float dt_s, PreviewCamera& in_out_cam, std::array<float, 3>* in_out_avatar_pos = nullptr,
+              float* in_out_avatar_rot_y_deg = nullptr, float* in_out_avatar_scale = nullptr) noexcept;
+};
+
 } // namespace aether::renderer

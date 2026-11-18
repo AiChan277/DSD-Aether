@@ -50,6 +50,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `tracking.audio_assist` | Tracking | Audio Lip-Sync | `bool` | T2 | `1.0` | `[0.0, 1.0]` | — | — | persist, app |
 | `tracking.mic_gain` | Tracking | Mic Gain | `float` | T2 | `1.25` | `[0.10, 4.00]` | x | — | persist, app |
 | `tracking.mic_noise_gate` | Tracking | Mic Noise Gate | `float` | T2 | `-48.0` | `[-72.0, -18.0]` | dB | — | persist, app |
+| `tracking.hand_enabled` | Tracking | Hand Tracking | `bool` | T1 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
 | `output.resolution` | Output | Resolution Preset | `enum` | T4 | `1.0` | `[0.0, 3.0]` | — | — | persist, project, undoable |
 | `output.fps` | Output | Output Frame Rate | `int` | T4 | `60.0` | `[30.0, 120.0]` | fps | — | persist, project, undoable |
 | `output.premul_alpha` | Output | Premultiplied Alpha | `bool` | T4 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
@@ -69,3 +70,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `app.checkerboard_bg` | App | Alpha Checkerboard | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `app.orbit_orb_visible` | App | Light Orbit Orb | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `app.skeleton_heatmap` | App | Confidence Heatmap | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | undoable |
+| `app.viewport_aspect` | App | Viewport Aspect | `enum` | T3 | `0.0` | `[0.0, 3.0]` | — | — | persist, app, undoable |
+| `app.tracking_hud_visible` | App | Tracking HUD | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `app.tracking_hud_collapsed` | App | HUD Pill Mode | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `app.camera_transition_speed` | App | Preset Ease | `float` | T3 | `0.22` | `[0.00, 1.00]` | s | — | persist, app, undoable |

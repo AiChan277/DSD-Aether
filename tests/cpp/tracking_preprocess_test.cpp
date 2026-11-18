@@ -1,4 +1,5 @@
 #include "core/hot_path_guard.hpp"
+#include "tracking/blink_gaze_filter.hpp"
 #include "tracking/canonical_face_model.hpp"
 #include "tracking/landmark_solver.hpp"
 #include "tracking/manifest.hpp"
@@ -484,4 +485,186 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
     CHECK(brow_dn.param_brow_r_y < -0.30f);
     CHECK(tf.arkit_blendshapes[41] > 0.25f); // browDownLeft
     CHECK(tf.arkit_blendshapes[42] > 0.25f); // browDownRight
+
+    // Verify Task 4 overlay fields (8-pt eye polygons, 5-pt eyebrow curves, gaze_vec)
+    CHECK(solver.overlay_snapshot().eye_poly_valid);
+    CHECK(solver.overlay_snapshot().brow_pts_valid);
+    for (size_t k = 0; k < 5U; ++k) {
+        CHECK(solver.overlay_snapshot().left_brow_pts_norm[k * 2U + 0U] > 0.0f);
+        CHECK(solver.overlay_snapshot().left_brow_pts_norm[k * 2U + 0U] < 1.0f);
+        CHECK(solver.overlay_snapshot().right_brow_pts_norm[k * 2U + 0U] > 0.0f);
+        CHECK(solver.overlay_snapshot().right_brow_pts_norm[k * 2U + 0U] < 1.0f);
+    }
+}
+
+TEST_CASE("Full-res eye ROI dark-iris refinement rejects specular glare across NV12, YUY2, and BGRA",
+          "[tracking][iris][task4]") {
+    constexpr uint32_t kW = 1280U;
+    constexpr uint32_t kH = 720U;
+    const float iris_true_x = 562.0f;
+    const float iris_true_y = 324.0f;
+    const std::array<float, 16> eye_poly = {{
+        544.0f, 323.0f, 551.0f, 317.0f, 560.0f, 316.0f, 569.0f, 317.0f,
+        576.0f, 323.0f, 569.0f, 329.0f, 560.0f, 330.0f, 551.0f, 329.0f,
+    }};
+
+    auto luma_at = [&](uint32_t x, uint32_t y) -> uint8_t {
+        const float dx = static_cast<float>(x) - iris_true_x;
+        const float dy = static_cast<float>(y) - iris_true_y;
+        const float d2 = dx * dx + dy * dy;
+        // Bright specular catchlight at offset (iris_true_x + 2, iris_true_y - 2) must be rejected
+        const float gx = static_cast<float>(x) - (iris_true_x + 2.0f);
+        const float gy = static_cast<float>(y) - (iris_true_y - 2.0f);
+        if (gx * gx + gy * gy <= 2.25f) {
+            return 250U;
+        }
+        if (d2 <= 30.25f) {
+            return 24U; // Dark iris/pupil
+        }
+        return 215U; // Bright sclera
+    };
+
+    auto fb = std::make_unique<CapturedFrameBuffer>();
+
+    // 1) NV12
+    fb->width = kW;
+    fb->height = kH;
+    fb->stride_y = kW;
+    fb->stride_uv = kW;
+    fb->format = CameraPixelFormat::NV12;
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = 0; x < kW; ++x) {
+            fb->bytes[y * kW + x] = luma_at(x, y);
+        }
+    }
+    {
+        float cx = 559.5f; // Biased initial M2 guess
+        float cy = 322.0f;
+        CHECK(refine_eye_iris_fullres(*fb, eye_poly.data(), cx, cy));
+        CHECK(std::abs(cx - iris_true_x) < 0.85f);
+        CHECK(std::abs(cy - iris_true_y) < 0.85f);
+    }
+
+    // 2) YUY2
+    fb->format = CameraPixelFormat::YUY2;
+    fb->stride_y = kW * 2U;
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = 0; x < kW; ++x) {
+            fb->bytes[y * fb->stride_y + x * 2U + 0U] = luma_at(x, y);
+            fb->bytes[y * fb->stride_y + x * 2U + 1U] = 128U;
+        }
+    }
+    {
+        float cx = 564.2f;
+        float cy = 325.1f;
+        CHECK(refine_eye_iris_fullres(*fb, eye_poly.data(), cx, cy));
+        CHECK(std::abs(cx - iris_true_x) < 0.85f);
+        CHECK(std::abs(cy - iris_true_y) < 0.85f);
+    }
+
+    // 3) BGRA32
+    fb->format = CameraPixelFormat::BGRA32;
+    fb->stride_y = kW * 4U;
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = 0; x < kW; ++x) {
+            const uint8_t v = luma_at(x, y);
+            const size_t o = static_cast<size_t>(y) * fb->stride_y + static_cast<size_t>(x) * 4U;
+            fb->bytes[o + 0] = v;
+            fb->bytes[o + 1] = v;
+            fb->bytes[o + 2] = v;
+            fb->bytes[o + 3] = 255U;
+        }
+    }
+    {
+        float cx = 559.0f;
+        float cy = 326.0f;
+        CHECK(refine_eye_iris_fullres(*fb, eye_poly.data(), cx, cy));
+        CHECK(std::abs(cx - iris_true_x) < 0.85f);
+        CHECK(std::abs(cy - iris_true_y) < 0.85f);
+    }
+}
+
+TEST_CASE("BlinkGazeStabilizer dual-stiffness C2 blink, gaze-lid follow, separated squint, and gaze spring",
+          "[tracking][blink][gaze][task4]") {
+    BlinkGazeStabilizer stab;
+    stab.reset();
+
+    // Warm open baseline
+    BlinkGazeInput in{};
+    in.dt_s = 1.0f / 60.0f;
+    in.neutral_ear_left_hint = 0.30f;
+    in.neutral_ear_right_hint = 0.30f;
+    in.ear_left = 0.30f;
+    in.ear_right = 0.30f;
+    for (int f = 0; f < 15; ++f) {
+        (void)stab.update(in);
+    }
+
+    // Gaze deadband (< 0.020) suppresses micro-jitter cleanly
+    float max_jitter_gx = 0.0f;
+    for (int f = 0; f < 10; ++f) {
+        in.gaze_gx_left = (f % 2 == 0) ? 0.014f : -0.012f;
+        in.gaze_gx_right = in.gaze_gx_left;
+        const auto out = stab.update(in);
+        max_jitter_gx = std::max(max_jitter_gx, std::abs(out.gaze_gx));
+    }
+    CHECK(max_jitter_gx < 0.01f);
+
+    // Live2D Eyelid-Follows-Gaze (-22% down gaze vs +12% up gaze lift) & saccade spring
+    in.gaze_gx_left = 0.0f;
+    in.gaze_gx_right = 0.0f;
+    in.gaze_gy_left = 0.85f;
+    in.gaze_gy_right = 0.85f;
+    BlinkGazeOutput down_out{};
+    for (int f = 0; f < 25; ++f) {
+        down_out = stab.update(in);
+    }
+    CHECK(down_out.gaze_gy > 0.75f);
+    CHECK(down_out.blink_left > 0.08f);
+
+    in.gaze_gy_left = -0.85f;
+    in.gaze_gy_right = -0.85f;
+    BlinkGazeOutput up_out{};
+    for (int f = 0; f < 25; ++f) {
+        up_out = stab.update(in);
+    }
+    CHECK(up_out.gaze_gy < -0.75f);
+    CHECK(up_out.brow_lift_from_gaze > 0.04f);
+
+    // Separated squint & cheek raise remain distinct during smiling while eye stays open
+    in.gaze_gy_left = 0.0f;
+    in.gaze_gy_right = 0.0f;
+    in.raw_squint_left = 0.72f;
+    in.raw_squint_right = 0.70f;
+    in.raw_cheek_squint_left = 0.65f;
+    in.raw_cheek_squint_right = 0.64f;
+    BlinkGazeOutput smile_out{};
+    for (int f = 0; f < 15; ++f) {
+        smile_out = stab.update(in);
+    }
+    CHECK(smile_out.eye_squint_left > 0.55f);
+    CHECK(smile_out.cheek_raise_left > 0.50f);
+    CHECK(smile_out.blink_left < 0.05f);
+
+    // Dual-stiffness blink: 22 ms snappy close reaches high blink rapidly, 55 ms open decelerates softly
+    in.raw_squint_left = 0.0f;
+    in.raw_squint_right = 0.0f;
+    in.raw_cheek_squint_left = 0.0f;
+    in.raw_cheek_squint_right = 0.0f;
+    in.ear_left = 0.08f;
+    in.ear_right = 0.08f;
+    BlinkGazeOutput close_step{};
+    for (int f = 0; f < 5; ++f) {
+        close_step = stab.update(in); // ~83 ms closed
+    }
+    CHECK(close_step.blink_left > 0.70f);
+    in.ear_left = 0.30f;
+    in.ear_right = 0.30f;
+    const BlinkGazeOutput open_1 = stab.update(in);
+    for (int f = 0; f < 20; ++f) {
+        (void)stab.update(in);
+    }
+    const BlinkGazeOutput settled = stab.update(in);
+    CHECK(open_1.blink_left <= close_step.blink_left);
+    CHECK(settled.blink_left < 0.05f);
 }

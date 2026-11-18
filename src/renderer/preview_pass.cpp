@@ -160,6 +160,171 @@ PreviewCamera fit_camera_to_avatar(const GpuAvatar& avatar) noexcept {
     return cam;
 }
 
+namespace {
+
+[[nodiscard]] float smooth_damp_cam(float current, float target, float& velocity, float smooth_time_s,
+                                    float dt_s) noexcept {
+    const float st = std::max(0.0001f, smooth_time_s);
+    const float omega = 2.0f / st;
+    const float x = omega * dt_s;
+    const float exp_f = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+    const float change = current - target;
+    const float temp = (velocity + omega * change) * dt_s;
+    velocity = (velocity - omega * temp) * exp_f;
+    float out = target + (change + temp) * exp_f;
+    if (((target - current) > 0.0f) == (out > target)) {
+        out = target;
+        velocity = 0.0f;
+    }
+    return out;
+}
+
+[[nodiscard]] float wrap_angle_rad(float delta) noexcept {
+    constexpr float kTwoPi = 6.28318530717959f;
+    constexpr float kPi = 3.14159265358979f;
+    while (delta > kPi) {
+        delta -= kTwoPi;
+    }
+    while (delta < -kPi) {
+        delta += kTwoPi;
+    }
+    return delta;
+}
+
+[[nodiscard]] float wrap_angle_deg(float delta) noexcept {
+    while (delta > 180.0f) {
+        delta -= 360.0f;
+    }
+    while (delta < -180.0f) {
+        delta += 360.0f;
+    }
+    return delta;
+}
+
+} // namespace
+
+void CameraTransitionState::start(const PreviewCamera& /*current_cam*/, const PreviewCamera& goal_cam,
+                                  float transition_time_s) noexcept {
+    target_cam = goal_cam;
+    smooth_time_s = std::clamp(transition_time_s, 0.0f, 2.0f);
+    animate_avatar = false;
+    active = true;
+}
+
+void CameraTransitionState::start_with_avatar(const PreviewCamera& /*current_cam*/, const PreviewCamera& goal_cam,
+                                              const std::array<float, 3>& /*cur_pos*/, float /*cur_rot_y_deg*/,
+                                              float /*cur_scale*/, const std::array<float, 3>& goal_pos,
+                                              float goal_rot_y_deg, float goal_scale,
+                                              float transition_time_s) noexcept {
+    target_cam = goal_cam;
+    target_avatar_pos = goal_pos;
+    target_avatar_rot_y_deg = goal_rot_y_deg;
+    target_avatar_scale = std::clamp(goal_scale, 0.25f, 4.0f);
+    smooth_time_s = std::clamp(transition_time_s, 0.0f, 2.0f);
+    animate_avatar = true;
+    active = true;
+}
+
+void CameraTransitionState::cancel() noexcept {
+    active = false;
+    animate_avatar = false;
+    vel_cam = {};
+    vel_avatar_pos = {};
+    vel_avatar_rot_y_deg = 0.0f;
+    vel_avatar_scale = 0.0f;
+}
+
+bool CameraTransitionState::step(float dt_s, PreviewCamera& in_out_cam,
+                                 std::array<float, 3>* in_out_avatar_pos, float* in_out_avatar_rot_y_deg,
+                                 float* in_out_avatar_scale) noexcept {
+    if (!active) {
+        return false;
+    }
+    if (smooth_time_s <= 1e-4f) {
+        in_out_cam = target_cam;
+        if (animate_avatar) {
+            if (in_out_avatar_pos != nullptr) {
+                *in_out_avatar_pos = target_avatar_pos;
+            }
+            if (in_out_avatar_rot_y_deg != nullptr) {
+                *in_out_avatar_rot_y_deg = target_avatar_rot_y_deg;
+            }
+            if (in_out_avatar_scale != nullptr) {
+                *in_out_avatar_scale = target_avatar_scale;
+            }
+        }
+        cancel();
+        return true;
+    }
+
+    const float step_dt = std::clamp(dt_s, 1e-4f, 0.05f);
+    // Critically damped SmoothDamp (~3*smooth_time reaches >98%; use 0.30*smooth_time_s so full settle <= ~2.0*smooth_time_s)
+    const float st = std::max(0.008f, smooth_time_s * 0.30f);
+    in_out_cam.target_x = smooth_damp_cam(in_out_cam.target_x, target_cam.target_x, vel_cam.target_x, st, step_dt);
+    in_out_cam.target_y = smooth_damp_cam(in_out_cam.target_y, target_cam.target_y, vel_cam.target_y, st, step_dt);
+    in_out_cam.target_z = smooth_damp_cam(in_out_cam.target_z, target_cam.target_z, vel_cam.target_z, st, step_dt);
+
+    const float yaw_goal = in_out_cam.yaw_rad + wrap_angle_rad(target_cam.yaw_rad - in_out_cam.yaw_rad);
+    in_out_cam.yaw_rad = smooth_damp_cam(in_out_cam.yaw_rad, yaw_goal, vel_cam.yaw_rad, st, step_dt);
+    in_out_cam.pitch_rad = smooth_damp_cam(in_out_cam.pitch_rad, target_cam.pitch_rad, vel_cam.pitch_rad, st, step_dt);
+    in_out_cam.distance = smooth_damp_cam(in_out_cam.distance, target_cam.distance, vel_cam.distance, st, step_dt);
+    in_out_cam.fovy_rad = smooth_damp_cam(in_out_cam.fovy_rad, target_cam.fovy_rad, vel_cam.fovy_rad, st, step_dt);
+
+    bool settled =
+        std::abs(in_out_cam.target_x - target_cam.target_x) < 2e-4f &&
+        std::abs(in_out_cam.target_y - target_cam.target_y) < 2e-4f &&
+        std::abs(in_out_cam.target_z - target_cam.target_z) < 2e-4f &&
+        std::abs(wrap_angle_rad(in_out_cam.yaw_rad - target_cam.yaw_rad)) < 2e-4f &&
+        std::abs(in_out_cam.pitch_rad - target_cam.pitch_rad) < 2e-4f &&
+        std::abs(in_out_cam.distance - target_cam.distance) < 5e-4f &&
+        std::abs(in_out_cam.fovy_rad - target_cam.fovy_rad) < 2e-4f;
+
+    if (animate_avatar) {
+        if (in_out_avatar_pos != nullptr) {
+            for (size_t i = 0; i < 3; ++i) {
+                (*in_out_avatar_pos)[i] = smooth_damp_cam((*in_out_avatar_pos)[i], target_avatar_pos[i],
+                                                           vel_avatar_pos[i], st, step_dt);
+                if (std::abs((*in_out_avatar_pos)[i] - target_avatar_pos[i]) >= 1e-4f) {
+                    settled = false;
+                }
+            }
+        }
+        if (in_out_avatar_rot_y_deg != nullptr) {
+            const float r_goal =
+                *in_out_avatar_rot_y_deg + wrap_angle_deg(target_avatar_rot_y_deg - *in_out_avatar_rot_y_deg);
+            *in_out_avatar_rot_y_deg =
+                smooth_damp_cam(*in_out_avatar_rot_y_deg, r_goal, vel_avatar_rot_y_deg, st, step_dt);
+            if (std::abs(wrap_angle_deg(*in_out_avatar_rot_y_deg - target_avatar_rot_y_deg)) >= 0.02f) {
+                settled = false;
+            }
+        }
+        if (in_out_avatar_scale != nullptr) {
+            *in_out_avatar_scale =
+                smooth_damp_cam(*in_out_avatar_scale, target_avatar_scale, vel_avatar_scale, st, step_dt);
+            if (std::abs(*in_out_avatar_scale - target_avatar_scale) >= 1e-4f) {
+                settled = false;
+            }
+        }
+    }
+
+    if (settled) {
+        in_out_cam = target_cam;
+        if (animate_avatar) {
+            if (in_out_avatar_pos != nullptr) {
+                *in_out_avatar_pos = target_avatar_pos;
+            }
+            if (in_out_avatar_rot_y_deg != nullptr) {
+                *in_out_avatar_rot_y_deg = target_avatar_rot_y_deg;
+            }
+            if (in_out_avatar_scale != nullptr) {
+                *in_out_avatar_scale = target_avatar_scale;
+            }
+        }
+        cancel();
+    }
+    return true;
+}
+
 Expected<void> PreviewPass::init(rhi::RhiDevice& rhi, VkFormat color_format) {
     destroy();
     device_ = &rhi;

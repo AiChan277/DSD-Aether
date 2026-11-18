@@ -207,6 +207,39 @@ struct PrecisionDarkTokens {
     ImU32 col32_orb_fill_light = hex_col32(0x38BDF8FF);
     ImU32 col32_orb_rim_light = hex_col32(0x10B981FF);
 
+    // Viewport aspect matte & broadcast safe-frame
+    ImU32 col32_vp_aspect_matte = hex_col32(0x0B0D12FF);
+    ImU32 col32_vp_safe_frame = hex_col32(0xFFFFFF40);
+
+    // Live2D parameter monitor bar palette
+    ImU32 col32_l2d_angle = hex_col32(0x52A8FFD2);
+    ImU32 col32_l2d_eye = hex_col32(0x48E0E8D2);
+    ImU32 col32_l2d_brow = hex_col32(0xFACE48D2);
+    ImU32 col32_l2d_mouth = hex_col32(0xFF6EC4D2);
+    ImU32 col32_l2d_vowel = hex_col32(0x78E898DC);
+
+    // Viewport live webcam tracking & hand skeleton overlay
+    ImU32 col32_hud_roi_calibrated = hex_col32(0x44E080EB);
+    ImU32 col32_hud_roi_locked = hex_col32(0xB4E048E6);
+    ImU32 col32_hud_roi_searching = hex_col32(0xEBA83CC8);
+    ImU32 col32_hud_kp_jaw = hex_col32(0x48EB8AD2);
+    ImU32 col32_hud_kp_nose = hex_col32(0x60E19CC3);
+    ImU32 col32_hud_kp_brow = hex_col32(0xFFD84CEB);
+    ImU32 col32_hud_kp_brow_curve = hex_col32(0xFFE05CF5);
+    ImU32 col32_hud_kp_eye = hex_col32(0x50EBFFEB);
+    ImU32 col32_hud_kp_iris = hex_col32(0xD2FEFFF5);
+    ImU32 col32_hud_kp_gaze = hex_col32(0xFFFF82F0);
+    ImU32 col32_hud_kp_lip_outer = hex_col32(0xFF66CCEB);
+    ImU32 col32_hud_kp_lip_inner = hex_col32(0xFF9CE0DC);
+    ImU32 col32_hud_kp_generic = hex_col32(0x5CECFFE1);
+    ImU32 col32_hud_axis_x = hex_col32(0xFF5252F0);
+    ImU32 col32_hud_axis_y = hex_col32(0x52EB70F0);
+    ImU32 col32_hud_axis_z = hex_col32(0x52A8FFF0);
+    ImU32 col32_hud_hand_left = hex_col32(0x38BDF8F0);
+    ImU32 col32_hud_hand_right = hex_col32(0xF472B6F0);
+    ImU32 col32_hud_hand_joint = hex_col32(0xFFFFFFEB);
+    ImU32 col32_hud_hand_normal = hex_col32(0xFFEB6EF5);
+
     // Typography sizes (§2.2 asks for Inter 13.5 px / JetBrains Mono 12.5 px). The FreeType builder
     // rasterizes whole pixel sizes only (13.5 silently renders at 13), so the tokens state the sizes
     // actually rendered; `font_size / type_body_px` is then the exact UI scale used by layout code.

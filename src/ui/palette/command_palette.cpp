@@ -235,6 +235,9 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
         keymap.chord(ActionId::ViewportHeatmap).c_str());
     add(PaletteCategory::Actions, PaletteCommandTag::ToggleOrbitOrb, "act.orb", "Toggle Light Orbit Orb",
         keymap.chord(ActionId::ViewportOrbitOrb).c_str());
+    add(PaletteCategory::Actions, PaletteCommandTag::ToggleTrackingHud, "act.hud", "Toggle Tracking HUD Overlay", "");
+    add(PaletteCategory::Actions, PaletteCommandTag::ToggleHandTracking, "act.hands",
+        "Toggle Collision-Aware Hand Tracking", "");
     add(PaletteCategory::Actions, PaletteCommandTag::ToggleCheckerboard, "act.checker", "Toggle Alpha Checkerboard",
         "");
     add(PaletteCategory::Actions, PaletteCommandTag::Undo, "act.undo", "Undo Last Action",

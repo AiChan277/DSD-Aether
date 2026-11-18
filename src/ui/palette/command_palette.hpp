@@ -50,6 +50,8 @@ enum class PaletteCommandTag : uint16_t {
     ReloadPlugins,
     ForceDeviceLost,
     ToggleWsControl,
+    ToggleTrackingHud,
+    ToggleHandTracking,
 };
 
 struct PaletteEntry {

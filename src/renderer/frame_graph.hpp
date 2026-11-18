@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/expected.hpp"
+#include "core/viewport_aspect.hpp"
 #include "renderer/accel_struct.hpp"
 #include "renderer/asset_upload/gpu_avatar.hpp"
 #include "renderer/denoise/denoiser_manager.hpp"
@@ -101,6 +102,7 @@ struct FrameRenderRequest {
     bool throttle_rt_accel_struct{false};
     uint8_t aa_mode{0}; // 0=Off, 1=FXAA, 2=TAA-Lite
     bool clear_swapchain{true};
+    core::ViewportAspectMode viewport_aspect_mode{core::ViewportAspectMode::FitAuto};
     VkImageView swapchain_view{VK_NULL_HANDLE};
     VkExtent2D swapchain_extent{};
 

@@ -64,7 +64,8 @@ struct GizmoCameraBasis {
     float fx{1.0f};
     float fy{1.0f};
 
-    static GizmoCameraBasis build(const DevShellAvatarView& avatar, ImVec2 canvas_p0, ImVec2 canvas_p1) noexcept {
+    static GizmoCameraBasis build(const DevShellAvatarView& avatar, ImVec2 canvas_p0, ImVec2 canvas_p1,
+                                  float fovy_override_rad = -1.0f) noexcept {
         GizmoCameraBasis cam{};
         cam.p0 = canvas_p0;
         cam.w = std::max(64.0f, canvas_p1.x - canvas_p0.x);
@@ -77,7 +78,8 @@ struct GizmoCameraBasis {
             (std::abs(cam.fwd.y) > 0.99f) ? GizmoVec3{0.0f, 0.0f, 1.0f} : GizmoVec3{0.0f, 1.0f, 0.0f};
         cam.right = norm3(cross3(cam.fwd, world_up), {1.0f, 0.0f, 0.0f});
         cam.up = cross3(cam.right, cam.fwd);
-        const float fovy = std::clamp(avatar.camera_fovy_rad, 0.1f, 2.5f);
+        const float raw_fovy = (fovy_override_rad > 0.05f) ? fovy_override_rad : avatar.camera_fovy_rad;
+        const float fovy = std::clamp(raw_fovy, 0.05f, 2.5f);
         cam.fy = 1.0f / std::tan(fovy * 0.5f);
         cam.fx = cam.fy / std::max(0.1f, aspect);
         return cam;
@@ -227,6 +229,52 @@ bool elide_utf8(const char* text, float max_w, char* out, size_t cap) noexcept {
     return true;
 }
 
+void draw_hand_skeleton_overlay(ImDrawList* dl, const PrecisionDarkTokens& t, ImVec2 img_p0, float thumb_w, float thumb_h,
+                                float scale, const char* label, ImU32 col, const std::array<float, 4>& obb,
+                                float angle_rad, const std::array<float, 2>& palm_center,
+                                const std::array<float, 2>& palm_normal_2d,
+                                const std::array<std::array<float, 2>, 21>& keypoints) noexcept {
+    static constexpr std::array<std::array<uint8_t, 2>, 21> kHandEdges = {{
+        {0, 1},   {1, 2},   {2, 3},   {3, 4},   {0, 5},   {5, 6},   {6, 7},
+        {7, 8},   {5, 9},   {9, 10},  {10, 11}, {11, 12}, {9, 13},  {13, 14},
+        {14, 15}, {15, 16}, {13, 17}, {0, 17},  {17, 18}, {18, 19}, {19, 20},
+    }};
+    auto to_px = [&](const std::array<float, 2>& pt) noexcept -> ImVec2 {
+        return ImVec2(img_p0.x + pt[0] * thumb_w, img_p0.y + pt[1] * thumb_h);
+    };
+
+    if (obb[2] > 0.005f && obb[3] > 0.005f) {
+        const float cx = img_p0.x + obb[0] * thumb_w;
+        const float cy = img_p0.y + obb[1] * thumb_h;
+        const float hw = 0.5f * obb[2] * thumb_w;
+        const float hh = 0.5f * obb[3] * thumb_h;
+        const float c = std::cos(angle_rad);
+        const float s = std::sin(angle_rad);
+        const std::array<ImVec2, 4> corners = {{
+            ImVec2(cx + (-hw * c - (-hh) * s), cy + (-hw * s + (-hh) * c)),
+            ImVec2(cx + (hw * c - (-hh) * s), cy + (hw * s + (-hh) * c)),
+            ImVec2(cx + (hw * c - hh * s), cy + (hw * s + hh * c)),
+            ImVec2(cx + (-hw * c - hh * s), cy + (-hw * s + hh * c)),
+        }};
+        dl->AddQuad(corners[0], corners[1], corners[2], corners[3], col, 1.4f * scale);
+        if (label != nullptr) {
+            dl->AddText(ImVec2(cx - hw, cy - hh - 13.0f * scale), col, label);
+        }
+    }
+
+    for (const auto& e : kHandEdges) {
+        dl->AddLine(to_px(keypoints[e[0]]), to_px(keypoints[e[1]]), col, 1.3f * scale);
+    }
+    for (const auto& kp : keypoints) {
+        dl->AddCircleFilled(to_px(kp), 2.0f * scale, t.col32_hud_hand_joint, 8);
+    }
+
+    const ImVec2 pc = to_px(palm_center);
+    const ImVec2 pn(pc.x + palm_normal_2d[0] * 18.0f * scale, pc.y + palm_normal_2d[1] * 18.0f * scale);
+    dl->AddCircleFilled(pc, 2.8f * scale, col, 10);
+    dl->AddLine(pc, pn, t.col32_hud_hand_normal, 1.8f * scale);
+}
+
 } // namespace
 
 float wrap_degrees(float deg) noexcept {
@@ -274,21 +322,136 @@ void ViewportPanel::reset_camera(StudioActions& actions) noexcept {
     cam_yaw_rad_ = 0.35f;
     cam_pitch_rad_ = 0.10f;
     cam_log_zoom_ = 0.0f;
+    active_builtin_preset_ = 0;
+    active_preset_name_ = builtin_framing_preset_name(0);
 }
 
-ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShellAvatarView& avatar, ParamStore& params,
-                                   UndoStack& undo, float scale, StudioActions& actions) {
+void ViewportPanel::apply_builtin_preset(int32_t preset_idx, const DevShellAvatarView& avatar, const ParamStore& params,
+                                         StudioActions& actions) noexcept {
+    const int32_t idx = std::clamp(preset_idx, 0, static_cast<int32_t>(kBuiltinFramingPresetCount) - 1);
+    const std::array<float, 3> av_pos = {
+        params.get_float(ParamId::AvatarPosX),
+        params.get_float(ParamId::AvatarPosY),
+        params.get_float(ParamId::AvatarPosZ),
+    };
+    const float av_scale = params.get_float(ParamId::AvatarScale);
+    const float vp_aspect = (last_aspect_layout_.frame_aspect > 0.1f) ? last_aspect_layout_.frame_aspect : (16.0f / 9.0f);
+    const CameraFramingPreset p = compute_builtin_framing_preset(
+        idx, avatar.bone_hips_y, avatar.bone_chest_y, avatar.bone_head_y, av_pos, av_scale, vp_aspect);
+
+    auto& v = actions.viewport;
+    v.camera_transition_speed_s = params.get_float(ParamId::AppCameraTransitionSpeed);
+    v.request_apply_camera_preset = true;
+    v.request_builtin_preset = idx;
+    v.target_cam_x = p.target_x;
+    v.target_cam_y = p.target_y;
+    v.target_cam_z = p.target_z;
+    v.target_cam_yaw_rad = p.yaw_rad;
+    v.target_cam_pitch_rad = p.pitch_rad;
+    v.target_cam_distance = p.distance;
+    v.target_cam_fovy_rad = p.fovy_rad;
+    v.target_preset_has_avatar_xform = false;
+
+    active_builtin_preset_ = idx;
+    active_preset_name_ = p.name;
+    cam_yaw_rad_ = p.yaw_rad;
+    cam_pitch_rad_ = p.pitch_rad;
+}
+
+void ViewportPanel::apply_custom_preset(size_t custom_idx, ParamStore& params, UndoStack& undo,
+                                        StudioActions& actions) noexcept {
+    const auto& list = preset_bank_.custom_presets();
+    if (custom_idx >= list.size()) {
+        return;
+    }
+    const CameraFramingPreset& p = list[custom_idx];
+    auto& v = actions.viewport;
+    v.camera_transition_speed_s = params.get_float(ParamId::AppCameraTransitionSpeed);
+    v.request_apply_camera_preset = true;
+    v.request_builtin_preset = -1;
+    v.target_cam_x = p.target_x;
+    v.target_cam_y = p.target_y;
+    v.target_cam_z = p.target_z;
+    v.target_cam_yaw_rad = p.yaw_rad;
+    v.target_cam_pitch_rad = p.pitch_rad;
+    v.target_cam_distance = p.distance;
+    v.target_cam_fovy_rad = p.fovy_rad;
+    v.target_preset_has_avatar_xform = p.has_avatar_xform;
+    v.target_preset_avatar_pos = p.avatar_pos;
+    v.target_preset_avatar_rot_y_deg = p.avatar_rot_y_deg;
+    v.target_preset_avatar_scale = p.avatar_scale;
+
+    if (p.has_avatar_xform) {
+        const auto set_and_push = [&](ParamId pid, float val) {
+            const double old_v = params.get(pid);
+            const double new_v = static_cast<double>(val);
+            if (params.set(pid, new_v)) {
+                undo.push_param(pid, old_v, new_v);
+            }
+        };
+        set_and_push(ParamId::AvatarPosX, p.avatar_pos[0]);
+        set_and_push(ParamId::AvatarPosY, p.avatar_pos[1]);
+        set_and_push(ParamId::AvatarPosZ, p.avatar_pos[2]);
+        set_and_push(ParamId::AvatarRotY, p.avatar_rot_y_deg);
+        set_and_push(ParamId::AvatarScale, p.avatar_scale);
+    }
+
+    active_builtin_preset_ = -1;
+    active_preset_name_ = p.name;
+    cam_yaw_rad_ = p.yaw_rad;
+    cam_pitch_rad_ = p.pitch_rad;
+}
+
+void ViewportPanel::save_custom_preset_from_current(std::string name, const DevShellAvatarView& avatar,
+                                                    const ParamStore& params) {
+    if (name.empty()) {
+        name = "Custom Preset";
+    }
+    CameraFramingPreset cp{};
+    cp.name = name;
+    cp.builtin = false;
+    cp.builtin_index = -1;
+    cp.target_x = avatar.camera_target[0];
+    cp.target_y = avatar.camera_target[1];
+    cp.target_z = avatar.camera_target[2];
+    cp.yaw_rad = avatar.has_camera ? avatar.camera_yaw_rad : cam_yaw_rad_;
+    cp.pitch_rad = avatar.has_camera ? avatar.camera_pitch_rad : cam_pitch_rad_;
+    cp.distance = (avatar.has_camera && avatar.camera_distance > 0.1f) ? avatar.camera_distance : 2.16f;
+    cp.fovy_rad = (avatar.camera_fovy_rad > 0.05f) ? avatar.camera_fovy_rad : 0.2805f;
+    cp.avatar_pos = {
+        params.get_float(ParamId::AvatarPosX),
+        params.get_float(ParamId::AvatarPosY),
+        params.get_float(ParamId::AvatarPosZ),
+    };
+    cp.avatar_rot_y_deg = params.get_float(ParamId::AvatarRotY);
+    cp.avatar_scale = std::clamp(params.get_float(ParamId::AvatarScale), 0.25f, 4.0f);
+    cp.has_avatar_xform = true;
+
+    (void)preset_bank_.save_or_overwrite(cp, persist_presets_);
+    active_builtin_preset_ = -1;
+    active_preset_name_ = name;
+}
+
+void ViewportPanel::open_save_preset_modal(const std::string& initial_name) {
+    save_preset_modal_open_ = true;
+    const std::string fallback = initial_name.empty() ? "My Broadcast Framing" : initial_name;
+    std::snprintf(save_preset_name_buf_.data(), save_preset_name_buf_.size(), "%s", fallback.c_str());
+}
+
+ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, float max_width, StudioMode mode, const DevShellAvatarView& avatar,
+                                   ParamStore& params, UndoStack& undo, bool& settings_dirty, float scale,
+                                   StudioActions& actions) {
     const PrecisionDarkTokens& t = tokens();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float bar_h = std::round(t.viewport_toolbar_h_px * scale);
     const float pad = 3.0f * scale;
     const float btn_h = bar_h - pad * 2.0f;
 
-    // 1) Top Viewport pill (Camera, Render overlays, Guides, Reset)
+    // 1) Top Camera, Aspect, Framing Presets & Overlay Toggles Pill
     dl->ChannelsSplit(2);
     dl->ChannelsSetCurrent(1);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * scale, (btn_h - ImGui::GetFontSize()) * 0.5f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f * scale, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f * scale, 0.0f));
     ImGui::SetCursorScreenPos(ImVec2(anchor.x + pad, anchor.y + pad));
     ImGui::BeginGroup();
 
@@ -298,7 +461,7 @@ ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShel
     std::snprintf(preview, sizeof(preview), "%s %s", icons::kCamera, presets[static_cast<size_t>(focal_idx_)].label);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, t.transparent);
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, t.bg_hover);
-    ImGui::SetNextItemWidth(ImGui::CalcTextSize("_ 85mm Portrait").x + ImGui::GetFrameHeight() + 12.0f * scale);
+    ImGui::SetNextItemWidth(ImGui::CalcTextSize("_ 85mm Portrait").x + ImGui::GetFrameHeight() + 10.0f * scale);
     if (ImGui::BeginCombo("##focal", preview)) {
         for (size_t i = 0; i < presets.size(); ++i) {
             const bool sel = (static_cast<int>(i) == focal_idx_);
@@ -313,11 +476,159 @@ ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShel
         }
         ImGui::EndCombo();
     }
-    ImGui::PopStyleColor(2);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
         ImGui::SetTooltip("%s", tr("Camera focal length (keeps the subject framed)"));
     }
     ImGui::SameLine();
+
+    // Viewport Aspect Ratio Lock selector (Broadcast Spout2/VCam output stays 16:9 isolated)
+    const auto cur_aspect = core::clamp_viewport_aspect_mode(params.get_int(ParamId::AppViewportAspect));
+    ImGui::SetNextItemWidth(ImGui::CalcTextSize("Fit (Auto)").x + ImGui::GetFrameHeight() + 10.0f * scale);
+    if (ImGui::BeginCombo("##aspect_mode", core::viewport_aspect_label(cur_aspect))) {
+        for (int a = 0; a < 4; ++a) {
+            const auto m = core::clamp_viewport_aspect_mode(a);
+            const bool sel = (m == cur_aspect);
+            if (ImGui::Selectable(core::viewport_aspect_label(m), sel)) {
+                const double old_v = params.get(ParamId::AppViewportAspect);
+                const double new_v = static_cast<double>(a);
+                if (params.set(ParamId::AppViewportAspect, new_v)) {
+                    undo.push_param(ParamId::AppViewportAspect, old_v, new_v);
+                    settings_dirty = true;
+                }
+            }
+            if (sel) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s",
+                          tr("Studio Viewport Aspect Lock (1:1 world-to-pixel ratio; Spout2/VCam output remains 16:9)"));
+    }
+    ImGui::SameLine();
+
+    // Framing Presets Dropdown (Ctrl+1..6 + Custom Save/Overwrite/Delete)
+    char preset_lbl[64]{};
+    std::snprintf(preset_lbl, sizeof(preset_lbl), "%s", active_preset_name_.c_str());
+    ImGui::SetNextItemWidth(std::min(190.0f * scale, std::max(130.0f * scale, max_width * 0.22f)));
+    if (ImGui::BeginCombo("##framing_preset", preset_lbl, ImGuiComboFlags_HeightLarge)) {
+        for (int32_t i = 0; i < static_cast<int32_t>(kBuiltinFramingPresetCount); ++i) {
+            const bool sel = (active_builtin_preset_ == i);
+            const char* name = builtin_framing_preset_name(i);
+            const char* sc = builtin_framing_preset_shortcut(i);
+            if (ImGui::Selectable(name, sel)) {
+                apply_builtin_preset(i, avatar, params, actions);
+            }
+            if (sc[0] != '\0') {
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() -
+                                ImGui::CalcTextSize(sc).x - 4.0f * scale);
+                ImGui::TextColored(t.text_tertiary, "%s", sc);
+            }
+        }
+        if (!preset_bank_.custom_presets().empty()) {
+            ImGui::Separator();
+            int32_t pending_delete = -1;
+            for (size_t c = 0; c < preset_bank_.custom_presets().size(); ++c) {
+                const auto& cp = preset_bank_.custom_presets()[c];
+                ImGui::PushID(static_cast<int>(c));
+                const bool sel = (active_builtin_preset_ < 0 && active_preset_name_ == cp.name);
+                if (ImGui::Selectable(cp.name.c_str(), sel, ImGuiSelectableFlags_AllowOverlap,
+                                      ImVec2(std::max(100.0f * scale, ImGui::GetContentRegionAvail().x - 52.0f * scale), 0.0f))) {
+                    apply_custom_preset(c, params, undo, actions);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("S")) {
+                    CameraFramingPreset updated = cp;
+                    updated.target_x = avatar.camera_target[0];
+                    updated.target_y = avatar.camera_target[1];
+                    updated.target_z = avatar.camera_target[2];
+                    updated.yaw_rad = avatar.has_camera ? avatar.camera_yaw_rad : cam_yaw_rad_;
+                    updated.pitch_rad = avatar.has_camera ? avatar.camera_pitch_rad : cam_pitch_rad_;
+                    updated.distance =
+                        (avatar.has_camera && avatar.camera_distance > 0.1f) ? avatar.camera_distance : 2.16f;
+                    updated.fovy_rad = (avatar.camera_fovy_rad > 0.05f) ? avatar.camera_fovy_rad : 0.2805f;
+                    updated.avatar_pos = {params.get_float(ParamId::AvatarPosX), params.get_float(ParamId::AvatarPosY),
+                                          params.get_float(ParamId::AvatarPosZ)};
+                    updated.avatar_rot_y_deg = params.get_float(ParamId::AvatarRotY);
+                    updated.avatar_scale = std::clamp(params.get_float(ParamId::AvatarScale), 0.25f, 4.0f);
+                    updated.has_avatar_xform = true;
+                    (void)preset_bank_.overwrite_at(c, updated, persist_presets_);
+                    active_builtin_preset_ = -1;
+                    active_preset_name_ = cp.name;
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip("%s", tr("Overwrite preset with current camera & AvatarRoot transform"));
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("\xC3\x97")) {
+                    pending_delete = static_cast<int32_t>(c);
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip("%s", tr("Delete custom preset"));
+                }
+                ImGui::PopID();
+            }
+            if (pending_delete >= 0) {
+                (void)preset_bank_.remove_at(static_cast<size_t>(pending_delete), persist_presets_);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Selectable(tr("+ Save Preset"))) {
+            open_save_preset_modal();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopStyleColor(2);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tr("Camera & AvatarRoot framing presets (Ctrl+1..6)"));
+    }
+    ImGui::SameLine();
+
+    if (toolbar_toggle(tr("Reset Camera"), false, btn_h, tr("Smoothly re-frame the avatar (F)"))) {
+        reset_camera(actions);
+    }
+    ImGui::SameLine();
+    const bool hud_on = params.get_bool(ParamId::AppTrackingHudVisible);
+    if (toolbar_toggle(tr("Tracking HUD"), hud_on, btn_h,
+                       tr("Show/hide Viewport Tracking HUD overlay (webcam & NPU stay active)"))) {
+        toggle_bool_param(params, undo, ParamId::AppTrackingHudVisible);
+        settings_dirty = true;
+    }
+    ImGui::SameLine();
+    char orb_lbl[32]{};
+    std::snprintf(orb_lbl, sizeof(orb_lbl), "%s Light Orb", icons::kSun);
+    const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
+    if (toolbar_toggle(orb_lbl, orb_on, btn_h, tr("Toggle Light Orbit Gizmo (Alt+L)"))) {
+        toggle_bool_param(params, undo, ParamId::AppOrbitOrbVisible);
+        settings_dirty = true;
+    }
+    ImGui::SameLine();
+    const bool hands_on = params.get_bool(ParamId::TrackingHandEnabled);
+    if (toolbar_toggle(tr("Hands"), hands_on, btn_h, tr("Toggle collision-aware M1 21-keypoint hand tracking"))) {
+        toggle_bool_param(params, undo, ParamId::TrackingHandEnabled);
+        actions.viewport.request_set_hand_tracking = true;
+        actions.viewport.target_hand_tracking_enabled = params.get_bool(ParamId::TrackingHandEnabled);
+        settings_dirty = true;
+    }
+    ImGui::EndGroup();
+    ImGui::PopStyleVar(2);
+
+    const ImVec2 top_group_max = ImGui::GetItemRectMax();
+    dl->ChannelsSetCurrent(0);
+    const ImVec2 top_bg_max(top_group_max.x + pad, anchor.y + bar_h);
+    dl->AddRectFilled(anchor, top_bg_max, t.col32_hud_bg, bar_h * 0.5f);
+    dl->AddRect(anchor, top_bg_max, t.col32_hud_border, bar_h * 0.5f, 0, 1.0f);
+    dl->ChannelsMerge();
+
+    // 1B) Secondary Render & Guides pill (Wireframe, Colliders, Grid, Confidence Skeleton, SDF, RT)
+    const ImVec2 view_anchor(anchor.x, top_bg_max.y + 5.0f * scale);
+    dl->ChannelsSplit(2);
+    dl->ChannelsSetCurrent(1);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f * scale, (btn_h - ImGui::GetFontSize()) * 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f * scale, 0.0f));
+    ImGui::SetCursorScreenPos(ImVec2(view_anchor.x + pad, view_anchor.y + pad));
+    ImGui::BeginGroup();
 
     if (!avatar.wireframe_supported) {
         ImGui::BeginDisabled();
@@ -380,27 +691,18 @@ ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShel
         toggle_bool_param(params, undo, ParamId::RenderRtEnabled);
         actions.viewport.lighting_dirty = true;
     }
-    ImGui::SameLine();
-    const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
-    if (toolbar_toggle(icons::kSun, orb_on, btn_h, tr("Light Orbit Gizmo (Alt+L)"))) {
-        toggle_bool_param(params, undo, ParamId::AppOrbitOrbVisible);
-    }
-    ImGui::SameLine();
-    if (toolbar_toggle(tr("Reset Camera"), false, btn_h, tr("Re-frame the avatar (F)"))) {
-        reset_camera(actions);
-    }
     ImGui::EndGroup();
     ImGui::PopStyleVar(2);
 
-    const ImVec2 top_group_max = ImGui::GetItemRectMax();
+    const ImVec2 view_group_max = ImGui::GetItemRectMax();
     dl->ChannelsSetCurrent(0);
-    const ImVec2 top_bg_max(top_group_max.x + pad, anchor.y + bar_h);
-    dl->AddRectFilled(anchor, top_bg_max, t.col32_hud_bg, bar_h * 0.5f);
-    dl->AddRect(anchor, top_bg_max, t.col32_hud_border, bar_h * 0.5f, 0, 1.0f);
+    const ImVec2 view_bg_max(view_group_max.x + pad, view_anchor.y + bar_h);
+    dl->AddRectFilled(view_anchor, view_bg_max, t.col32_hud_bg, bar_h * 0.5f);
+    dl->AddRect(view_anchor, view_bg_max, t.col32_hud_border, bar_h * 0.5f, 0, 1.0f);
     dl->ChannelsMerge();
 
-    // 2) Secondary Transform Gizmo pill directly below the top toolbar (Q / W / E / R + Local/World)
-    const ImVec2 giz_anchor(anchor.x, top_bg_max.y + 6.0f * scale);
+    // 2) Secondary Transform Gizmo pill directly below the view toggles pill (Q / W / E / R + Local/World)
+    const ImVec2 giz_anchor(anchor.x, view_bg_max.y + 5.0f * scale);
     dl->ChannelsSplit(2);
     dl->ChannelsSetCurrent(1);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f * scale, (btn_h - ImGui::GetFontSize()) * 0.5f));
@@ -439,14 +741,20 @@ ImVec2 ViewportPanel::draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShel
     dl->AddRect(giz_anchor, giz_bg_max, t.col32_hud_border, bar_h * 0.5f, 0, 1.0f);
     dl->ChannelsMerge();
 
-    return ImVec2(std::max(top_bg_max.x, giz_bg_max.x), giz_bg_max.y);
+    return ImVec2(std::max({top_bg_max.x, view_bg_max.x, giz_bg_max.x}), giz_bg_max.y);
 }
 
-void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const HardwareInventory& hw,
+bool ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, float canvas_bottom_y, const HardwareInventory& hw,
                                       const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
                                       bool tracking_paused, ParamStore& params, AppSettings& settings,
                                       bool& settings_dirty, const UiFontSet& fonts, float scale,
-                                      StudioActions& actions) {
+                                      StudioActions& actions, ImVec2& out_p0, ImVec2& out_p1) {
+    if (!params.get_bool(ParamId::AppTrackingHudVisible)) {
+        out_p0 = ImVec2(0.0f, 0.0f);
+        out_p1 = ImVec2(0.0f, 0.0f);
+        return false;
+    }
+
     const PrecisionDarkTokens& t = tokens();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (fonts.mono != nullptr) {
@@ -456,30 +764,96 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     // shift when a value gains/loses a digit or sign, otherwise the whole tracker window visibly jitters.
     // Long status text (e.g. a model/EP error) is elided so the HUD keeps a bounded width; the full text is
     // available as a tooltip on hover.
+    const ImU32 ep_dot =
+        tracking.ready ? (tracking.demotion_count > 0 ? t.col32_status_warn : t.col32_status_ok) : t.col32_status_error;
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float pad = 8.0f * scale;
+    const float dot_w = 12.0f * scale;
+    const float line_h = ImGui::GetTextLineHeight();
+    const float ctrl_h = ImGui::GetFrameHeight();
+
     const float max_label_w = 300.0f * scale;
     char ep_label[160]{};
     const bool ep_elided = elide_utf8(tracking.active_ep_label, max_label_w, ep_label, sizeof(ep_label));
+
+    char close_pill_lbl[32]{};
+    std::snprintf(close_pill_lbl, sizeof(close_pill_lbl), "%s##HudClosePill", icons::kClose);
+    char close_card_lbl[32]{};
+    std::snprintf(close_card_lbl, sizeof(close_card_lbl), "%s##HudCloseCard", icons::kClose);
+
+    if (params.get_bool(ParamId::AppTrackingHudCollapsed)) {
+        const int face_pct = static_cast<int>(std::lround(std::clamp(tracking.face_confidence, 0.0f, 1.0f) * 100.0f));
+        char pill_txt[224]{};
+        std::snprintf(pill_txt, sizeof(pill_txt), "%s \xC2\xB7 %4.1f ms \xC2\xB7 Face %3d%%", ep_label,
+                      static_cast<double>(std::clamp(tracking.inference_ms, 0.0f, 999.9f)), face_pct);
+        const char* expand_lbl = "Cam##HudExpand";
+        const float expand_w = ImGui::CalcTextSize("Cam").x + st.FramePadding.x * 2.0f;
+        const float close_w = ImGui::CalcTextSize(icons::kClose).x + st.FramePadding.x * 2.0f;
+        const float txt_w = ImGui::CalcTextSize(pill_txt).x;
+        const float pill_w = std::ceil(pad * 2.0f + dot_w + txt_w + expand_w + close_w + st.ItemSpacing.x * 2.0f);
+        const float pill_h = std::max(line_h, ctrl_h) + pad * 1.5f;
+        const ImVec2 p0(std::floor(top_right.x - pill_w), std::floor(std::max(top_right.y, min_y)));
+        const ImVec2 p1(top_right.x, p0.y + pill_h);
+        dl->AddRectFilled(p0, p1, t.col32_hud_bg, pill_h * 0.5f);
+        dl->AddRect(p0, p1, t.col32_hud_border, pill_h * 0.5f, 0, 1.0f);
+
+        const float mid_y = p0.y + pill_h * 0.5f;
+        dl->AddCircleFilled(ImVec2(p0.x + pad + 4.0f * scale, mid_y), 3.5f * scale, ep_dot, 12);
+        dl->AddText(ImVec2(p0.x + pad + dot_w, mid_y - line_h * 0.5f), t.col32_text_primary, pill_txt);
+
+        ImGui::SetCursorScreenPos(ImVec2(p0.x + pad + dot_w + txt_w + st.ItemSpacing.x, mid_y - ctrl_h * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Button, t.bg_raised);
+        if (ImGui::SmallButton(expand_lbl)) {
+            (void)params.set(ParamId::AppTrackingHudCollapsed, 0.0);
+            settings_dirty = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("%s", tr("Expand Tracking HUD webcam preview"));
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(close_pill_lbl)) {
+            (void)params.set(ParamId::AppTrackingHudVisible, 0.0);
+            settings_dirty = true;
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("%s", tr("Hide Tracking HUD overlay (webcam & NPU stay active)"));
+        }
+        ImGui::PopStyleColor();
+        if (ep_elided && !ImGui::IsAnyItemHovered() && ImGui::IsMouseHoveringRect(p0, p1)) {
+            ImGui::SetTooltip("%s", tracking.active_ep_label);
+        }
+        if (fonts.mono != nullptr) {
+            ImGui::PopFont();
+        }
+        out_p0 = p0;
+        out_p1 = p1;
+        return true;
+    }
+
     char line1[200]{};
-    std::snprintf(line1, sizeof(line1), "%s · %5.1f ms", ep_label,
+    std::snprintf(line1, sizeof(line1), "%s \xC2\xB7 %5.1f ms", ep_label,
                   static_cast<double>(std::clamp(tracking.inference_ms, 0.0f, 999.9f)));
     char cam_full[160]{};
     format_camera_status_badge(tracking, cam_full, sizeof(cam_full));
     char cam_line[200]{};
     const bool cam_elided = elide_utf8(cam_full, max_label_w + 40.0f * scale, cam_line, sizeof(cam_line));
     char line2[240]{};
-    std::snprintf(line2, sizeof(line2), "%s · GPU %5.1f ms", cam_line,
+    std::snprintf(line2, sizeof(line2), "%s \xC2\xB7 GPU %5.1f ms", cam_line,
                   static_cast<double>(std::clamp(render_view.total_gpu_ms, 0.0f, 999.9f)));
 
-    const float pad = 8.0f * scale;
-    const float dot_w = 12.0f * scale;
-    const float l1_w = dot_w + ImGui::CalcTextSize(line1).x;
+    const float collapse_w = ImGui::CalcTextSize("-").x + st.FramePadding.x * 2.0f;
+    const float close_w = ImGui::CalcTextSize(icons::kClose).x + st.FramePadding.x * 2.0f;
+    const float hdr_btns_w = collapse_w + close_w + st.ItemSpacing.x + 8.0f * scale;
+
+    const float l1_w = dot_w + ImGui::CalcTextSize(line1).x + hdr_btns_w;
     const float l2_w = ImGui::CalcTextSize(line2).x;
-    const ImGuiStyle& st = ImGui::GetStyle();
     const float cam_combo_w = 138.0f * scale;
     const char* cam_btn_lbl = tracking.camera_active ? tr("Stop Cam") : tr("Start Cam");
+    const bool hands_on = params.get_bool(ParamId::TrackingHandEnabled);
+    const char* hands_lbl = tr("Hands");
     const float btn_row_w = ImGui::CalcTextSize(cam_btn_lbl).x + cam_combo_w +
                             ImGui::CalcTextSize(icons::kPause).x + ImGui::CalcTextSize(tr("Calibrate")).x +
-                            st.FramePadding.x * 8.0f + st.ItemSpacing.x * 4.0f;
+                            ImGui::CalcTextSize(hands_lbl).x + st.FramePadding.x * 8.0f + st.ItemSpacing.x * 5.0f;
 
     const bool has_preview =
         tracking.camera_active && tracking.live_preview_valid && (tracking.live_preview_texture_id != 0ULL);
@@ -487,45 +861,70 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     if (has_preview) {
         if (tracking.live_preview_face_locked) {
             if (tracking.neutral_calibrated) {
-                std::snprintf(pose_line, sizeof(pose_line), "LOCKED · P%+5.1f Y%+5.1f R%+5.1f",
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKED \xC2\xB7 P%+5.1f Y%+5.1f R%+5.1f",
                               static_cast<double>(tracking.head_euler_deg[0]),
                               static_cast<double>(tracking.head_euler_deg[1]),
                               static_cast<double>(tracking.head_euler_deg[2]));
             } else {
-                std::snprintf(pose_line, sizeof(pose_line), "LOCKING %2u/15 · P%+5.1f Y%+5.1f R%+5.1f",
+                std::snprintf(pose_line, sizeof(pose_line), "LOCKING %2u/15 \xC2\xB7 P%+5.1f Y%+5.1f R%+5.1f",
                               tracking.stable_lock_frames, static_cast<double>(tracking.head_euler_deg[0]),
                               static_cast<double>(tracking.head_euler_deg[1]),
                               static_cast<double>(tracking.head_euler_deg[2]));
             }
         } else {
-            std::snprintf(pose_line, sizeof(pose_line), "%s", tr("SEARCHING FACE · Look at camera"));
+            std::snprintf(pose_line, sizeof(pose_line), "%s", tr("SEARCHING FACE \xC2\xB7 Look at camera"));
         }
     }
 
+    const float p0_y = std::floor(std::max(top_right.y, min_y));
     const float content_w = std::ceil(std::max({l1_w, l2_w, btn_row_w}));
-    // Preview size depends only on DPI scale (never on live text) so the camera image stays put.
-    const float thumb_w = has_preview ? std::round(std::max(content_w, 288.0f * scale)) : 0.0f;
-    const float thumb_h = has_preview ? std::round(thumb_w * 9.0f / 16.0f) : 0.0f;
-    const float pose_w = has_preview ? ImGui::CalcTextSize("LOCKING 15/15 · P+000.0 Y+000.0 R+000.0").x : 0.0f;
+    // Preview size depends only on DPI scale (and short-viewport clamping) so live text never jitters the card.
+    float thumb_w = has_preview ? std::round(std::max(content_w, 288.0f * scale)) : 0.0f;
+    float thumb_h = has_preview ? std::round(thumb_w * 9.0f / 16.0f) : 0.0f;
+    if (has_preview && canvas_bottom_y > p0_y + 120.0f * scale) {
+        const float fixed_h = pad * 2.0f + line_h * 3.0f + ctrl_h + st.ItemSpacing.y * 2.5f + 12.0f * scale;
+        const float max_thumb_h = std::max(72.0f * scale, canvas_bottom_y - p0_y - fixed_h);
+        if (thumb_h > max_thumb_h) {
+            thumb_h = std::round(max_thumb_h);
+            thumb_w = std::round(thumb_h * 16.0f / 9.0f);
+        }
+    }
+    const float pose_w = has_preview ? ImGui::CalcTextSize("LOCKING 15/15 \xC2\xB7 P+000.0 Y+000.0 R+000.0").x : 0.0f;
     const float inner_w = std::ceil(std::max({content_w, thumb_w, pose_w}));
     const float w = inner_w + pad * 2.0f;
-    const float line_h = ImGui::GetTextLineHeight();
-    const float ctrl_h = ImGui::GetFrameHeight();
-    const float extra_preview_h =
-        has_preview ? (thumb_h + st.ItemSpacing.y * 0.5f + line_h) : 0.0f;
+    const float extra_preview_h = has_preview ? (thumb_h + st.ItemSpacing.y * 0.5f + line_h) : 0.0f;
     const float h = pad * 2.0f + line_h * 2.0f + ctrl_h + st.ItemSpacing.y * 2.0f + extra_preview_h;
-    const ImVec2 p0(std::floor(top_right.x - w), std::floor(std::max(top_right.y, min_y)));
+    const ImVec2 p0(std::floor(top_right.x - w), p0_y);
     const ImVec2 p1(top_right.x, p0.y + h);
     dl->AddRectFilled(p0, p1, t.col32_hud_bg, 8.0f * scale);
     dl->AddRect(p0, p1, t.col32_hud_border, 8.0f * scale, 0, 1.0f);
 
-    const ImU32 ep_dot =
-        tracking.ready ? (tracking.demotion_count > 0 ? t.col32_status_warn : t.col32_status_ok) : t.col32_status_error;
     dl->AddCircleFilled(ImVec2(p0.x + pad + 4.0f * scale, p0.y + pad + line_h * 0.5f), 3.5f * scale, ep_dot, 12);
     dl->AddText(ImVec2(p0.x + pad + dot_w, p0.y + pad), t.col32_text_primary, line1);
     dl->AddText(ImVec2(p0.x + pad, p0.y + pad + line_h + st.ItemSpacing.y * 0.5f),
                 tracking.camera_active ? t.col32_text_secondary : t.col32_status_warn, line2);
-    if ((ep_elided || cam_elided) &&
+
+    ImGui::SetCursorScreenPos(ImVec2(p1.x - pad - collapse_w - close_w - st.ItemSpacing.x,
+                                     p0.y + pad + (line_h - ctrl_h) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button, t.bg_raised);
+    if (ImGui::SmallButton("-##HudCollapse")) {
+        (void)params.set(ParamId::AppTrackingHudCollapsed, 1.0);
+        settings_dirty = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tr("Collapse Tracking HUD to compact status pill"));
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(close_card_lbl)) {
+        (void)params.set(ParamId::AppTrackingHudVisible, 0.0);
+        settings_dirty = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tr("Close Tracking HUD overlay (webcam & NPU stay active)"));
+    }
+    ImGui::PopStyleColor();
+
+    if ((ep_elided || cam_elided) && !ImGui::IsAnyItemHovered() &&
         ImGui::IsMouseHoveringRect(ImVec2(p0.x, p0.y), ImVec2(p1.x, p0.y + pad + line_h * 2.0f + st.ItemSpacing.y))) {
         ImGui::SetTooltip("%s\n%s", tracking.active_ep_label, cam_full);
     }
@@ -585,6 +984,20 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
     }
     ImGui::PopStyleColor();
 
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, hands_on ? t.accent_button : t.bg_raised);
+    if (ImGui::SmallButton(hands_lbl)) {
+        const bool next_hands = !hands_on;
+        (void)params.set(ParamId::TrackingHandEnabled, next_hands ? 1.0 : 0.0);
+        actions.viewport.request_set_hand_tracking = true;
+        actions.viewport.target_hand_tracking_enabled = next_hands;
+        settings_dirty = true;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", tr("Toggle M1 21-keypoint hand tracking + self-collision solver"));
+    }
+    ImGui::PopStyleColor();
+
     if (has_preview) {
         const float preview_y = p0.y + pad + line_h * 2.0f + st.ItemSpacing.y * 2.0f + ctrl_h;
         const ImVec2 img_p0(p0.x + pad + (inner_w - thumb_w) * 0.5f, preview_y);
@@ -600,9 +1013,9 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
             const ImVec2 r1(img_p0.x + (roi[0] + roi[2] * 0.5f) * thumb_w,
                             img_p0.y + (roi[1] + roi[3] * 0.5f) * thumb_h);
             const ImU32 roi_col = tracking.live_preview_face_locked
-                                      ? (tracking.neutral_calibrated ? IM_COL32(68, 224, 128, 235)
-                                                                     : IM_COL32(180, 224, 72, 230))
-                                      : IM_COL32(235, 168, 60, 200);
+                                      ? (tracking.neutral_calibrated ? t.col32_hud_roi_calibrated
+                                                                     : t.col32_hud_roi_locked)
+                                      : t.col32_hud_roi_searching;
             dl->AddRect(r0, r1, roi_col, 3.0f * scale, 0, 1.6f * scale);
         }
 
@@ -631,13 +1044,13 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
                 }
             };
 
-            const ImU32 col_jaw = IM_COL32(72, 235, 138, 210);
-            const ImU32 col_nose = IM_COL32(96, 225, 156, 195);
-            const ImU32 col_brow = IM_COL32(255, 216, 76, 235);
-            const ImU32 col_eye = IM_COL32(80, 235, 255, 235);
-            const ImU32 col_iris = IM_COL32(210, 254, 255, 245);
-            const ImU32 col_lip_outer = IM_COL32(255, 102, 204, 235);
-            const ImU32 col_lip_inner = IM_COL32(255, 156, 224, 220);
+            const ImU32 col_jaw = t.col32_hud_kp_jaw;
+            const ImU32 col_nose = t.col32_hud_kp_nose;
+            const ImU32 col_brow = t.col32_hud_kp_brow;
+            const ImU32 col_eye = t.col32_hud_kp_eye;
+            const ImU32 col_iris = t.col32_hud_kp_iris;
+            const ImU32 col_lip_outer = t.col32_hud_kp_lip_outer;
+            const ImU32 col_lip_inner = t.col32_hud_kp_lip_inner;
 
             draw_wire(0U, 16U, col_jaw, 1.3f * scale, false);
             draw_wire(27U, 30U, col_nose, 1.15f * scale, false);
@@ -651,14 +1064,52 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
                 }
             }
 
-            draw_wire(36U, 41U, col_eye, 1.4f * scale, true);
-            draw_wire(42U, 47U, col_eye, 1.4f * scale, true);
+            if (tracking.live_preview_brow_pts_valid) {
+                for (size_t b = 0; b + 1U < 5U; ++b) {
+                    dl->AddLine(
+                        ImVec2(img_p0.x + tracking.live_preview_left_brow_pts[b][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_left_brow_pts[b][1] * thumb_h),
+                        ImVec2(img_p0.x + tracking.live_preview_left_brow_pts[b + 1U][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_left_brow_pts[b + 1U][1] * thumb_h),
+                        t.col32_hud_kp_brow_curve, 1.8f * scale);
+                    dl->AddLine(
+                        ImVec2(img_p0.x + tracking.live_preview_right_brow_pts[b][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_right_brow_pts[b][1] * thumb_h),
+                        ImVec2(img_p0.x + tracking.live_preview_right_brow_pts[b + 1U][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_right_brow_pts[b + 1U][1] * thumb_h),
+                        t.col32_hud_kp_brow_curve, 1.8f * scale);
+                }
+            }
+
+            if (tracking.live_preview_eye_poly_valid) {
+                for (size_t p = 0; p < 8U; ++p) {
+                    const size_t nxt = (p + 1U) % 8U;
+                    dl->AddLine(
+                        ImVec2(img_p0.x + tracking.live_preview_left_eye_poly[p][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_left_eye_poly[p][1] * thumb_h),
+                        ImVec2(img_p0.x + tracking.live_preview_left_eye_poly[nxt][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_left_eye_poly[nxt][1] * thumb_h),
+                        col_eye, 1.5f * scale);
+                    dl->AddLine(
+                        ImVec2(img_p0.x + tracking.live_preview_right_eye_poly[p][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_right_eye_poly[p][1] * thumb_h),
+                        ImVec2(img_p0.x + tracking.live_preview_right_eye_poly[nxt][0] * thumb_w,
+                               img_p0.y + tracking.live_preview_right_eye_poly[nxt][1] * thumb_h),
+                        col_eye, 1.5f * scale);
+                }
+            } else {
+                draw_wire(36U, 41U, col_eye, 1.4f * scale, true);
+                draw_wire(42U, 47U, col_eye, 1.4f * scale, true);
+            }
             if (tracking.live_preview_iris_valid) {
                 for (size_t e = 0U; e < 2U; ++e) {
                     const ImVec2 iris_pt(img_p0.x + tracking.live_preview_iris_centers[e][0] * thumb_w,
                                          img_p0.y + tracking.live_preview_iris_centers[e][1] * thumb_h);
                     dl->AddCircleFilled(iris_pt, 2.2f * scale, col_iris, 10);
                     dl->AddCircle(iris_pt, 3.6f * scale, col_eye, 12, 1.1f * scale);
+                    const ImVec2 gaze_tip(iris_pt.x + tracking.live_preview_gaze_vec[0] * 14.0f * scale,
+                                          iris_pt.y + tracking.live_preview_gaze_vec[1] * 14.0f * scale);
+                    dl->AddLine(iris_pt, gaze_tip, t.col32_hud_kp_gaze, 1.5f * scale);
                 }
             }
 
@@ -671,7 +1122,7 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
                 }
                 const ImVec2 kp(img_p0.x + tracking.live_preview_keypoints[k][0] * thumb_w,
                                 img_p0.y + tracking.live_preview_keypoints[k][1] * thumb_h);
-                dl->AddCircleFilled(kp, 1.8f * scale, IM_COL32(92, 236, 255, 225), 8);
+                dl->AddCircleFilled(kp, 1.8f * scale, t.col32_hud_kp_generic, 8);
             }
         }
 
@@ -684,9 +1135,24 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
                               img_p0.y + tracking.live_preview_head_axes[2][1] * thumb_h);
             const ImVec2 ax_z(img_p0.x + tracking.live_preview_head_axes[3][0] * thumb_w,
                               img_p0.y + tracking.live_preview_head_axes[3][1] * thumb_h);
-            dl->AddLine(origin, ax_x, IM_COL32(255, 82, 82, 240), 1.8f * scale);
-            dl->AddLine(origin, ax_y, IM_COL32(82, 235, 112, 240), 1.8f * scale);
-            dl->AddLine(origin, ax_z, IM_COL32(82, 168, 255, 240), 1.8f * scale);
+            dl->AddLine(origin, ax_x, t.col32_hud_axis_x, 1.8f * scale);
+            dl->AddLine(origin, ax_y, t.col32_hud_axis_y, 1.8f * scale);
+            dl->AddLine(origin, ax_z, t.col32_hud_axis_z, 1.8f * scale);
+        }
+
+        if (tracking.hand_tracking_enabled) {
+            if (tracking.left_hand_detected) {
+                draw_hand_skeleton_overlay(dl, t, img_p0, thumb_w, thumb_h, scale, "L-HAND",
+                                           t.col32_hud_hand_left, tracking.left_hand_bbox_obb,
+                                           tracking.left_hand_angle_rad, tracking.left_palm_center,
+                                           tracking.left_palm_normal_2d, tracking.left_hand_keypoints);
+            }
+            if (tracking.right_hand_detected) {
+                draw_hand_skeleton_overlay(dl, t, img_p0, thumb_w, thumb_h, scale, "R-HAND",
+                                           t.col32_hud_hand_right, tracking.right_hand_bbox_obb,
+                                           tracking.right_hand_angle_rad, tracking.right_palm_center,
+                                           tracking.right_palm_normal_2d, tracking.right_hand_keypoints);
+            }
         }
 
         dl->PopClipRect();
@@ -698,6 +1164,38 @@ void ViewportPanel::draw_tracking_hud(ImVec2 top_right, float min_y, const Hardw
 
     if (fonts.mono != nullptr) {
         ImGui::PopFont();
+    }
+    out_p0 = p0;
+    out_p1 = p1;
+    return true;
+}
+
+void ViewportPanel::draw_save_preset_modal(const DevShellAvatarView& avatar, const ParamStore& params, float scale) {
+    if (save_preset_modal_open_) {
+        ImGui::OpenPopup("##SaveCameraPresetPopup");
+        save_preset_modal_open_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(360.0f * scale, 0.0f), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("##SaveCameraPresetPopup", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::TextUnformatted(tr("Save Camera & AvatarRoot Preset"));
+        ImGui::Separator();
+        ImGui::InputText(tr("Preset Name"), save_preset_name_buf_.data(), save_preset_name_buf_.size());
+        ImGui::Spacing();
+        ImGui::TextDisabled("Target: (%.2f, %.2f, %.2f)  Dist: %.2fm  RotY: %.1f deg",
+                            static_cast<double>(avatar.camera_target[0]), static_cast<double>(avatar.camera_target[1]),
+                            static_cast<double>(avatar.camera_target[2]), static_cast<double>(avatar.camera_distance),
+                            static_cast<double>(params.get_float(ParamId::AvatarRotY)));
+        ImGui::Spacing();
+        if (ImGui::Button(tr("Save"), ImVec2(120.0f * scale, 0.0f))) {
+            save_custom_preset_from_current(save_preset_name_buf_.data(), avatar, params);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Cancel"), ImVec2(120.0f * scale, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 
@@ -751,7 +1249,8 @@ void ViewportPanel::handle_camera_input(bool hovered, bool active, float scale, 
 }
 
 bool ViewportPanel::draw_transform_gizmo(const DevShellAvatarView& avatar, ParamStore& params, UndoStack& undo,
-                                         const UiFontSet& fonts, ImVec2 canvas_p0, ImVec2 canvas_p1, float dpi_scale) {
+                                         const UiFontSet& fonts, ImVec2 canvas_p0, ImVec2 canvas_p1,
+                                         float effective_fovy_rad, float dpi_scale) {
     if (gizmo_tool_ == GizmoTool::Select) {
         if (!gizmo_dragging_) {
             gizmo_hover_handle_ = -1;
@@ -765,7 +1264,7 @@ bool ViewportPanel::draw_transform_gizmo(const DevShellAvatarView& avatar, Param
     }
 
     const PrecisionDarkTokens& t = tokens();
-    const GizmoCameraBasis cam = GizmoCameraBasis::build(avatar, canvas_p0, canvas_p1);
+    const GizmoCameraBasis cam = GizmoCameraBasis::build(avatar, canvas_p0, canvas_p1, effective_fovy_rad);
 
     const float px = params.get_float(ParamId::AvatarPosX);
     const float py = params.get_float(ParamId::AvatarPosY);
@@ -1109,29 +1608,56 @@ void ViewportPanel::draw(StudioMode mode, const HardwareInventory& hw, const Dev
         actions.viewport.desired_vp_w = static_cast<uint32_t>(vp_w);
         actions.viewport.desired_vp_h = static_cast<uint32_t>(vp_h);
 
+        const uint32_t out_w = (avatar.broadcast_width > 0U) ? avatar.broadcast_width : 1920U;
+        const uint32_t out_h = (avatar.broadcast_height > 0U) ? avatar.broadcast_height : 1080U;
+        const auto aspect_mode = core::clamp_viewport_aspect_mode(params.get_int(ParamId::AppViewportAspect));
+        actions.viewport.viewport_aspect_mode = aspect_mode;
+        actions.viewport.camera_transition_speed_s = params.get_float(ParamId::AppCameraTransitionSpeed);
+        last_aspect_layout_ = core::compute_viewport_aspect_layout(
+            vp_w, vp_h, static_cast<float>(out_w), static_cast<float>(out_h), aspect_mode);
+        const ImVec2 frame_p0(canvas_p0.x + last_aspect_layout_.frame_x0, canvas_p0.y + last_aspect_layout_.frame_y0);
+        const ImVec2 frame_p1(canvas_p0.x + last_aspect_layout_.frame_x1, canvas_p0.y + last_aspect_layout_.frame_y1);
+
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->PushClipRect(canvas_p0, canvas_p1, true);
 
         // 1) Backdrop + rendered avatar (draw-list only, so overlays submitted later stay on top)
+        if (last_aspect_layout_.explicit_matte) {
+            dl->AddRectFilled(canvas_p0, canvas_p1, t.col32_vp_aspect_matte);
+        }
+        const ImVec2 bg_p0 = last_aspect_layout_.explicit_matte ? frame_p0 : canvas_p0;
+        const ImVec2 bg_p1 = last_aspect_layout_.explicit_matte ? frame_p1 : canvas_p1;
         if (params.get_bool(ParamId::AppCheckerboardBg)) {
             const float cell = std::round(16.0f * scale);
-            dl->AddRectFilled(canvas_p0, canvas_p1, t.col32_checker_a);
-            for (float y = canvas_p0.y; y < canvas_p1.y; y += cell) {
-                const int row = static_cast<int>((y - canvas_p0.y) / cell);
-                for (float x = canvas_p0.x + ((row & 1) != 0 ? cell : 0.0f); x < canvas_p1.x; x += cell * 2.0f) {
-                    dl->AddRectFilled(ImVec2(x, y),
-                                      ImVec2(std::min(canvas_p1.x, x + cell), std::min(canvas_p1.y, y + cell)),
+            dl->AddRectFilled(bg_p0, bg_p1, t.col32_checker_a);
+            for (float y = bg_p0.y; y < bg_p1.y; y += cell) {
+                const int row = static_cast<int>((y - bg_p0.y) / cell);
+                for (float x = bg_p0.x + ((row & 1) != 0 ? cell : 0.0f); x < bg_p1.x; x += cell * 2.0f) {
+                    dl->AddRectFilled(ImVec2(x, y), ImVec2(std::min(bg_p1.x, x + cell), std::min(bg_p1.y, y + cell)),
                                       t.col32_checker_b);
                 }
             }
         } else {
-            dl->AddRectFilled(canvas_p0, canvas_p1, t.col32_bg_canvas);
+            dl->AddRectFilled(bg_p0, bg_p1, t.col32_bg_canvas);
         }
         if (avatar.viewport_texture != VK_NULL_HANDLE) {
-            dl->AddImage(reinterpret_cast<ImTextureID>(avatar.viewport_texture), canvas_p0, canvas_p1);
+            // Prevent 1-frame transient squish during dock splitter drags if backend texture hasn't resized yet
+            if (avatar.viewport_w > 0U && avatar.viewport_h > 0U &&
+                (std::abs(static_cast<float>(avatar.viewport_w) - vp_w) > 1.5f ||
+                 std::abs(static_cast<float>(avatar.viewport_h) - vp_h) > 1.5f)) {
+                const float tw = static_cast<float>(avatar.viewport_w);
+                const float th = static_cast<float>(avatar.viewport_h);
+                const ImVec2 ip0(canvas_p0.x + (vp_w - tw) * 0.5f, canvas_p0.y + (vp_h - th) * 0.5f);
+                dl->AddImage(reinterpret_cast<ImTextureID>(avatar.viewport_texture), ip0, ImVec2(ip0.x + tw, ip0.y + th));
+            } else {
+                dl->AddImage(reinterpret_cast<ImTextureID>(avatar.viewport_texture), canvas_p0, canvas_p1);
+            }
+        }
+        if (last_aspect_layout_.explicit_matte) {
+            dl->AddRect(frame_p0, frame_p1, t.col32_vp_safe_frame, 0.0f, 0, 1.0f);
         }
         if (show_grid_) {
-            draw_composition_grid(canvas_p0, canvas_p1, scale);
+            draw_composition_grid(frame_p0, frame_p1, scale);
         }
 
         // 2) Canvas-wide camera input surface FIRST with AllowOverlap; toolbar, Light Orbit Orb,
@@ -1147,8 +1673,8 @@ void ViewportPanel::draw(StudioMode mode, const HardwareInventory& hw, const Dev
         // 3) Floating overlays & interactive 3D gizmos
         const float margin_x = 12.0f * scale;
         const float margin_y = 10.0f * scale;
-        const ImVec2 toolbar_max =
-            draw_toolbar(ImVec2(canvas_p0.x + margin_x, canvas_p0.y + margin_y), mode, avatar, params, undo, scale, actions);
+        const ImVec2 toolbar_max = draw_toolbar(ImVec2(canvas_p0.x + margin_x, canvas_p0.y + margin_y), vp_w - margin_x * 2.0f,
+                                                mode, avatar, params, undo, settings_dirty, scale, actions);
         const float toolbar_bottom = toolbar_max.y + 3.0f * scale;
         const float toolbar_right = toolbar_max.x + 3.0f * scale;
 
@@ -1156,21 +1682,37 @@ void ViewportPanel::draw(StudioMode mode, const HardwareInventory& hw, const Dev
         const ImVec2 hud_anchor(canvas_p1.x - margin_x, canvas_p0.y + margin_y);
         const float hud_min_y = (canvas_p1.x - margin_x - 360.0f * scale < toolbar_right) ? toolbar_bottom + margin_y
                                                                                           : canvas_p0.y + margin_y;
-        draw_tracking_hud(hud_anchor, hud_min_y, hw, tracking, render_view, tracking_paused, params, settings,
-                          settings_dirty, fonts, scale, actions);
+        ImVec2 hud_p0{}, hud_p1{};
+        last_hud_drawn_ =
+            draw_tracking_hud(hud_anchor, hud_min_y, canvas_p1.y, hw, tracking, render_view, tracking_paused, params,
+                              settings, settings_dirty, fonts, scale, actions, hud_p0, hud_p1);
+        last_hud_p0_ = hud_p0;
+        last_hud_p1_ = hud_p1;
 
-        if (params.get_bool(ParamId::AppSkeletonHeatmap) || mode == StudioMode::Rigging) {
+        const bool heatmap_visible = params.get_bool(ParamId::AppSkeletonHeatmap) || mode == StudioMode::Rigging;
+        if (heatmap_visible) {
             draw_confidence_heatmap_legend(tracking, fonts, scale,
                                            ImVec2(canvas_p0.x + margin_x, canvas_p1.y - 78.0f * scale));
         }
 
         const float orb_px = std::round(t.orbit_orb_px * scale);
-        const ImVec2 orb_pos(canvas_p1.x - orb_px - 18.0f * scale, canvas_p1.y - orb_px - 40.0f * scale);
+        const ImVec2 br_orb(canvas_p1.x - orb_px - 18.0f * scale, canvas_p1.y - orb_px - 40.0f * scale);
+        ImVec2 orb_pos = br_orb;
+        if (last_hud_drawn_ && (hud_p1.y + 8.0f * scale > br_orb.y) && (hud_p0.x - 8.0f * scale < br_orb.x + orb_px)) {
+            const float bl_x = canvas_p0.x + margin_x + (heatmap_visible ? 190.0f * scale : 6.0f * scale);
+            orb_pos = ImVec2(bl_x, std::max(toolbar_bottom + margin_y, canvas_p1.y - orb_px - 18.0f * scale));
+        }
+        last_orb_pos_ = orb_pos;
+        last_orb_size_ = orb_px;
         if (params.get_bool(ParamId::AppOrbitOrbVisible)) {
             draw_light_orbit_gizmo(params, undo, fonts, scale, orb_pos, actions);
         }
 
-        const bool gizmo_claimed = draw_transform_gizmo(avatar, params, undo, fonts, canvas_p0, canvas_p1, scale);
+        const float eff_fovy = last_aspect_layout_.effective_fovy_rad(avatar.camera_fovy_rad);
+        const bool gizmo_claimed =
+            draw_transform_gizmo(avatar, params, undo, fonts, frame_p0, frame_p1, eff_fovy, scale);
+
+        draw_save_preset_modal(avatar, params, scale);
 
         const bool cam_hovered =
             (GImGui != nullptr) && (GImGui->HoveredId == vp_input_id) && !gizmo_claimed && !gizmo_dragging_;

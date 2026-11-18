@@ -84,6 +84,7 @@ enum class ParamId : uint16_t {
     TrackingAudioAssist,
     TrackingMicGain,
     TrackingMicNoiseGate,
+    TrackingHandEnabled,
 
     OutputResolution,
     OutputFps,
@@ -105,6 +106,10 @@ enum class ParamId : uint16_t {
     AppCheckerboardBg,
     AppOrbitOrbVisible,
     AppSkeletonHeatmap,
+    AppViewportAspect,
+    AppTrackingHudVisible,
+    AppTrackingHudCollapsed,
+    AppCameraTransitionSpeed,
 
     Count,
 };
@@ -333,6 +338,10 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
     ParamSpec{ParamId::TrackingMicNoiseGate, "tracking.mic_noise_gate", "Tracking", "Mic Noise Gate",
               "Minimum vocal loudness threshold before microphone triggers mouth opening.", "dB", ParamType::Float,
               ParamOwner::T2, -48.0, -72.0, -18.0, 1.0, 1, nullptr, PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE},
+    ParamSpec{ParamId::TrackingHandEnabled, "tracking.hand_enabled", "Tracking", "Hand Tracking",
+              "Enables M1 detailed 21-keypoint hand and finger tracking with body collision avoidance.", "",
+              ParamType::Bool, ParamOwner::T1, 0.0, 0.0, 1.0, 1.0, 0, nullptr,
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
 
     ParamSpec{ParamId::OutputResolution, "output.resolution", "Output", "Resolution Preset",
               "Alpha output stream pixel dimensions.", "", ParamType::Enum, ParamOwner::T4, 1.0, 0.0, 3.0, 1.0, 0,
@@ -395,6 +404,22 @@ inline constexpr std::array<ParamSpec, kParamCount> kParamSpecs = {{
     ParamSpec{ParamId::AppSkeletonHeatmap, "app.skeleton_heatmap", "App", "Confidence Heatmap",
               "Renders per-joint solver weight heatmap overlay (Alt+C).", "", ParamType::Bool, ParamOwner::T3, 0.0, 0.0,
               1.0, 1.0, 0, nullptr, PARAM_FLAG_UNDOABLE},
+    ParamSpec{ParamId::AppViewportAspect, "app.viewport_aspect", "App", "Viewport Aspect",
+              "Studio Viewport framing aspect mode without affecting 16:9 OBS broadcast output.", "", ParamType::Enum,
+              ParamOwner::T3, 0.0, 0.0, 3.0, 1.0, 0, "Fit (Auto)|16:9|9:16|1:1",
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
+    ParamSpec{ParamId::AppTrackingHudVisible, "app.tracking_hud_visible", "App", "Tracking HUD",
+              "Shows or hides the Viewport tracking preview overlay card while keeping tracking active.", "",
+              ParamType::Bool, ParamOwner::T3, 1.0, 0.0, 1.0, 1.0, 0, nullptr,
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
+    ParamSpec{ParamId::AppTrackingHudCollapsed, "app.tracking_hud_collapsed", "App", "HUD Pill Mode",
+              "Collapses the Tracking HUD webcam preview to a compact single-line status pill.", "", ParamType::Bool,
+              ParamOwner::T3, 0.0, 0.0, 1.0, 1.0, 0, nullptr,
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
+    ParamSpec{ParamId::AppCameraTransitionSpeed, "app.camera_transition_speed", "App", "Preset Ease",
+              "Critically-damped transition duration when switching framing presets (0 = instant cut).", "s",
+              ParamType::Float, ParamOwner::T3, 0.22, 0.00, 1.00, 0.02, 2, nullptr,
+              PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE | PARAM_FLAG_UNDOABLE},
 }};
 
 [[nodiscard]] constexpr const ParamSpec& param_spec(ParamId id) noexcept {

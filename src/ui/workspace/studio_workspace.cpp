@@ -132,6 +132,9 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
         std::filesystem::create_directories(config_dir_ / "layouts", ec);
         (void)load_app_settings_toml(config_dir_ / "settings.toml", settings_, params_);
         (void)keymap_.load_toml(config_dir_ / "keymap.toml");
+        viewport_panel_.set_persist_presets(true);
+        viewport_panel_.preset_bank().set_storage_path(resolve_camera_presets_json_path(paths_));
+        (void)viewport_panel_.preset_bank().load_default();
 
         // Open Hardware Optimizer Wizard cleanly on first launch or new hardware fingerprint
         const uint64_t inv_hash = HardwareOptimizerWizard::compute_inventory_hash(hw_);
@@ -142,12 +145,15 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
             }
             wizard_.open(hw_, rhi::SelectedGpuInfo{}, host_status_.on_air);
         }
+    } else {
+        viewport_panel_.set_persist_presets(false);
     }
     if (params_.get_int(ParamId::TrackingEpMode) == 4) {
         params_.set(ParamId::TrackingEpMode, 0.0);
     }
     last_synced_ep_mode_ = params_.get_int(ParamId::TrackingEpMode);
     last_synced_synthetic_cam_ = params_.get_bool(ParamId::TrackingSyntheticCamera);
+    last_synced_hand_tracking_ = params_.get_bool(ParamId::TrackingHandEnabled);
 
     set_high_contrast_theme(params_.get_bool(ParamId::AppHighContrast));
     if (ImGui::GetCurrentContext() != nullptr) {
@@ -372,6 +378,9 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     actions.viewport.avatar_pos[2] = params_.get_float(ParamId::AvatarPosZ);
     actions.viewport.avatar_rot_y_deg = params_.get_float(ParamId::AvatarRotY);
     actions.viewport.avatar_scale = params_.get_float(ParamId::AvatarScale);
+    actions.viewport.viewport_aspect_mode =
+        static_cast<core::ViewportAspectMode>(std::clamp(params_.get_int(ParamId::AppViewportAspect), 0, 3));
+    actions.viewport.camera_transition_speed_s = params_.get_float(ParamId::AppCameraTransitionSpeed);
 
     if (synced_param_epoch_ == params_.epoch()) {
         return;
@@ -448,6 +457,12 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
         v.request_set_synthetic_camera = true;
         v.target_synthetic_camera = synth_cam;
     }
+    const bool hand_en = params_.get_bool(ParamId::TrackingHandEnabled);
+    if (hand_en != last_synced_hand_tracking_) {
+        last_synced_hand_tracking_ = hand_en;
+        v.request_set_hand_tracking = true;
+        v.target_hand_tracking_enabled = hand_en;
+    }
 }
 
 void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, double now_s, StudioActions& actions) {
@@ -514,6 +529,18 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
     case PaletteCommandTag::ToggleOrbitOrb:
         params_.set(ParamId::AppOrbitOrbVisible, params_.get_bool(ParamId::AppOrbitOrbVisible) ? 0.0 : 1.0);
         break;
+    case PaletteCommandTag::ToggleTrackingHud:
+        params_.set(ParamId::AppTrackingHudVisible, params_.get_bool(ParamId::AppTrackingHudVisible) ? 0.0 : 1.0);
+        settings_dirty_ = true;
+        break;
+    case PaletteCommandTag::ToggleHandTracking: {
+        const bool next = !params_.get_bool(ParamId::TrackingHandEnabled);
+        params_.set(ParamId::TrackingHandEnabled, next ? 1.0 : 0.0);
+        actions.viewport.request_set_hand_tracking = true;
+        actions.viewport.target_hand_tracking_enabled = next;
+        settings_dirty_ = true;
+        break;
+    }
     case PaletteCommandTag::ToggleCheckerboard:
         params_.set(ParamId::AppCheckerboardBg, params_.get_bool(ParamId::AppCheckerboardBg) ? 0.0 : 1.0);
         break;
@@ -588,7 +615,7 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
     }
 }
 
-void StudioWorkspace::handle_global_shortcuts(double now_s, StudioActions& actions) {
+void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatarView& avatar, StudioActions& actions) {
     if (keymap_.is_pressed(ActionId::OpenPalette)) {
         if (command_palette_.is_open()) {
             command_palette_.close();
@@ -664,6 +691,12 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, StudioActions& actio
             toggle_param(ParamId::RenderRtEnabled);
         } else if (keymap_.is_pressed(ActionId::OutlinerFilter)) {
             outliner_panel_.set_focus_filter_requested();
+        }
+        for (size_t i = 0; i < kBuiltinFramingPresetCount; ++i) {
+            const auto preset_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportPreset1) + i);
+            if (keymap_.is_pressed(preset_aid)) {
+                viewport_panel_.apply_builtin_preset(static_cast<int32_t>(i), avatar, params_, actions);
+            }
         }
 
         // Viewport-scoped keys (Q/W/E/R/X/F/G/1-5): Q/W/E/R/X work whenever Viewport is focused or hovered;
@@ -784,7 +817,7 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         }
     }
 
-    handle_global_shortcuts(now_s, actions);
+    handle_global_shortcuts(now_s, avatar, actions);
 
     // Z5 Top Menu & Mode Bar
     bool mode_changed = false;
@@ -897,7 +930,7 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     PropertyRowActions row_actions{};
     inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
                           output_view, host_status_, plugins_, selection_, params_, undo_, settings_, settings_dirty_,
-                          fonts_, row_actions, actions);
+                          fonts_, row_actions, actions, &viewport_panel_);
     if (const ImGuiWindow* hov = GImGui != nullptr ? GImGui->HoveredWindow : nullptr;
         hov != nullptr && hov->RootWindow != nullptr) {
         const char* rname = hov->RootWindow->Name;

@@ -2,8 +2,10 @@
 #include "core/hw_enum.hpp"
 #include "core/paths.hpp"
 #include "core/telemetry.hpp"
+#include "core/viewport_aspect.hpp"
 #include "rhi/rhi_device.hpp"
 #include "ui/palette/command_palette.hpp"
+#include "ui/panels/viewport/camera_presets.hpp"
 #include "ui/params/param_registry.hpp"
 #include "ui/params/project_settings.hpp"
 #include "ui/params/undo_stack.hpp"
@@ -81,7 +83,7 @@ struct ScopedUiRig {
 TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 65U); // 50 + 12 graphics/2D illustration + 3 WASAPI audio lip-sync params
+    REQUIRE(kParamCount == 70U); // 50 + 12 graphics/2D illustration + 3 WASAPI audio lip-sync params
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);
@@ -245,6 +247,17 @@ TEST_CASE("Inspector, Outliner and Viewport text fits at 100/125/150/175% DPI wi
           "[ui][layout][dpi]") {
     const RuntimePaths paths = discover_runtime_paths();
     for (const float dpi : {1.0f, 1.25f, 1.5f, 1.75f}) {
+        struct ScopedCtxGuard {
+            bool in_frame{false};
+            ~ScopedCtxGuard() {
+                if (ImGui::GetCurrentContext() != nullptr) {
+                    if (in_frame) {
+                        ImGui::EndFrame();
+                    }
+                    ImGui::DestroyContext();
+                }
+            }
+        } dpi_ctx_guard{};
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.DisplaySize = ImVec2(1920.0f, 1080.0f);
@@ -258,6 +271,7 @@ TEST_CASE("Inspector, Outliner and Viewport text fits at 100/125/150/175% DPI wi
         io.Fonts->GetTexDataAsAlpha8(&px, &tw, &th);
         io.Fonts->SetTexID(static_cast<ImTextureID>(1));
         ImGui::NewFrame();
+        dpi_ctx_guard.in_frame = true;
 
         const PrecisionDarkTokens& t = tokens();
         const ImGuiStyle& st = ImGui::GetStyle();
@@ -311,6 +325,7 @@ TEST_CASE("Inspector, Outliner and Viewport text fits at 100/125/150/175% DPI wi
         REQUIRE(ImGui::GetFrameHeight() >= ImGui::GetTextLineHeight() + 2.0f * st.FramePadding.y - 0.5f);
 
         ImGui::EndFrame();
+        dpi_ctx_guard.in_frame = false;
         ImGui::DestroyContext();
     }
 }
@@ -988,4 +1003,254 @@ TEST_CASE("Task 3-4: Expressions tab Live2D parameter monitor and 68-pt HUD over
     CHECK(aether::HotPathGuard::total_violations() == hp_before);
     CHECK(rig.arena.os_fallback_allocs() == 0ULL);
     CHECK(rig.arena.steady_bump_growth_bytes() == 0ULL);
+}
+
+TEST_CASE("Viewport aspect lock preserves 1:1 pixel ratio and OBS 16:9 isolation", "[ui][aspect]") {
+    using aether::core::compute_viewport_aspect_layout;
+    using aether::core::ViewportAspectLayout;
+    using aether::core::ViewportAspectMode;
+
+    // Fit (Auto): zero distortion across extreme wide (1600x360), 16:9 (1600x900), and vertical (600x1200)
+    for (const auto& sz : {std::pair{1600.0f, 360.0f}, std::pair{1600.0f, 900.0f}, std::pair{600.0f, 1200.0f}}) {
+        const ViewportAspectLayout lay =
+            compute_viewport_aspect_layout(sz.first, sz.second, 1920.0f, 1080.0f, ViewportAspectMode::FitAuto);
+        CHECK_FALSE(lay.explicit_matte);
+        CHECK(lay.uv_du <= 1.0001f);
+        CHECK(lay.uv_dv <= 1.0001f);
+        CHECK(std::fabs(lay.pixel_aspect_ratio(16.0f / 9.0f) - 1.0f) < 1e-3f);
+        const float eff_fovy = lay.effective_fovy_rad(0.2805f);
+        CHECK(eff_fovy > 0.01f);
+        CHECK(eff_fovy <= 0.2806f);
+    }
+
+    // Explicit Aspect Modes (16:9, 9:16, 1:1): exact centered matte canvas & exact aspect ratio
+    {
+        const ViewportAspectLayout lay16 =
+            compute_viewport_aspect_layout(1200.0f, 900.0f, 1920.0f, 1080.0f, ViewportAspectMode::Aspect16x9);
+        CHECK(lay16.explicit_matte);
+        CHECK(std::fabs(lay16.frame_aspect - 16.0f / 9.0f) < 1e-3f);
+        CHECK(std::fabs(lay16.pixel_aspect_ratio(16.0f / 9.0f) - 1.0f) < 1e-3f);
+
+        const ViewportAspectLayout lay9 =
+            compute_viewport_aspect_layout(1200.0f, 900.0f, 1920.0f, 1080.0f, ViewportAspectMode::Aspect9x16);
+        CHECK(lay9.explicit_matte);
+        CHECK(std::fabs(lay9.frame_aspect - 9.0f / 16.0f) < 1e-3f);
+        CHECK(lay9.norm_x0 > 0.25f);
+        CHECK(lay9.norm_x1 < 0.75f);
+
+        const ViewportAspectLayout lay1 =
+            compute_viewport_aspect_layout(1200.0f, 900.0f, 1920.0f, 1080.0f, ViewportAspectMode::Aspect1x1);
+        CHECK(lay1.explicit_matte);
+        CHECK(std::fabs(lay1.frame_aspect - 1.0f) < 1e-3f);
+    }
+}
+
+TEST_CASE("Viewport HUD collapse/close, Light Orb collision shift, Camera Presets, and Hand toggle",
+          "[ui][presets][hud]") {
+    using namespace aether::ui;
+    aether::rhi::RhiDeviceConfig rhi_cfg{};
+    rhi_cfg.enable_validation = false;
+    rhi_cfg.require_validation = false;
+    rhi_cfg.headless = true;
+    auto rhi_res = aether::rhi::RhiDevice::create(rhi_cfg);
+    REQUIRE(rhi_res.has_value());
+
+    aether::ui::ScopedUiRig rig{};
+    rig.rhi = rhi_res.value();
+    REQUIRE(rig.arena.init(16ULL * 1024ULL * 1024ULL));
+    REQUIRE(install_imgui_arena(rig.arena));
+    ImGui::CreateContext();
+    rig.imgui_init = true;
+    ImPlot::CreateContext();
+    rig.implot_init = true;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1600.0f, 900.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigInputTrickleEventQueue = false;
+
+    const aether::RuntimePaths paths = aether::discover_runtime_paths();
+    aether::HardwareInventory hw{};
+    rig.ws.init(paths, hw, 1.0f, nullptr, false);
+    rig.ws_init = true;
+    rig.ws.viewport_panel().set_persist_presets(false);
+
+    unsigned char* tex_pixels = nullptr;
+    int tex_w = 0;
+    int tex_h = 0;
+    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
+    io.Fonts->SetTexID(static_cast<ImTextureID>(1));
+
+    aether::TelemetrySnapshot telem{};
+    telem.render_fps = 60.0f;
+    aether::ui::DevShellInputEcho echo{};
+    aether::ui::DevShellAvatarView avatar{};
+    avatar.has_avatar = true;
+    avatar.has_camera = true;
+    avatar.bone_hips_y = 0.85f;
+    avatar.bone_chest_y = 1.20f;
+    avatar.bone_head_y = 1.46f;
+    avatar.broadcast_width = 1920U;
+    avatar.broadcast_height = 1080U;
+    aether::ui::DevShellTrackingView tracking{};
+    tracking.ready = true;
+    tracking.camera_active = true;
+    tracking.face_confidence = 0.96f;
+    tracking.live_preview_valid = true;
+    tracking.live_preview_texture_id = 1ULL;
+    tracking.live_preview_width = 320U;
+    tracking.live_preview_height = 180U;
+    aether::ui::DevShellRenderView render_view{};
+    aether::ui::DevShellOutputView output_view{};
+    aether::ui::StudioActions actions{};
+
+    // Hand tracking defaults to disabled (`false`)
+    CHECK_FALSE(rig.ws.params().get_bool(ParamId::TrackingHandEnabled));
+
+    // Render on tall viewport with expanded HUD: HUD drawn and Light Orb stays bottom-right without overlap
+    for (int f = 0; f < 5; ++f) {
+        actions.reset_per_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                      render_view, output_view, actions);
+        ImGui::Render();
+    }
+    REQUIRE(rig.ws.viewport_panel().last_hud_drawn());
+    {
+        const ImVec2 hp0 = rig.ws.viewport_panel().last_hud_p0();
+        const ImVec2 hp1 = rig.ws.viewport_panel().last_hud_p1();
+        const ImVec2 op = rig.ws.viewport_panel().last_orb_pos();
+        const float os = rig.ws.viewport_panel().last_orb_size();
+        const bool overlaps = (op.x < hp1.x) && (op.x + os > hp0.x) && (op.y < hp1.y) && (op.y + os > hp0.y);
+        CHECK_FALSE(overlaps);
+    }
+
+    // Shrink display height so bottom-right orb would collide with expanded HUD -> orb auto-shifts left
+    io.DisplaySize = ImVec2(1280.0f, 380.0f);
+    for (int f = 5; f < 9; ++f) {
+        actions.reset_per_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                      render_view, output_view, actions);
+        ImGui::Render();
+    }
+    if (rig.ws.viewport_panel().last_hud_drawn()) {
+        const ImVec2 hp0 = rig.ws.viewport_panel().last_hud_p0();
+        const ImVec2 hp1 = rig.ws.viewport_panel().last_hud_p1();
+        const ImVec2 op = rig.ws.viewport_panel().last_orb_pos();
+        const float os = rig.ws.viewport_panel().last_orb_size();
+        const bool overlaps = (op.x < hp1.x) && (op.x + os > hp0.x) && (op.y < hp1.y) && (op.y + os > hp0.y);
+        CHECK_FALSE(overlaps);
+    }
+
+    // Collapse HUD -> pill is shorter than expanded card
+    io.DisplaySize = ImVec2(1600.0f, 900.0f);
+    actions.reset_per_frame();
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.2, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    const float expanded_h = rig.ws.viewport_panel().last_hud_p1().y - rig.ws.viewport_panel().last_hud_p0().y;
+    (void)rig.ws.params().set(ParamId::AppTrackingHudCollapsed, 1.0);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.22, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    const float collapsed_h = rig.ws.viewport_panel().last_hud_p1().y - rig.ws.viewport_panel().last_hud_p0().y;
+    CHECK(collapsed_h < expanded_h * 0.5f);
+
+    // Close HUD -> overlay hidden while tracking controls/engine remain live; toggle back ON -> visible
+    (void)rig.ws.params().set(ParamId::AppTrackingHudVisible, 0.0);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.24, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    CHECK_FALSE(rig.ws.viewport_panel().last_hud_drawn());
+    CHECK(tracking.camera_active);
+
+    (void)rig.ws.params().set(ParamId::AppTrackingHudVisible, 1.0);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.26, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    CHECK(rig.ws.viewport_panel().last_hud_drawn());
+
+    // Aspect switches reflect cleanly in live ViewportPanel without disturbing broadcast 1920x1080 isolation
+    (void)rig.ws.params().set(ParamId::AppViewportAspect, 2.0); // 9:16
+    actions.reset_per_frame();
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.28, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    CHECK(rig.ws.viewport_panel().last_aspect_layout().explicit_matte);
+    CHECK(std::fabs(rig.ws.viewport_panel().last_aspect_layout().frame_aspect - 9.0f / 16.0f) < 1e-2f);
+    CHECK(avatar.broadcast_width == 1920U);
+    CHECK(avatar.broadcast_height == 1080U);
+
+    // Camera Presets Ctrl+1..6: bone-relative framing & custom preset JSON CRUD round-trip
+    for (int p = 0; p < static_cast<int>(kBuiltinFramingPresetCount); ++p) {
+        const CameraFramingPreset std_p = compute_builtin_framing_preset(p, 0.85f, 1.20f, 1.46f);
+        const CameraFramingPreset short_p = compute_builtin_framing_preset(p, 0.65f, 0.92f, 1.12f);
+        CHECK(std_p.target_y > short_p.target_y);
+        CHECK(std_p.distance > 0.25f);
+    }
+    const CameraFramingPreset right_corner = compute_builtin_framing_preset(4, 0.85f, 1.20f, 1.46f);
+    const CameraFramingPreset left_corner = compute_builtin_framing_preset(5, 0.85f, 1.20f, 1.46f);
+    CHECK(right_corner.target_x < 0.0f); // Shifts camera target left -> avatar sits in bottom-right third
+    CHECK(left_corner.target_x > 0.0f);  // Shifts camera target right -> avatar sits in bottom-left third
+
+    actions.reset_per_frame();
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddKeyEvent(ImGuiKey_2, true);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.30, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    io.AddKeyEvent(ImGuiKey_2, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    CHECK(actions.viewport.request_apply_camera_preset);
+    CHECK(actions.viewport.request_builtin_preset == 1);
+
+    // Custom preset bank CRUD + JSON persistence
+    {
+        ScopedTempDir tmp("cam_presets");
+        const auto json_path = (tmp.dir / "camera_presets.json").string();
+        CameraPresetBank bank;
+        bank.set_storage_path(json_path);
+        CameraFramingPreset cp{};
+        cp.name = "Desk CloseUp";
+        cp.target_x = 0.12f;
+        cp.target_y = 1.38f;
+        cp.distance = 1.15f;
+        cp.avatar_pos = {0.05f, 0.0f, -0.02f};
+        cp.avatar_rot_y_deg = 12.0f;
+        cp.avatar_scale = 1.05f;
+        cp.has_avatar_xform = true;
+        const size_t idx = bank.save_or_overwrite(cp, true);
+        REQUIRE(idx == 0U);
+
+        CameraPresetBank reloaded;
+        REQUIRE(reloaded.load_from_file(json_path));
+        REQUIRE(reloaded.custom_presets().size() == 1U);
+        CHECK(reloaded.custom_presets()[0].name == "Desk CloseUp");
+        CHECK(std::fabs(reloaded.custom_presets()[0].avatar_rot_y_deg - 12.0f) < 1e-4f);
+
+        cp.distance = 0.95f;
+        CHECK(reloaded.overwrite_at(0, cp, true));
+        CHECK(reloaded.remove_at(0, true));
+        CHECK(reloaded.custom_presets().empty());
+    }
+
+    // Enabling Hand Tracking dispatches pipeline toggle command cleanly
+    actions.reset_per_frame();
+    (void)rig.ws.params().set(ParamId::TrackingHandEnabled, 1.0);
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    rig.ws.render(0.32, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    CHECK(actions.viewport.request_set_hand_tracking);
+    CHECK(actions.viewport.target_hand_tracking_enabled);
 }

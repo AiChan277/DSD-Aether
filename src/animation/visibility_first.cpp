@@ -54,8 +54,19 @@ void VisibilityFirstSolver::reset(Vec3 root_hips_pos, Vec3 l_foot_rest, Vec3 r_f
     l_wrist_vel_ = {};
     r_wrist_pos_ = root_hips_pos + Vec3{-0.23f, 0.02f, 0.24f};
     r_wrist_vel_ = {};
+    l_hand_track_pos_ = l_wrist_pos_;
+    l_hand_track_vel_ = {};
+    r_hand_track_pos_ = r_wrist_pos_;
+    r_hand_track_vel_ = {};
     l_clavicle_lag_ = 0.0f;
     r_clavicle_lag_ = 0.0f;
+    hand_enable_t_ = 0.0f;
+    hand_enable_blend_ = 0.0f;
+    held_l_hand_w_ = 0.0f;
+    held_r_hand_w_ = 0.0f;
+    l_finger_rot_.fill(Quat::identity());
+    r_finger_rot_.fill(Quat::identity());
+    fingers_primed_ = false;
     spine_rot_spring_ = {};
     chest_rot_spring_ = {};
     neck_rot_spring_ = {};
@@ -81,6 +92,8 @@ void VisibilityFirstSolver::set_rest_anchors(Vec3 root_hips_pos, Vec3 l_foot_res
     rest_hips_pos_ = root_hips_pos;
     l_wrist_pos_ = l_wrist_pos_ + delta;
     r_wrist_pos_ = r_wrist_pos_ + delta;
+    l_hand_track_pos_ = l_hand_track_pos_ + delta;
+    r_hand_track_pos_ = r_hand_track_pos_ + delta;
     if (!feet_[0].stepping) {
         feet_[0] = FootPlantState{l_foot_rest, l_foot_rest, l_foot_rest, 0.0f, false};
     } else {
@@ -241,17 +254,38 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     // Hand tracking & arm IK disabled by default: arms stay cleanly locked in relaxed standing A-pose.
     const float l_hand_raw = cfg.enable_hand_ik ? std::max(l_arm_conf, tracked.left_hand_confidence) : 0.0f;
     const float r_hand_raw = cfg.enable_hand_ik ? std::max(r_arm_conf, tracked.right_hand_confidence) : 0.0f;
-    const float l_hand_gated = (l_hand_raw >= 0.50f) ? l_hand_raw : 0.0f;
-    const float r_hand_gated = (r_hand_raw >= 0.50f) ? r_hand_raw : 0.0f;
+    // 3. Smooth 0.35 s cubic S-curve entry/exit gate + 60 Hz springs for wrist (85 ms) & fingers (50 ms)
+    const float toggle_step = safe_dt / 0.35f;
+    hand_enable_t_ =
+        cfg.enable_hand_ik ? std::min(1.0f, hand_enable_t_ + toggle_step) : std::max(0.0f, hand_enable_t_ - toggle_step);
+    hand_enable_blend_ = hand_enable_t_ * hand_enable_t_ * (3.0f - 2.0f * hand_enable_t_);
 
-    const float w_l_arm =
-        cfg.enable_hand_ik ? step_visibility_weight(prev_weights_[AETHER_BONE_LEFT_HAND], l_hand_gated, safe_dt, cfg)
-                           : 0.0f;
-    const float w_r_arm =
-        cfg.enable_hand_ik ? step_visibility_weight(prev_weights_[AETHER_BONE_RIGHT_HAND], r_hand_gated, safe_dt, cfg)
-                           : 0.0f;
-    prev_weights_[AETHER_BONE_LEFT_HAND] = w_l_arm;
-    prev_weights_[AETHER_BONE_RIGHT_HAND] = w_r_arm;
+    const float l_hand_gated = (l_hand_raw >= 0.45f) ? l_hand_raw : 0.0f;
+    const float r_hand_gated = (r_hand_raw >= 0.45f) ? r_hand_raw : 0.0f;
+
+    float raw_w_l_arm = prev_weights_[AETHER_BONE_LEFT_HAND];
+    float raw_w_r_arm = prev_weights_[AETHER_BONE_RIGHT_HAND];
+    if (cfg.enable_hand_ik) {
+        raw_w_l_arm = step_visibility_weight(raw_w_l_arm, l_hand_gated, safe_dt, cfg);
+        raw_w_r_arm = step_visibility_weight(raw_w_r_arm, r_hand_gated, safe_dt, cfg);
+        prev_weights_[AETHER_BONE_LEFT_HAND] = raw_w_l_arm;
+        prev_weights_[AETHER_BONE_RIGHT_HAND] = raw_w_r_arm;
+        held_l_hand_w_ = raw_w_l_arm;
+        held_r_hand_w_ = raw_w_r_arm;
+    } else if (hand_enable_blend_ <= 1e-4f) {
+        prev_weights_[AETHER_BONE_LEFT_HAND] = 0.0f;
+        prev_weights_[AETHER_BONE_RIGHT_HAND] = 0.0f;
+        held_l_hand_w_ = 0.0f;
+        held_r_hand_w_ = 0.0f;
+        raw_w_l_arm = 0.0f;
+        raw_w_r_arm = 0.0f;
+    } else {
+        raw_w_l_arm = held_l_hand_w_;
+        raw_w_r_arm = held_r_hand_w_;
+    }
+
+    const float w_l_arm = raw_w_l_arm * hand_enable_blend_;
+    const float w_r_arm = raw_w_r_arm * hand_enable_blend_;
 
     const Vec3 l_attr_target = compute_attractor(true, cfg.left_arm_idle);
     const Vec3 r_attr_target = compute_attractor(false, cfg.right_arm_idle);
@@ -262,22 +296,41 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     l_wrist_pos_ = l_attr;
     r_wrist_pos_ = r_attr;
 
-    const Vec3 l_track_pos = tracked.joint_positions_ws[AETHER_BONE_LEFT_HAND];
-    const Vec3 r_track_pos = tracked.joint_positions_ws[AETHER_BONE_RIGHT_HAND];
-    out.left_wrist_target_ws = lerp(l_attr, l_track_pos, w_l_arm);
-    out.right_wrist_target_ws = lerp(r_attr, r_track_pos, w_r_arm);
+    const Vec3 l_track_raw = tracked.joint_positions_ws[AETHER_BONE_LEFT_HAND];
+    const Vec3 r_track_raw = tracked.joint_positions_ws[AETHER_BONE_RIGHT_HAND];
+    if (cfg.enable_hand_ik && l_hand_gated > 0.0f) {
+        l_hand_track_pos_ = smooth_damp(l_hand_track_pos_, l_track_raw, l_hand_track_vel_, 0.085f, safe_dt);
+    } else if (!cfg.enable_hand_ik && hand_enable_blend_ <= 1e-4f) {
+        l_hand_track_pos_ = l_attr;
+        l_hand_track_vel_ = {};
+    }
+    if (cfg.enable_hand_ik && r_hand_gated > 0.0f) {
+        r_hand_track_pos_ = smooth_damp(r_hand_track_pos_, r_track_raw, r_hand_track_vel_, 0.085f, safe_dt);
+    } else if (!cfg.enable_hand_ik && hand_enable_blend_ <= 1e-4f) {
+        r_hand_track_pos_ = r_attr;
+        r_hand_track_vel_ = {};
+    }
+    out.left_wrist_target_ws = lerp(l_attr, l_hand_track_pos_, w_l_arm);
+    out.right_wrist_target_ws = lerp(r_attr, r_hand_track_pos_, w_r_arm);
     out.left_wrist_track_weight = w_l_arm;
     out.right_wrist_track_weight = w_r_arm;
+    if (hand_enable_blend_ > 1e-4f) {
+        out.left_wrist_rot_ws = slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_LEFT_HAND]), w_l_arm);
+        out.right_wrist_rot_ws =
+            slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_RIGHT_HAND]), w_r_arm);
+    }
 
-    // Clavicle secondary lag (`tau = 0.15 s`): hard-zeroed when hand IK is disabled so shoulders stay relaxed
-    if (cfg.enable_hand_ik) {
-        const float l_arm_elev =
-            w_l_arm * std::clamp((out.left_wrist_target_ws.y - (hips_pos.y + 0.35f)) * 0.6f, -0.15f, 0.35f);
-        const float r_arm_elev =
-            w_r_arm * std::clamp((out.right_wrist_target_ws.y - (hips_pos.y + 0.35f)) * 0.6f, -0.15f, 0.35f);
+    // 15% Clavicle elevation lead + smooth lag (`tau = 0.15 s`): cleanly relaxes to zero as hands disable
+    if (hand_enable_blend_ > 1e-4f) {
+        const float l_arm_elev_rad =
+            w_l_arm * std::clamp((out.left_wrist_target_ws.y - (hips_pos.y + 0.35f)) / 0.45f, -0.30f, 1.0f) *
+            (90.0f * kDegToRad) * 0.15f;
+        const float r_arm_elev_rad =
+            w_r_arm * std::clamp((out.right_wrist_target_ws.y - (hips_pos.y + 0.35f)) / 0.45f, -0.30f, 1.0f) *
+            (90.0f * kDegToRad) * 0.15f;
         const float lag_alpha = safe_dt / (cfg.clavicle_lag_s + safe_dt);
-        l_clavicle_lag_ += (l_arm_elev - l_clavicle_lag_) * lag_alpha;
-        r_clavicle_lag_ += (r_arm_elev - r_clavicle_lag_) * lag_alpha;
+        l_clavicle_lag_ += (l_arm_elev_rad - l_clavicle_lag_) * lag_alpha;
+        r_clavicle_lag_ += (r_arm_elev_rad - r_clavicle_lag_) * lag_alpha;
     } else {
         l_clavicle_lag_ = 0.0f;
         r_clavicle_lag_ = 0.0f;
@@ -369,19 +422,24 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     out.local_rotations[AETHER_BONE_RIGHT_EYE] =
         rest_metrics_.world_delta_to_local_pose(AETHER_BONE_RIGHT_EYE, r_eye_delta);
 
-    // Hand finger curl/spread (`bones 25..54`) — hard-bypassed when hand IK/tracking is disabled
-    const float w_lhand = cfg.enable_hand_ik
-                              ? step_visibility_weight(prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL],
-                                                       (tracked.left_hand_confidence >= 0.50f) ? tracked.left_hand_confidence : 0.0f,
-                                                       safe_dt, cfg)
-                              : 0.0f;
-    const float w_rhand = cfg.enable_hand_ik
-                              ? step_visibility_weight(prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL],
-                                                       (tracked.right_hand_confidence >= 0.50f) ? tracked.right_hand_confidence : 0.0f,
-                                                       safe_dt, cfg)
-                              : 0.0f;
-    prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL] = w_lhand;
-    prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL] = w_rhand;
+    // Hand finger curl/spread (`bones 25..54`) with 50 ms finger springs & 0.35 s smooth disable fade to idle pose
+    float raw_w_lhand = prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL];
+    float raw_w_rhand = prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL];
+    if (cfg.enable_hand_ik) {
+        raw_w_lhand = step_visibility_weight(
+            raw_w_lhand, (tracked.left_hand_confidence >= 0.45f) ? tracked.left_hand_confidence : 0.0f, safe_dt, cfg);
+        raw_w_rhand = step_visibility_weight(
+            raw_w_rhand, (tracked.right_hand_confidence >= 0.45f) ? tracked.right_hand_confidence : 0.0f, safe_dt, cfg);
+        prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL] = raw_w_lhand;
+        prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL] = raw_w_rhand;
+    } else if (hand_enable_blend_ <= 1e-4f) {
+        raw_w_lhand = 0.0f;
+        raw_w_rhand = 0.0f;
+        prev_weights_[AETHER_BONE_LEFT_INDEX_PROXIMAL] = 0.0f;
+        prev_weights_[AETHER_BONE_RIGHT_INDEX_PROXIMAL] = 0.0f;
+    }
+    const float w_lhand = raw_w_lhand * hand_enable_blend_;
+    const float w_rhand = raw_w_rhand * hand_enable_blend_;
 
     // Relaxed natural finger curl when untracked, graded per joint (proximal < intermediate > distal, thumb lighter)
     // so the hand reads as soft and alive instead of a flat paddle.
@@ -392,15 +450,25 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
         const float finger_scale = (finger == 0U) ? 0.45f : (0.85f + 0.08f * static_cast<float>(finger));
         return cfg.idle_finger_curl_rad * kSeg[seg] * finger_scale;
     };
+    const float finger_alpha = fingers_primed_ ? (1.0f - std::exp(-safe_dt / 0.050f)) : 1.0f;
+    fingers_primed_ = true;
     for (size_t b = AETHER_BONE_LEFT_THUMB_PROXIMAL; b <= AETHER_BONE_LEFT_LITTLE_DISTAL; ++b) {
-        const Quat idle = from_euler_xyz(0.0f, 0.0f, -idle_curl_rad(b - AETHER_BONE_LEFT_THUMB_PROXIMAL));
-        const Quat finger_delta = slerp(idle, normalize(tracked.joint_rotations[b]), w_lhand);
+        const size_t idx = b - AETHER_BONE_LEFT_THUMB_PROXIMAL;
+        if (cfg.enable_hand_ik && tracked.left_hand_confidence >= 0.45f) {
+            l_finger_rot_[idx] = slerp(l_finger_rot_[idx], normalize(tracked.joint_rotations[b]), finger_alpha);
+        }
+        const Quat idle = from_euler_xyz(0.0f, 0.0f, -idle_curl_rad(idx));
+        const Quat finger_delta = slerp(idle, l_finger_rot_[idx], w_lhand);
         out.local_rotations[b] = rest_metrics_.world_delta_to_local_pose(static_cast<uint32_t>(b), finger_delta);
         out.joint_blend_weights[b] = w_lhand;
     }
     for (size_t b = AETHER_BONE_RIGHT_THUMB_PROXIMAL; b <= AETHER_BONE_RIGHT_LITTLE_DISTAL; ++b) {
-        const Quat idle = from_euler_xyz(0.0f, 0.0f, idle_curl_rad(b - AETHER_BONE_RIGHT_THUMB_PROXIMAL));
-        const Quat finger_delta = slerp(idle, normalize(tracked.joint_rotations[b]), w_rhand);
+        const size_t idx = b - AETHER_BONE_RIGHT_THUMB_PROXIMAL;
+        if (cfg.enable_hand_ik && tracked.right_hand_confidence >= 0.45f) {
+            r_finger_rot_[idx] = slerp(r_finger_rot_[idx], normalize(tracked.joint_rotations[b]), finger_alpha);
+        }
+        const Quat idle = from_euler_xyz(0.0f, 0.0f, idle_curl_rad(idx));
+        const Quat finger_delta = slerp(idle, r_finger_rot_[idx], w_rhand);
         out.local_rotations[b] = rest_metrics_.world_delta_to_local_pose(static_cast<uint32_t>(b), finger_delta);
         out.joint_blend_weights[b] = w_rhand;
     }
@@ -409,8 +477,8 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     // Offsets are character-frame deltas (like tracking), so map them through the bone's rest frame instead of
     // right-multiplying in raw bone-local axes (which differ per VRM rig).
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
-        if (!cfg.enable_hand_ik && ((b >= AETHER_BONE_LEFT_SHOULDER && b <= AETHER_BONE_RIGHT_HAND) ||
-                                    b >= AETHER_BONE_LEFT_THUMB_PROXIMAL)) {
+        if (hand_enable_blend_ <= 1e-4f &&
+            ((b >= AETHER_BONE_LEFT_SHOULDER && b <= AETHER_BONE_RIGHT_HAND) || b >= AETHER_BONE_LEFT_THUMB_PROXIMAL)) {
             continue;
         }
         const float gx = graph_out.bone_rotation_offsets[b][0];
@@ -460,9 +528,11 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     out.head_target_pos_ws = hips_pos + Vec3{0.0f, 0.56f, 0.0f};
     Quat unused_head_q = Quat::identity();
     apply_ik_override(0U, out.head_target_pos_ws, unused_head_q, &out.head_target_weight);
-    if (cfg.enable_hand_ik) {
+    if (hand_enable_blend_ > 1e-4f) {
         apply_ik_override(1U, out.left_wrist_target_ws, out.left_wrist_rot_ws, &out.left_wrist_track_weight);
         apply_ik_override(2U, out.right_wrist_target_ws, out.right_wrist_rot_ws, &out.right_wrist_track_weight);
+        out.left_wrist_track_weight *= hand_enable_blend_;
+        out.right_wrist_track_weight *= hand_enable_blend_;
     }
 
     (void)&quat_from_two_vectors;

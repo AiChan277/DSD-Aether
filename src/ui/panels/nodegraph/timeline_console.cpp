@@ -238,11 +238,11 @@ void TimelineConsole::draw_expressions_tab(std::span<ExpressionSlotInfo> express
             float max_val;
             ImU32 color;
         };
-        const ImU32 col_angle = IM_COL32(82, 168, 255, 210);
-        const ImU32 col_eye = IM_COL32(72, 224, 232, 210);
-        const ImU32 col_brow = IM_COL32(250, 206, 72, 210);
-        const ImU32 col_mouth = IM_COL32(255, 110, 196, 210);
-        const ImU32 col_vowel = IM_COL32(120, 232, 152, 220);
+        const ImU32 col_angle = t.col32_l2d_angle;
+        const ImU32 col_eye = t.col32_l2d_eye;
+        const ImU32 col_brow = t.col32_l2d_brow;
+        const ImU32 col_mouth = t.col32_l2d_mouth;
+        const ImU32 col_vowel = t.col32_l2d_vowel;
 
         constexpr size_t kRows = 8U;
         const ParamCell col0[kRows] = {

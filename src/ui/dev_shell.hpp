@@ -6,6 +6,7 @@
 #include "core/log.hpp"
 #include "core/paths.hpp"
 #include "core/telemetry.hpp"
+#include "core/viewport_aspect.hpp"
 #include "rhi/rhi_device.hpp"
 #include "ui/theme/precision_dark.hpp"
 
@@ -62,7 +63,15 @@ struct DevShellAvatarView {
     std::array<float, 3> camera_eye{0.716f, 1.110f, 1.961f};
     std::array<float, 3> camera_target{0.0f, 0.90f, 0.0f};
     float camera_fovy_rad{0.62f};
+    float camera_yaw_rad{0.28f};
+    float camera_pitch_rad{0.06f};
+    float camera_distance{2.0f};
     float gizmo_pivot_y{0.90f};
+    float bone_hips_y{0.85f};
+    float bone_chest_y{1.20f};
+    float bone_head_y{1.46f};
+    uint32_t broadcast_width{1920};
+    uint32_t broadcast_height{1080};
 };
 
 struct DevShellTrackingView {
@@ -117,6 +126,26 @@ struct DevShellTrackingView {
     bool live_preview_iris_valid{false};
     bool live_preview_axes_valid{false};
     std::array<std::array<float, 2>, 4> live_preview_head_axes{};
+    std::array<std::array<float, 2>, 8> live_preview_left_eye_poly{};
+    std::array<std::array<float, 2>, 8> live_preview_right_eye_poly{};
+    bool live_preview_eye_poly_valid{false};
+    std::array<std::array<float, 2>, 5> live_preview_left_brow_pts{};
+    std::array<std::array<float, 2>, 5> live_preview_right_brow_pts{};
+    bool live_preview_brow_pts_valid{false};
+    std::array<float, 2> live_preview_gaze_vec{0.0f, 0.0f};
+    bool hand_tracking_enabled{false};
+    bool left_hand_detected{false};
+    bool right_hand_detected{false};
+    std::array<float, 4> left_hand_bbox_obb{0.0f, 0.0f, 0.0f, 0.0f};
+    float left_hand_angle_rad{0.0f};
+    std::array<float, 2> left_palm_center{0.0f, 0.0f};
+    std::array<float, 2> left_palm_normal_2d{0.0f, 0.0f};
+    std::array<std::array<float, 2>, 21> left_hand_keypoints{};
+    std::array<float, 4> right_hand_bbox_obb{0.0f, 0.0f, 0.0f, 0.0f};
+    float right_hand_angle_rad{0.0f};
+    std::array<float, 2> right_palm_center{0.0f, 0.0f};
+    std::array<float, 2> right_palm_normal_2d{0.0f, 0.0f};
+    std::array<std::array<float, 2>, 21> right_hand_keypoints{};
     animation::Live2DParameters live2d{};
 };
 
@@ -293,6 +322,25 @@ struct DevShellViewportActions {
     bool audio_lipsync_dirty{false};
     bool request_select_mic{false};
     std::array<char, 192> select_mic_id{};
+
+    // Viewport aspect lock, Framing Preset smooth transitions & Hand tracking toggle
+    core::ViewportAspectMode viewport_aspect_mode{core::ViewportAspectMode::FitAuto};
+    float camera_transition_speed_s{0.22f};
+    bool request_apply_camera_preset{false};
+    int32_t request_builtin_preset{-1}; // 0..5 = Ctrl+1..6 built-in, -1 = custom target below
+    float target_cam_x{0.0f};
+    float target_cam_y{0.85f};
+    float target_cam_z{0.0f};
+    float target_cam_yaw_rad{0.28f};
+    float target_cam_pitch_rad{0.06f};
+    float target_cam_distance{2.0f};
+    float target_cam_fovy_rad{0.2805f};
+    bool target_preset_has_avatar_xform{false};
+    std::array<float, 3> target_preset_avatar_pos{0.0f, 0.0f, 0.0f};
+    float target_preset_avatar_rot_y_deg{0.0f};
+    float target_preset_avatar_scale{1.0f};
+    bool request_set_hand_tracking{false};
+    bool target_hand_tracking_enabled{false};
 };
 
 /**

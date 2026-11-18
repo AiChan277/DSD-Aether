@@ -1,10 +1,13 @@
 #pragma once
 
+#include "core/viewport_aspect.hpp"
+#include "ui/panels/viewport/camera_presets.hpp"
 #include "ui/params/param_registry.hpp"
 #include "ui/params/undo_stack.hpp"
 #include "ui/workspace/studio_types.hpp"
 
 #include <array>
+#include <string>
 
 namespace aether::ui {
 
@@ -49,6 +52,25 @@ class ViewportPanel {
     void store_camera_bookmark(size_t idx);
     void reset_camera(StudioActions& actions) noexcept;
 
+    [[nodiscard]] CameraPresetBank& preset_bank() noexcept { return preset_bank_; }
+    [[nodiscard]] const CameraPresetBank& preset_bank() const noexcept { return preset_bank_; }
+    void set_persist_presets(bool persist) noexcept { persist_presets_ = persist; }
+    [[nodiscard]] bool persist_presets() const noexcept { return persist_presets_; }
+    void apply_builtin_preset(int32_t preset_idx, const DevShellAvatarView& avatar, const ParamStore& params,
+                              StudioActions& actions) noexcept;
+    void apply_custom_preset(size_t custom_idx, ParamStore& params, UndoStack& undo, StudioActions& actions) noexcept;
+    void save_custom_preset_from_current(std::string name, const DevShellAvatarView& avatar, const ParamStore& params);
+    void open_save_preset_modal(const std::string& initial_name = {});
+
+    [[nodiscard]] core::ViewportAspectLayout last_aspect_layout() const noexcept { return last_aspect_layout_; }
+    [[nodiscard]] bool last_hud_drawn() const noexcept { return last_hud_drawn_; }
+    [[nodiscard]] ImVec2 last_hud_p0() const noexcept { return last_hud_p0_; }
+    [[nodiscard]] ImVec2 last_hud_p1() const noexcept { return last_hud_p1_; }
+    [[nodiscard]] ImVec2 last_orb_pos() const noexcept { return last_orb_pos_; }
+    [[nodiscard]] float last_orb_size() const noexcept { return last_orb_size_; }
+    [[nodiscard]] int32_t active_builtin_preset() const noexcept { return active_builtin_preset_; }
+    [[nodiscard]] const std::string& active_preset_name() const noexcept { return active_preset_name_; }
+
     [[nodiscard]] GizmoTool gizmo_tool() const noexcept { return gizmo_tool_; }
     void set_gizmo_tool(GizmoTool tool) noexcept { gizmo_tool_ = tool; }
     void toggle_local_world() noexcept { gizmo_local_ = !gizmo_local_; }
@@ -71,14 +93,16 @@ class ViewportPanel {
               StudioActions& actions);
 
   private:
-    ImVec2 draw_toolbar(ImVec2 anchor, StudioMode mode, const DevShellAvatarView& avatar, ParamStore& params,
-                        UndoStack& undo, float scale, StudioActions& actions);
+    ImVec2 draw_toolbar(ImVec2 anchor, float max_width, StudioMode mode, const DevShellAvatarView& avatar,
+                        ParamStore& params, UndoStack& undo, bool& settings_dirty, float scale, StudioActions& actions);
     bool draw_transform_gizmo(const DevShellAvatarView& avatar, ParamStore& params, UndoStack& undo,
-                              const UiFontSet& fonts, ImVec2 canvas_p0, ImVec2 canvas_p1, float dpi_scale);
-    void draw_tracking_hud(ImVec2 top_right, float min_y, const HardwareInventory& hw,
+                              const UiFontSet& fonts, ImVec2 frame_p0, ImVec2 frame_p1, float effective_fovy_rad,
+                              float dpi_scale);
+    bool draw_tracking_hud(ImVec2 top_right, float min_y, float canvas_bottom_y, const HardwareInventory& hw,
                            const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
                            bool tracking_paused, ParamStore& params, AppSettings& settings, bool& settings_dirty,
-                           const UiFontSet& fonts, float scale, StudioActions& actions);
+                           const UiFontSet& fonts, float scale, StudioActions& actions, ImVec2& out_p0, ImVec2& out_p1);
+    void draw_save_preset_modal(const DevShellAvatarView& avatar, const ParamStore& params, float scale);
     void draw_composition_grid(ImVec2 p0, ImVec2 p1, float scale) const;
     void handle_camera_input(bool hovered, bool active, float scale, StudioActions& actions);
     void draw_light_orbit_gizmo(ParamStore& params, UndoStack& undo, const UiFontSet& fonts, float dpi_scale,
@@ -120,6 +144,20 @@ class ViewportPanel {
     float cam_pitch_rad_{0.10f};
     float cam_log_zoom_{0.0f};
     std::array<CameraBookmark, 5> bookmarks_{};
+
+    CameraPresetBank preset_bank_{};
+    bool persist_presets_{true};
+    int32_t active_builtin_preset_{0};
+    std::string active_preset_name_{"1: Bust / Streamer (Default)"};
+    bool save_preset_modal_open_{false};
+    std::array<char, 64> save_preset_name_buf_{};
+
+    core::ViewportAspectLayout last_aspect_layout_{};
+    bool last_hud_drawn_{false};
+    ImVec2 last_hud_p0_{};
+    ImVec2 last_hud_p1_{};
+    ImVec2 last_orb_pos_{};
+    float last_orb_size_{0.0f};
 };
 
 } // namespace aether::ui

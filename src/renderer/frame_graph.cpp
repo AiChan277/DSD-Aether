@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -2468,14 +2469,19 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         return;
     }
     const auto& fg_alloc = fg_alloc_res.value();
+    const auto aspect_layout = core::compute_viewport_aspect_layout(
+        static_cast<float>(w), static_cast<float>(h), static_cast<float>(effective_output_width()),
+        static_cast<float>(effective_output_height()), req.viewport_aspect_mode);
+    PreviewCamera heat_cam = req.camera;
+    heat_cam.fovy_rad = aspect_layout.effective_fovy_rad(req.camera.fovy_rad);
     GpuFrameGlobals fg{};
     Mat4Vec3 eye{};
-    build_camera_matrices(req.camera, static_cast<float>(w) / static_cast<float>(h), fg.view, fg.inv_view, fg.proj,
-                          fg.inv_proj, fg.view_proj, eye);
-    fg.viewport_size[0] = static_cast<float>(w);
-    fg.viewport_size[1] = static_cast<float>(h);
-    fg.viewport_size[2] = 1.0f / static_cast<float>(w);
-    fg.viewport_size[3] = 1.0f / static_cast<float>(h);
+    build_camera_matrices(heat_cam, aspect_layout.frame_aspect, fg.view, fg.inv_view, fg.proj, fg.inv_proj,
+                          fg.view_proj, eye);
+    fg.viewport_size[0] = aspect_layout.frame_width();
+    fg.viewport_size[1] = aspect_layout.frame_height();
+    fg.viewport_size[2] = 1.0f / aspect_layout.frame_width();
+    fg.viewport_size[3] = 1.0f / aspect_layout.frame_height();
     const Mat4Vec3 kd = scene_light_dir_to_light(req.rig->lights[0]);
     fg.lights[0].pos_or_dir[0] = kd.x;
     fg.lights[0].pos_or_dir[1] = kd.y;
@@ -2515,7 +2521,13 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         GpuPushConstants pc{};
         pc.frame_globals_bda = fg_alloc.device_address;
         pc.param0 = out_rgba16f_.sampled_slot;
-        pc.param1 = req.show_checkerboard ? 1u : 0u;
+        pc.param1 = (req.show_checkerboard ? 1u : 0u) | (aspect_layout.explicit_matte ? 2u : 0u);
+        pc.param2 = std::bit_cast<uint32_t>(aspect_layout.uv_du);
+        pc.param3 = std::bit_cast<uint32_t>(aspect_layout.uv_dv);
+        pc.fparam0 = aspect_layout.norm_x0;
+        pc.fparam1 = aspect_layout.norm_y0;
+        pc.fparam2 = aspect_layout.norm_x1;
+        pc.fparam3 = aspect_layout.norm_y1;
         vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
@@ -2656,6 +2668,21 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                 if (hb_res) {
                     std::memcpy(hb_res.value().mapped, heatmap_scratch_.data(),
                                 static_cast<size_t>(bone_cnt) * sizeof(GpuHeatmapBone));
+                    const uint32_t max_x0 = w > 0u ? w - 1u : 0u;
+                    const uint32_t max_y0 = h > 0u ? h - 1u : 0u;
+                    const int32_t hx0 =
+                        std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_x0)), 0, static_cast<int32_t>(max_x0));
+                    const int32_t hy0 =
+                        std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_y0)), 0, static_cast<int32_t>(max_y0));
+                    const uint32_t hw = static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_width())));
+                    const uint32_t hh = static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_height())));
+                    const VkViewport hvp{aspect_layout.frame_x0, aspect_layout.frame_y0,
+                                         aspect_layout.frame_width(), aspect_layout.frame_height(), 0.0f, 1.0f};
+                    const VkRect2D hsc{{hx0, hy0},
+                                       {std::min(hw, w > static_cast<uint32_t>(hx0) ? w - static_cast<uint32_t>(hx0) : 1u),
+                                        std::min(hh, h > static_cast<uint32_t>(hy0) ? h - static_cast<uint32_t>(hy0) : 1u)}};
+                    vkCmdSetViewport(cmd, 0, 1, &hvp);
+                    vkCmdSetScissor(cmd, 0, 1, &hsc);
                     bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_heatmap_, "heatmap");
                     GpuPushConstants hpc{};
                     hpc.frame_globals_bda = fg_alloc.device_address;

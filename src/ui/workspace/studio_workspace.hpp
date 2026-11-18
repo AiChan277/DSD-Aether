@@ -93,7 +93,7 @@ class StudioWorkspace {
     void save_mode_layout_ini(StudioMode mode) const;
     void load_mode_layout_ini(StudioMode mode);
     void sync_params_to_actions(StudioActions& actions) noexcept;
-    void handle_global_shortcuts(double now_s, StudioActions& actions);
+    void handle_global_shortcuts(double now_s, const DevShellAvatarView& avatar, StudioActions& actions);
     void update_expression_ramps(double now_s, StudioActions& actions) noexcept;
     void ensure_broadcast_outputs_enabled(double now_s);
     void execute_palette_command(const PaletteInvokeResult& res, double now_s, StudioActions& actions);
@@ -124,6 +124,7 @@ class StudioWorkspace {
     uint64_t synced_param_epoch_{0};
     int last_synced_ep_mode_{0};
     bool last_synced_synthetic_cam_{false};
+    bool last_synced_hand_tracking_{false};
     UndoStack undo_{};
     KeymapRegistry keymap_{};
     AppSettings settings_{};

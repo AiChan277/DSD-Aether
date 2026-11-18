@@ -11,7 +11,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 
 namespace aether::tracking {
@@ -77,6 +76,12 @@ class TrackingEngine {
                                  bool synthetic_fallback_when_no_frame = false) noexcept;
 
     void request_calibration() noexcept;
+    void set_hand_tracking_enabled(bool enabled) noexcept {
+        hand_tracking_enabled_.store(enabled, std::memory_order_release);
+    }
+    [[nodiscard]] bool hand_tracking_enabled() const noexcept {
+        return hand_tracking_enabled_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] AetherStatus switch_camera_source(std::unique_ptr<ICameraSource> next_source) noexcept;
 
     [[nodiscard]] TrackingStatsSnapshot snapshot_stats() const;
@@ -96,6 +101,7 @@ class TrackingEngine {
     uint32_t frame_seq_{0};
     uint64_t total_frames_{0};
     std::atomic<bool> calibrate_requested_{false};
+    std::atomic<bool> hand_tracking_enabled_{false};
     std::atomic<uint64_t> last_infer_us_scaled_{0};
     std::atomic<uint64_t> last_prep_us_scaled_{0};
     std::atomic<uint64_t> last_total_us_scaled_{0};
@@ -109,8 +115,7 @@ class TrackingEngine {
     std::atomic<float> last_head_pitch_deg_{0.0f};
     std::atomic<float> last_head_yaw_deg_{0.0f};
     std::atomic<float> last_head_roll_deg_{0.0f};
-    mutable std::mutex preview_mutex_{};
-    LiveCameraPreviewFrame preview_slot_{};
+    mutable LockFreeTripleBuffer<LiveCameraPreviewFrame> preview_buffer_{};
     bool initialized_{false};
 };
 

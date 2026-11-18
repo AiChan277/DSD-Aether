@@ -572,4 +572,154 @@ void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, u
     }
 }
 
+namespace {
+
+[[nodiscard]] inline float sample_luma_01(const CapturedFrameBuffer& src, uint32_t sx, uint32_t sy) noexcept {
+    const uint8_t* px = src.bytes.data();
+    if (src.format == CameraPixelFormat::NV12) {
+        const uint8_t y = px[static_cast<size_t>(sy) * src.stride_y + sx];
+        return std::clamp((static_cast<float>(y) - 16.0f) * (1.1643835f / 255.0f), 0.0f, 1.0f);
+    }
+    if (src.format == CameraPixelFormat::YUY2) {
+        const size_t pair_off = static_cast<size_t>(sy) * src.stride_y + static_cast<size_t>(sx & ~1U) * 2U;
+        const uint8_t y = px[pair_off + ((sx & 1U) != 0U ? 2U : 0U)];
+        return std::clamp((static_cast<float>(y) - 16.0f) * (1.1643835f / 255.0f), 0.0f, 1.0f);
+    }
+    const size_t off = static_cast<size_t>(sy) * src.stride_y + static_cast<size_t>(sx) * 4U;
+    const float b = static_cast<float>(px[off + 0U]);
+    const float g = static_cast<float>(px[off + 1U]);
+    const float r = static_cast<float>(px[off + 2U]);
+    return std::clamp((0.299f * r + 0.587f * g + 0.114f * b) * (1.0f / 255.0f), 0.0f, 1.0f);
+}
+
+[[nodiscard]] inline bool point_in_poly8(const float* poly_8x2, float px, float py) noexcept {
+    bool inside = false;
+    for (size_t i = 0U, j = 7U; i < 8U; j = i++) {
+        const float xi = poly_8x2[i * 2U + 0U];
+        const float yi = poly_8x2[i * 2U + 1U];
+        const float xj = poly_8x2[j * 2U + 0U];
+        const float yj = poly_8x2[j * 2U + 1U];
+        if ((yi > py) != (yj > py)) {
+            const float x_int = (xj - xi) * (py - yi) / ((yj - yi) + ((yj == yi) ? 1e-6f : 0.0f)) + xi;
+            if (px < x_int) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+} // namespace
+
+bool refine_eye_iris_fullres(const CapturedFrameBuffer& src, const float* eye_poly_px_8x2, float& io_cx_px,
+                             float& io_cy_px) noexcept {
+    if (eye_poly_px_8x2 == nullptr || src.width == 0U || src.height == 0U || src.bytes.empty() ||
+        !std::isfinite(io_cx_px) || !std::isfinite(io_cy_px)) {
+        return false;
+    }
+
+    float min_x = eye_poly_px_8x2[0];
+    float max_x = eye_poly_px_8x2[0];
+    float min_y = eye_poly_px_8x2[1];
+    float max_y = eye_poly_px_8x2[1];
+    for (size_t i = 0U; i < 8U; ++i) {
+        const float vx = eye_poly_px_8x2[i * 2U + 0U];
+        const float vy = eye_poly_px_8x2[i * 2U + 1U];
+        if (!std::isfinite(vx) || !std::isfinite(vy)) {
+            return false;
+        }
+        min_x = std::min(min_x, vx);
+        max_x = std::max(max_x, vx);
+        min_y = std::min(min_y, vy);
+        max_y = std::max(max_y, vy);
+    }
+
+    const float eye_w = max_x - min_x;
+    const float eye_h = max_y - min_y;
+    if (eye_w < 4.0f || eye_h < 2.5f) {
+        return false;
+    }
+    if (io_cx_px < min_x - 0.15f * eye_w || io_cx_px > max_x + 0.15f * eye_w || io_cy_px < min_y - 0.25f * eye_h ||
+        io_cy_px > max_y + 0.25f * eye_h) {
+        return false;
+    }
+
+    const int max_ix = static_cast<int>(src.width) - 1;
+    const int max_iy = static_cast<int>(src.height) - 1;
+    const int ix0 = std::clamp(static_cast<int>(std::floor(min_x)), 0, max_ix);
+    const int ix1 = std::clamp(static_cast<int>(std::ceil(max_x)), 0, max_ix);
+    const int iy0 = std::clamp(static_cast<int>(std::floor(min_y)), 0, max_iy);
+    const int iy1 = std::clamp(static_cast<int>(std::ceil(max_y)), 0, max_iy);
+
+    // Ensure stride/plane bounds fit
+    const size_t min_bytes = static_cast<size_t>(src.stride_y) * src.height;
+    if (src.bytes.size() < min_bytes || min_bytes == 0U) {
+        return false;
+    }
+
+    float min_luma = 1.0f;
+    float max_luma = 0.0f;
+    uint32_t inside_count = 0U;
+    for (int y = iy0; y <= iy1; ++y) {
+        const float py = static_cast<float>(y) + 0.5f;
+        for (int x = ix0; x <= ix1; ++x) {
+            const float px = static_cast<float>(x) + 0.5f;
+            if (!point_in_poly8(eye_poly_px_8x2, px, py)) {
+                continue;
+            }
+            const float lum = sample_luma_01(src, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+            min_luma = std::min(min_luma, lum);
+            max_luma = std::max(max_luma, lum);
+            ++inside_count;
+        }
+    }
+
+    const float range = max_luma - min_luma;
+    if (inside_count < 6U || range < 0.05f) {
+        return false;
+    }
+
+    // Specular catchlight glare & sclera cutoffs: keep dark iris core only
+    const float glare_cut = std::max(min_luma + 0.72f * range, 0.80f);
+    const float dark_cut = min_luma + 0.42f * range;
+    const float inv_span = 1.0f / std::max(dark_cut - min_luma, 0.02f);
+    const float horiz_gate = 0.44f * eye_w;
+
+    double sum_wx = 0.0;
+    double sum_wy = 0.0;
+    double sum_w = 0.0;
+    uint32_t dark_count = 0U;
+    for (int y = iy0; y <= iy1; ++y) {
+        const float py = static_cast<float>(y) + 0.5f;
+        for (int x = ix0; x <= ix1; ++x) {
+            const float px = static_cast<float>(x) + 0.5f;
+            if (std::abs(px - io_cx_px) > horiz_gate || !point_in_poly8(eye_poly_px_8x2, px, py)) {
+                continue;
+            }
+            const float lum = sample_luma_01(src, static_cast<uint32_t>(x), static_cast<uint32_t>(y));
+            if (lum >= glare_cut || lum >= dark_cut) {
+                continue;
+            }
+            const float d = (dark_cut - lum) * inv_span;
+            const double w = static_cast<double>(d * d);
+            sum_wx += w * static_cast<double>(px);
+            sum_wy += w * static_cast<double>(py);
+            sum_w += w;
+            ++dark_count;
+        }
+    }
+
+    if (dark_count < 3U || sum_w <= 1e-6) {
+        return false;
+    }
+
+    const float cx = static_cast<float>(sum_wx / sum_w);
+    const float cy = static_cast<float>(sum_wy / sum_w);
+    const float max_dx = 0.25f * eye_w;
+    const float max_dy = 0.35f * eye_h;
+    io_cx_px = io_cx_px + std::clamp(cx - io_cx_px, -max_dx, max_dx);
+    io_cy_px = io_cy_px + std::clamp(cy - io_cy_px, -max_dy, max_dy);
+    return true;
+}
+
 } // namespace aether::tracking

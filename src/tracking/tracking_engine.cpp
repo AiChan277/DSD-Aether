@@ -33,6 +33,7 @@ AetherStatus TrackingEngine::initialize(const TrackingRouterConfig& router_cfg, 
     frame_seq_ = 0;
     total_frames_ = 0;
     roi_locked_.store(false, std::memory_order_release);
+    hand_tracking_enabled_.store(router_cfg.enable_hand_tracking, std::memory_order_release);
     initialized_ = true;
     return AETHER_OK;
 }
@@ -44,6 +45,10 @@ void TrackingEngine::shutdown() noexcept {
     }
     router_.shutdown();
     standby_frame_.reset();
+    preview_buffer_.staging() = LiveCameraPreviewFrame{};
+    preview_buffer_.publish();
+    LiveCameraPreviewFrame discard{};
+    (void)preview_buffer_.read_latest(discard);
     initialized_ = false;
 }
 
@@ -167,7 +172,8 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
     // 4. Conditional M1_hands (`batch=2` 224x224) — hard-bypassed when hand tracking is disabled
     const float pose_flag = router_.buffers().m1_body_flag[0];
     HandRoiDecision hand_rois{};
-    if (router_.config().enable_hand_tracking) {
+    const bool hands_enabled = hand_tracking_enabled_.load(std::memory_order_acquire);
+    if (hands_enabled) {
         hand_rois = compute_hand_rois_from_pose(router_.buffers().m1_body_lm.data(), pose_flag, 0.50f, 0.05f);
         auto unletterbox_hand_roi = [&](RoiRectNorm& r, bool& active) {
             if (!active) {
@@ -225,14 +231,15 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
     }
     roi_locked_.store(face_roi_.valid, std::memory_order_release);
 
-    // 6. Solve rigid skull solvePnP + EAR/MAR + Iris + Upper Body + Hands directly into triple buffer
+    // 6. Solve rigid skull solvePnP + EAR/MAR + Full-Res Iris + Upper Body + Hands directly into triple buffer
     AetherTrackingFrame out_frame{};
     solver_.populate_tracking_frame(
         current_face_roi, router_.buffers().m2_face_lm.data(), face_flag, router_.buffers().m3_blendshapes.data(),
         router_.buffers().m1_body_world.data(), router_.buffers().m1_body_lm.data(), pose_flag, hand_rois.run_left,
         hand_rois.run_right, router_.buffers().m1_hands_lm.data(), router_.buffers().m1_hands_flag.data(),
         router_.buffers().m1_hands_handed.data(), cam_frame->capture_timestamp_us, t_inf_end, router_.active_ep(),
-        ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height);
+        ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height, hands_enabled,
+        cam_frame, &hand_rois.left_roi, &hand_rois.right_roi, router_.buffers().m1_hands_world.data());
 
     out_buffer.publish(out_frame);
     ++total_frames_;
@@ -245,14 +252,15 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
     last_head_roll_deg_.store(ov.head_euler_deg.roll, std::memory_order_relaxed);
 
     {
-        std::lock_guard<std::mutex> lk(preview_mutex_);
-        preview_slot_.sequence = total_frames_;
-        preview_slot_.src_width = cam_frame->width;
-        preview_slot_.src_height = cam_frame->height;
-        preview_slot_.overlay = ov;
+        auto& slot = preview_buffer_.staging();
+        slot.sequence = total_frames_;
+        slot.src_width = cam_frame->width;
+        slot.src_height = cam_frame->height;
+        slot.overlay = ov;
         downscale_camera_to_rgba8(*cam_frame, LiveCameraPreviewFrame::kPreviewWidth,
-                                  LiveCameraPreviewFrame::kPreviewHeight, preview_slot_.rgba8.data());
-        preview_slot_.valid = true;
+                                  LiveCameraPreviewFrame::kPreviewHeight, slot.rgba8.data());
+        slot.valid = true;
+        preview_buffer_.publish();
     }
 
     const uint64_t prep_us = t_prep_end - t_prep_start;
@@ -310,13 +318,8 @@ TrackingStatsSnapshot TrackingEngine::snapshot_stats() const {
 }
 
 bool TrackingEngine::copy_live_preview(LiveCameraPreviewFrame& out_preview) const noexcept {
-    std::lock_guard<std::mutex> lk(preview_mutex_);
-    if (!preview_slot_.valid) {
-        out_preview.valid = false;
-        return false;
-    }
-    out_preview = preview_slot_;
-    return true;
+    (void)preview_buffer_.read_latest(out_preview);
+    return out_preview.valid;
 }
 
 } // namespace aether::tracking
