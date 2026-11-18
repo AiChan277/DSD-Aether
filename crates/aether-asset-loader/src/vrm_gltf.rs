@@ -1780,7 +1780,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                 if let Some(bones) = bg.get("bones").and_then(Value::as_array) {
                     let group_roots: Vec<usize> = bones
                         .iter()
-                        .filter_map(|b| b.as_u64())
+                        .filter_map(Value::as_u64)
                         .filter_map(|n_i| node_to_joint.get(&(n_i as usize)).copied())
                         .collect();
                     let root_set: std::collections::HashSet<usize> =

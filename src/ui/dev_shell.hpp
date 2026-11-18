@@ -180,10 +180,17 @@ struct DevShellRenderView {
     uint32_t device_recovery_count{0};
     const char* last_recovery_msg{""};
 
-    // Render backend & engine garbage collector (ADR-0016)
-    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11
+    // Render backend & engine garbage collector (ADR-0016 / Task 1-7)
+    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11, 2 = DirectX 12
+    uint8_t lighting_mode{1};  // 0 = Traditional, 1 = Hybrid RT, 2 = 2.5D Path Tracing
+    bool is_uma{false};
+    bool is_intel_igpu{false};
+    uint8_t circadian_phase{2}; // CircadianPhase enum
+    float circadian_hour_24{12.0f};
+    float circadian_key_kelvin{5800.0f};
     const char* backend_detail{""};
     float dx11_render_ms{0.0f};
+    float dx12_render_ms{0.0f};
     uint64_t gc_retired_pending{0};
     uint64_t gc_reclaimed_total{0};
     uint64_t gc_bytes_reclaimed{0};
@@ -256,9 +263,10 @@ struct DevShellViewportActions {
     bool show_checkerboard{true};
     bool show_orbit_orb{true};
     bool rt_enabled{true};
+    uint8_t lighting_mode{1}; // 0 = Traditional, 1 = Hybrid RT, 2 = 2.5D Path Tracing
     uint8_t debug_view{0};
     uint8_t denoiser_kind{0};
-    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11 (applied by T3 when it differs from the active one)
+    uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11, 2 = DirectX 12 (applied by T3 on change)
     float key_azimuth_deg{32.0f};
     float key_elevation_deg{26.0f};
     float fill_azimuth_deg{-52.0f}; // Fill / Rim orbit rigidly with the key (ui::LightRigOffsets)
@@ -278,6 +286,23 @@ struct DevShellViewportActions {
     float crease_strength{0.75f};
     float hair_highlight_intensity{0.85f};
     float rim_step_strength{0.65f};
+    float indirect_bleed_strength{0.55f};
+    float rim_depth_offset_px{2.8f};
+    bool filter_2d_pro{true};
+    float filter_kuwahara_strength{0.55f};
+    float filter_dog_ink_boost{0.60f};
+    bool filter_paper_warmth{true};
+    float filter_paper_warmth_strength{0.25f};
+    bool circadian_enabled{false};
+    int32_t circadian_timezone_idx{0};
+    int32_t circadian_time_override_min{-1};
+    bool npu_bounds_enabled{true};
+    bool npu_anti_clip_enabled{true};
+    std::array<float, 3> npu_bounds_half{0.35f, 0.22f, 0.30f};
+    float npu_soft_elasticity{0.35f};
+    float npu_max_pitch_deg{42.0f};
+    float npu_anti_clip_margin{0.035f};
+    bool npu_bounds_dirty{true};
     uint8_t target_fps_mode{1};
     bool vsync_enabled{false};
     bool background_eco_mode{true};

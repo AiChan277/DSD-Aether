@@ -147,4 +147,36 @@ bool HighResTimer::wait_event_or_deadline_us(void* event_handle, uint64_t target
     return ::WaitForSingleObject(static_cast<HANDLE>(event_handle), 0) == WAIT_OBJECT_0;
 }
 
+uint32_t wait_handle_high_res_us(void* win32_handle, HighResTimer& backoff_timer, uint64_t timeout_us) noexcept {
+#if defined(_WIN32)
+    if (win32_handle == nullptr) {
+        return WAIT_FAILED;
+    }
+    HANDLE h = static_cast<HANDLE>(win32_handle);
+    DWORD res = ::WaitForSingleObject(h, 0u);
+    if (res != WAIT_TIMEOUT || timeout_us == 0ULL) {
+        return static_cast<uint32_t>(res);
+    }
+    const uint64_t deadline_us = now_us() + timeout_us;
+    for (;;) {
+        const uint64_t cur = now_us();
+        if (cur >= deadline_us) {
+            return static_cast<uint32_t>(::WaitForSingleObject(h, 0u));
+        }
+        const uint64_t rem = deadline_us - cur;
+        const uint64_t step = rem < 250ULL ? rem : 250ULL;
+        backoff_timer.sleep_us(step, 40ULL);
+        res = ::WaitForSingleObject(h, 0u);
+        if (res != WAIT_TIMEOUT) {
+            return static_cast<uint32_t>(res);
+        }
+    }
+#else
+    (void)win32_handle;
+    (void)backoff_timer;
+    (void)timeout_us;
+    return 0xFFFFFFFFu;
+#endif
+}
+
 } // namespace aether

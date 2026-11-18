@@ -61,7 +61,7 @@ float4 ps_main(HullVsOut i) : SV_Target0 {
     }
     GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
     GpuMaterial mat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, i.material_id);
-    float4 base_sample = g_SampledImages[mat.tex_slots.x].Sample(g_Samplers[kSamplerLinearClamp], i.uv);
+    float4 base_sample = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, i.uv);
     float alpha = saturate(base_sample.a * mat.lit_color.a);
     if ((g_Pc.param1 & 32u) != 0u && alpha < max(mat.toon_params.w, 0.001)) {
         discard;

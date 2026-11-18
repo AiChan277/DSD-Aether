@@ -1709,6 +1709,41 @@ void ViewportPanel::draw(StudioMode mode, const HardwareInventory& hw, const Dev
         }
 
         const float eff_fovy = last_aspect_layout_.effective_fovy_rad(avatar.camera_fovy_rad);
+        if (avatar.has_camera && params.get_bool(ParamId::TrackingNpuSafeBoxPreview)) {
+            const GizmoCameraBasis safe_cam = GizmoCameraBasis::build(avatar, frame_p0, frame_p1, eff_fovy);
+            const float px = params.get_float(ParamId::AvatarPosX);
+            const float py = params.get_float(ParamId::AvatarPosY);
+            const float pz = params.get_float(ParamId::AvatarPosZ);
+            const float sc = std::clamp(params.get_float(ParamId::AvatarScale), 0.25f, 4.0f);
+            const float cx = px;
+            const float cy = py + ((avatar.bone_hips_y > 0.1f) ? avatar.bone_hips_y : 0.85f) * sc;
+            const float cz = pz;
+            const float bx = params.get_float(ParamId::TrackingNpuBoundsX) * sc;
+            const float by = params.get_float(ParamId::TrackingNpuBoundsY) * sc;
+            const float bz = params.get_float(ParamId::TrackingNpuBoundsZ) * sc;
+            const std::array<GizmoVec3, 8> corners = {{
+                {cx - bx, cy - by, cz - bz}, {cx + bx, cy - by, cz - bz}, {cx + bx, cy + by, cz - bz},
+                {cx - bx, cy + by, cz - bz}, {cx - bx, cy - by, cz + bz}, {cx + bx, cy - by, cz + bz},
+                {cx + bx, cy + by, cz + bz}, {cx - bx, cy + by, cz + bz},
+            }};
+            static constexpr std::array<std::array<int, 2>, 12> kBoxEdges = {{
+                {0, 1}, {1, 2}, {2, 3}, {3, 0},
+                {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                {0, 4}, {1, 5}, {2, 6}, {3, 7},
+            }};
+            std::array<ImVec2, 8> proj{};
+            std::array<bool, 8> vis{};
+            for (size_t ci = 0; ci < 8; ++ci) {
+                vis[ci] = safe_cam.project(corners[ci], proj[ci]);
+            }
+            for (const auto& edge : kBoxEdges) {
+                const size_t a = static_cast<size_t>(edge[0]);
+                const size_t b = static_cast<size_t>(edge[1]);
+                if (vis[a] && vis[b]) {
+                    dl->AddLine(proj[a], proj[b], t.col32_safe_box_edge, 1.5f * scale);
+                }
+            }
+        }
         const bool gizmo_claimed =
             draw_transform_gizmo(avatar, params, undo, fonts, frame_p0, frame_p1, eff_fovy, scale);
 

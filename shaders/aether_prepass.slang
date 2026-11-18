@@ -58,7 +58,7 @@ PrepassPsOut ps_main(PrepassVsOut i) {
     if (g_Pc.aux_buf_bda != 0ul) {
         GpuMaterial mat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, i.material_id);
         if ((g_Pc.param1 & 32u) != 0u && mat.toon_params.w > 0.001) {
-            float tex_a = g_SampledImages[mat.tex_slots.x].Sample(g_Samplers[kSamplerLinearClamp], i.uv).a;
+            float tex_a = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, i.uv).a;
             float alpha = tex_a * mat.lit_color.a;
             if (alpha < mat.toon_params.w) {
                 discard;
@@ -66,8 +66,8 @@ PrepassPsOut ps_main(PrepassVsOut i) {
         }
     }
 
-    float2 cur_uv = (i.cur_clip.xy / max(abs(i.cur_clip.w), 1e-5)) * 0.5 + 0.5;
-    float2 prev_uv = (i.prev_clip.xy / max(abs(i.prev_clip.w), 1e-5)) * 0.5 + 0.5;
+    float2 cur_uv = ndc_to_screen_uv(i.cur_clip.xy / max(abs(i.cur_clip.w), 1e-5));
+    float2 prev_uv = ndc_to_screen_uv(i.prev_clip.xy / max(abs(i.prev_clip.w), 1e-5));
 
     PrepassPsOut o = {};
     o.gb_n = oct_encode(normalize_safe(i.view_normal, float3(0.0, 0.0, 1.0)));

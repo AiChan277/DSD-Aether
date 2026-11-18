@@ -451,8 +451,13 @@ void PipelineSkeleton::t1_entry() {
     }
     publish_hud(engine.get(), engine_ready, engine_ready ? nullptr : init_err.c_str());
 
+    uint64_t bounds_epoch = 0ULL;
+    tracking::NpuMovementBoundsConfig bounds_cfg{};
     uint64_t next_tick = now_us();
     while (running_.load(std::memory_order_acquire)) {
+        if (movement_bounds_mailbox_.poll(bounds_epoch, bounds_cfg)) {
+            engine->set_movement_bounds_config(bounds_cfg);
+        }
         TrackingControlCommand cmd{};
         while (tracking_cmd_ring_.try_pop(cmd)) {
             if (cmd.kind == TrackingCmdKind::CalibrateNeutral) {
@@ -589,6 +594,9 @@ void PipelineSkeleton::t2_entry() {
     uint64_t param_epoch = 0;
     uint64_t rest_epoch = 0;
     float gain = 1.0f;
+    std::array<float, 3> prev_hair_centroid{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> hair_vel_ema{0.0f, 0.0f, 0.0f};
+    bool have_prev_hair = false;
     AetherTrackingFrame latest_pose{};
     animation::RestSkeletonMetrics pending_rest{};
     AetherDspSyncPacket dsp_pkt{};
@@ -654,6 +662,31 @@ void PipelineSkeleton::t2_entry() {
                     snap.spring_collider_count, snap.spring_segments.data(),
                     static_cast<uint32_t>(snap.spring_segments.size()), snap.spring_segment_count);
             }
+            if (snap.spring_segment_count > 0U) {
+                std::array<float, 3> cur_c{0.0f, 0.0f, 0.0f};
+                for (uint32_t si = 0; si < snap.spring_segment_count; ++si) {
+                    cur_c[0] += snap.spring_segments[si].tail[0];
+                    cur_c[1] += snap.spring_segments[si].tail[1];
+                    cur_c[2] += snap.spring_segments[si].tail[2];
+                }
+                const float inv_n = 1.0f / static_cast<float>(snap.spring_segment_count);
+                cur_c[0] *= inv_n;
+                cur_c[1] *= inv_n;
+                cur_c[2] *= inv_n;
+                if (have_prev_hair) {
+                    const std::array<float, 3> inst = {
+                        std::clamp((cur_c[0] - prev_hair_centroid[0]) * 240.0f, -4.0f, 4.0f),
+                        std::clamp((cur_c[1] - prev_hair_centroid[1]) * 240.0f, -4.0f, 4.0f),
+                        std::clamp((cur_c[2] - prev_hair_centroid[2]) * 240.0f, -4.0f, 4.0f),
+                    };
+                    for (size_t k = 0; k < 3; ++k) {
+                        hair_vel_ema[k] = hair_vel_ema[k] * 0.85f + inst[k] * 0.15f;
+                    }
+                }
+                prev_hair_centroid = cur_c;
+                have_prev_hair = true;
+            }
+            snap.hair_velocity_ws = hair_vel_ema;
             const uint64_t t2_done = now_us();
             snap.frame.sim_tick_ms = static_cast<float>(t2_done - t2_start) * 0.001f;
             snap.frame_sequence = latest_pose.frame_sequence;

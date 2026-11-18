@@ -230,6 +230,22 @@ target_link_libraries(real_vrm_verification_test PRIVATE
 )
 set_tests_properties(real_vrm_verification_test PROPERTIES TIMEOUT 180)
 
+# Tasks 1-8: DirectX 12 parity, Intel iGPU UMA, 3-Tier Lighting, Circadian & NPU Bounds Tests
+aether_add_cpp_test(dx12_and_capabilities_test cpp/dx12_and_capabilities_test.cpp)
+target_compile_definitions(dx12_and_capabilities_test PRIVATE
+    AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+    AETHER_VRM_SNAPSHOT_DIR="${CMAKE_BINARY_DIR}/tests/ui_snapshots"
+)
+target_link_libraries(dx12_and_capabilities_test PRIVATE
+    aether_renderer
+    aether_rhi
+    aether_output
+    aether_tracking
+    windowscodecs
+    ole32
+)
+set_tests_properties(dx12_and_capabilities_test PROPERTIES TIMEOUT 180)
+
 # Ensure Vulkan tests discover vcpkg's Release Khronos validation layer (avoids Debug-CRT HotPathGuard noise
 # and enables CTest without requiring a separate system VULKAN_SDK installation).
 set(_vcpkg_vk_layer_dir "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
@@ -248,6 +264,7 @@ if(EXISTS "${_vcpkg_vk_layer_dir}/VkLayer_khronos_validation.json")
         studio_ui_snapshot_test
         dx11_backend_test
         real_vrm_verification_test
+        dx12_and_capabilities_test
     )
         if(TEST ${_vk_test})
             set_tests_properties(${_vk_test} PROPERTIES

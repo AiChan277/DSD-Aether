@@ -75,7 +75,15 @@ std::array<float, 3> light_toward(const SceneLight& l) noexcept {
 } // namespace
 
 const char* render_backend_name(RenderBackend b) noexcept {
-    return b == RenderBackend::DirectX11 ? "DirectX 11" : "Vulkan";
+    switch (b) {
+        case RenderBackend::DirectX11:
+            return "DirectX 11";
+        case RenderBackend::DirectX12:
+            return "DirectX 12";
+        case RenderBackend::Vulkan:
+        default:
+            return "Vulkan";
+    }
 }
 
 Dx11Bridge::~Dx11Bridge() noexcept {

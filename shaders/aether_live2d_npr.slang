@@ -40,7 +40,7 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
     GpuMaterial mat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, i.material_id);
 
-    float4 tex_lit = g_SampledImages[mat.tex_slots.x].Sample(g_Samplers[kSamplerLinearClamp], i.uv);
+    float4 tex_lit = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, i.uv);
     float4 lit_rgba = tex_lit * mat.lit_color;
     float alpha = saturate(lit_rgba.a);
 
@@ -63,7 +63,7 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     // preserve direct analytical emissive composition (Invariant 5).
     float3 emissive_map = float3(1.0, 1.0, 1.0);
     if (mat.extra_slots.y != 0xFFFFFFFFu) {
-        emissive_map = g_SampledImages[mat.extra_slots.y].Sample(g_Samplers[kSamplerLinearClamp], i.uv).rgb;
+        emissive_map = aether_sample(mat.extra_slots.y, kSamplerLinearClamp, i.uv).rgb;
     }
     float3 emissive_term = mat.emission_and_shift.rgb * emissive_map;
 
@@ -78,6 +78,8 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     float shadow_shift = saturate(fg.npr_style_params.z);
     float hair_hl_intensity = max(fg.npr_style_params2.y, 0.0);
     float rim_step_strength = max(fg.npr_style_params2.z, 0.0);
+    uint lighting_mode = (fg.state_u32.w >> 10u) & 3u;
+    float k_gi = max(fg.hair_velocity_ws.w, 0.0);
 
     bool is_face = ((mat_flags & 2u) != 0u) || ((i.submesh_flags & 1u) != 0u);
     bool is_skin = is_face || ((mat_flags & 8u) != 0u);
@@ -90,10 +92,10 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     float norm_flat_k = is_skin ? face_norm_flatten : (face_norm_flatten * 0.22);
     float3 n_lit = normalize_safe(lerp(proxy_n, view_v, norm_flat_k), proxy_n);
 
-    float3 tex_shade_mul = g_SampledImages[mat.tex_slots.y].Sample(g_Samplers[kSamplerLinearClamp], i.uv).rgb;
+    float3 tex_shade_mul = aether_sample(mat.tex_slots.y, kSamplerLinearClamp, i.uv).rgb;
     float3 shade_col = mat.shade_color.rgb * tex_shade_mul;
 
-    int3 pix = int3(int2(i.clip_pos.xy), 0);
+    int2 pix_i = int2(i.clip_pos.xy);
     float rt_shadow = 1.0;
     float rim_occ = 1.0;
     float3 bounce_rgb = float3(0.0, 0.0, 0.0);
@@ -104,18 +106,18 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         uint rim_slot = fg.gbuffer_extra_ids[0].w;
         uint bounce_slot = fg.gbuffer_extra_ids[1].x;
         if (sh_slot != 0xFFFFFFFFu) {
-            rt_shadow = g_SampledImages[sh_slot].Load(pix).x;
+            rt_shadow = aether_load(sh_slot, pix_i).x;
         }
         if (rim_slot != 0xFFFFFFFFu) {
-            rim_occ = g_SampledImages[rim_slot].Load(pix).x;
+            rim_occ = aether_load(rim_slot, pix_i).x;
         }
         if (bounce_slot != 0xFFFFFFFFu) {
             float2 screen_uv = i.clip_pos.xy * fg.viewport_size.zw;
-            bounce_rgb = g_SampledImages[bounce_slot].SampleLevel(g_Samplers[kSamplerLinearClamp], screen_uv, 0).rgb;
+            bounce_rgb = aether_sample_level(bounce_slot, kSamplerLinearClamp, screen_uv, 0).rgb;
         }
     }
 
-    // Key light & quantized 2D Live2D/MToon cel ramp + 0-360° SDF face shadow (§10.5)
+    // Key light & Fill SH / Indirect Irradiance computed BEFORE cel quantization (Task 3 & Task 4)
     uint light_count = fg.state_u32.y;
     GpuLight key_l = fg.lights[0];
     float3 key_dir = float3(0.0, 0.0, 1.0);
@@ -125,6 +127,20 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
                                              : normalize_safe(key_l.pos_or_dir.xyz, float3(0.0, 0.0, 1.0));
         key_col = key_l.color_intensity.rgb;
     }
+
+    float3 sh_ambient = (lighting_mode == 0u) ? eval_3band_sh_ambient(n_lit, fg) : float3(0.08, 0.08, 0.11);
+    float3 fill_indirect = float3(0.0, 0.0, 0.0);
+    if (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u) {
+        float3 fill_dir = normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(0.0, 1.0, 0.0));
+        float fill_w = saturate(dot(n_lit, fill_dir) * 0.5 + 0.5);
+        fill_indirect = fg.lights[1].color_intensity.rgb * (fill_w * 0.30);
+    }
+    float3 e_bounce = bounce_rgb * max(mat.hair_specular_params.w, 0.35);
+    float3 indirect = sh_ambient * ((lighting_mode == 0u) ? 0.55 : 1.0) + fill_indirect + e_bounce * 0.55;
+
+    // Task 4: Evaluate 1-bounce indirect diffuse luminance BEFORE cel quantization!
+    float gi_luma = luminance(e_bounce);
+    float l_gi_lift = k_gi * gi_luma * 0.65;
 
     float cel_lit = 1.0;
     float deep_shadow = 0.0;
@@ -141,16 +157,17 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         float lx = dot(l_horiz, head_right_xz);
         float lz = clamp(dot(l_horiz, head_fwd_xz), -1.0, 1.0);
         float2 mir_uv = (lx >= 0.0) ? i.uv : float2(1.0 - i.uv.x, i.uv.y);
-        float sdf_val = g_SampledImages[mat.tex_slots.z].Sample(g_Samplers[kSamplerLinearClamp], mir_uv).r;
-        float thresh = acos(lz) / kPi;
+        float sdf_val = aether_sample(mat.tex_slots.z, kSamplerLinearClamp, mir_uv).r;
+        float thresh = max(0.0, acos(lz) / kPi - l_gi_lift * 0.30);
         float feather = clamp(min(max(mat.toon_params.z, cel_feather * 2.0), fg.light_params.x), 0.015, 0.12);
-        cel_lit = smoothstep(thresh - feather, thresh + feather, sdf_val);
+        cel_lit = quantize_cel(sdf_val, thresh, feather);
     } else {
         float ndl = dot(n_lit, key_dir);
+        float l_eff = ndl * rt_shadow + l_gi_lift;
         float shift = mat.emission_and_shift.w;
         float half_soft = clamp(cel_feather * max(1.35 - mat.toon_params.x * 0.55, 0.45), 0.008, 0.12);
-        float band1 = smoothstep(shift - half_soft, shift + half_soft, ndl) * rt_shadow;
-        float band2 = smoothstep(shift - 0.34 - half_soft, shift - 0.34 + half_soft, ndl);
+        float band1 = quantize_cel(l_eff, shift, half_soft);
+        float band2 = quantize_cel(l_eff, shift - 0.34, half_soft);
         cel_lit = band1;
         deep_shadow = (1.0 - band2) * (1.0 - band1);
     }
@@ -164,25 +181,15 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
         float cur_dist = max(-i.view_pos.z, 0.25);
         float scale_res = max(fg.viewport_size.y / 1080.0, 1.0);
         float off_px = fg.head_fwd_world.w * scale_res * clamp(ref_dist / cur_dist, 0.5, 1.6);
-        int2 caster_p = int2(i.clip_pos.xy) + int2(round(float2(l_view.x, -l_view.y) * off_px));
+        int2 caster_p = pix_i + int2(round(float2(l_view.x, -l_view.y) * off_px));
         caster_p = clamp(caster_p, int2(0, 0), int2(int(fg.viewport_size.x) - 1, int(fg.viewport_size.y) - 1));
-        uint caster_stencil = g_UintSampledImages[stencil_slot].Load(int3(caster_p, 0)).x;
+        uint caster_stencil = aether_uload(stencil_slot, caster_p).x;
         if ((caster_stencil & 2u) != 0u) {
             cel_lit = min(cel_lit, saturate(1.0 - fg.head_right_world.w * 1.15));
         }
     }
 
-    // Energy-conserving Fill, bounce & Live2D/MToon chromatic cel-shading (§10.5):
-    float3 indirect = float3(0.08, 0.08, 0.11);
-    if (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u) {
-        float3 fill_dir = normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(0.0, 1.0, 0.0));
-        float fill_w = saturate(dot(n_lit, fill_dir) * 0.5 + 0.5);
-        indirect += fg.lights[1].color_intensity.rgb * (fill_w * 0.30);
-    }
-    indirect += bounce_rgb * (mat.hair_specular_params.w * 0.35);
-
-    // Chromatic Anime Shadow Tinting (never flat muddy gray):
-    // Skin -> warm coral/peach-pink; bright/white clothes -> cool periwinkle/lavender; colored cloth/hair -> rich cool shift
+    // Chromatic Anime Shadow Tinting + Pre-Stepped Indirect Color Bleeding (Task 4)
     float lit_luma = max(luminance(lit_rgba.rgb), 1e-4);
     float sh_luma = luminance(shade_col);
     bool warm_skin_hue = is_skin || (lit_rgba.r > lit_rgba.b * 1.12 && lit_rgba.r > 0.22);
@@ -199,6 +206,9 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     } else {
         eff_shade = lerp(shade_col, min(shade_col * float3(0.98, 0.96, 1.02), chroma_tint), shadow_shift * 0.45);
     }
+    float3 bleed_chroma = normalize_chroma(e_bounce);
+    float bleed_tint_w = saturate(gi_luma * k_gi * 1.75);
+    eff_shade = lerp(eff_shade, eff_shade * bleed_chroma, bleed_tint_w);
     eff_shade *= lerp(1.0, 0.86, deep_shadow);
 
     float3 raw_lit = key_col + indirect * 0.22;
@@ -206,41 +216,93 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
     float over = max(lit_peak - 0.95, 0.0);
     float capped_peak = min(lit_peak, 0.95) + 0.18 * (over / (0.40 + over));
     float3 lit_irradiance = raw_lit * (capped_peak / max(lit_peak, 1e-5));
-    float3 shade_irradiance = min(indirect * 0.62 + key_col * 0.36, float3(0.90, 0.90, 0.92));
+    float3 shade_irradiance = min(indirect * 0.68 + key_col * 0.34, float3(0.92, 0.92, 0.94));
 
     float3 direct_term = lerp(eff_shade * shade_irradiance, lit_rgba.rgb * lit_irradiance, cel_lit);
 
-    // 2D Stepped Rim Light (sharp graphic anime edge along light direction + subtle base rim)
+    // Task 5B: Dynamic Depth-Offset & Light-Guided 2D Rim Light
+    float3 rim_dir_ws = (light_count > 2u && (fg.lights[2].role_and_flags.y & 1u) != 0u)
+                            ? normalize_safe(fg.lights[2].pos_or_dir.xyz, key_dir)
+                            : key_dir;
+    float3 rim_dir_vs = normalize_safe(mul_col3(fg.view, rim_dir_ws), float3(0.4, 0.6, 0.2));
+    float2 light_scr = normalize_safe(float3(rim_dir_vs.x, -rim_dir_vs.y, 0.0), float3(1.0, 0.0, 0.0)).xy;
+    float depth_edge_rim = 0.0;
+    uint depth_slot = fg.gbuffer_extra_ids[0].x;
+    if (!is_transparent && depth_slot != 0xFFFFFFFFu) {
+        int2 max_vp = int2(int(fg.viewport_size.x) - 1, int(fg.viewport_size.y) - 1);
+        float rim_px = clamp(fg.filter_pro_params.w, 2.0, 4.0);
+        int2 rim_p = clamp(pix_i + int2(round(light_scr * rim_px)), int2(0, 0), max_vp);
+        float d_off = aether_load(depth_slot, rim_p).x;
+        float z_cur = abs(fg.proj.col3.z / max(abs(i.clip_pos.z + fg.proj.col2.z), 1e-5));
+        float z_off = (d_off >= 0.99998)
+                          ? (z_cur + 2.0)
+                          : abs(fg.proj.col3.z / max(abs(d_off + fg.proj.col2.z), 1e-5));
+        float rel_jump = (z_off - z_cur) / max(z_cur, 0.15);
+        depth_edge_rim = smoothstep(0.014, 0.048, rel_jump);
+    }
+
     float ndv = saturate(dot(true_n, view_v));
     float fresnel_soft = pow(1.0 - ndv, max(mat.rim_color_power.w, 1.0));
-    float rim_step = smoothstep(0.68, 0.72, 1.0 - ndv);
-    float rim_light_dir = saturate(dot(n_lit, key_dir) * 0.5 + 0.55) * lerp(0.35, 1.0, rt_shadow);
-    float3 rim_col_base = max(mat.rim_color_power.rgb, key_col * 0.28);
+    float rim_signal = max(1.0 - ndv, depth_edge_rim * 0.92);
+    float rim_step = smoothstep(0.67, 0.72, rim_signal);
+    float rim_light_dir = saturate(dot(n_lit, rim_dir_ws) * 0.45 + 0.60) * lerp(0.35, 1.0, rt_shadow);
+    float3 rim_col_base = max(mat.rim_color_power.rgb, key_col * 0.30);
     float3 rim_term = (rim_col_base * (rim_step * rim_occ * rim_light_dir * rim_step_strength)) +
                       (mat.rim_color_power.rgb * (fresnel_soft * rim_occ * 0.25));
 
-    // Matcap & Stylized 2D Stepped Hair Angel-Ring highlight (glides smoothly with head tilt)
+    // Matcap & Task 5A: Dynamic Anisotropic Kajiya-Kay 2D Stepped Hair Angel Ring
     float3 matcap_term = float3(0.0, 0.0, 0.0);
     if (mat.toon_params.y > 0.001 && mat.tex_slots.w != 0xFFFFFFFFu) {
         float3 vn = normalize_safe(mul_col3(fg.view, true_n), float3(0.0, 0.0, 1.0));
         float2 mc_uv = vn.xy * 0.5 + 0.5;
-        matcap_term = g_SampledImages[mat.tex_slots.w].Sample(g_Samplers[kSamplerLinearClamp], mc_uv).rgb * mat.toon_params.y;
+        matcap_term = aether_sample(mat.tex_slots.w, kSamplerLinearClamp, mc_uv).rgb * mat.toon_params.y;
     }
 
     float3 angel_term = float3(0.0, 0.0, 0.0);
-    if (is_hair && light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u && hair_hl_intensity > 0.001) {
+    if (is_hair && hair_hl_intensity > 0.001) {
+        // Reconstruct crown-to-tip hair tangent orthogonal to normal via screen derivatives
+        float3 dp_dx = ddx(i.world_pos);
+        float3 dp_dy = ddy(i.world_pos);
+        float2 duv_dx = ddx(i.uv);
+        float2 duv_dy = ddy(i.uv);
+        float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
+        float3 t_crown_tip = normalize_safe(cross(true_n, fg.head_right_world.xyz), float3(0.0, 1.0, 0.0));
+        if (abs(det) > 1e-8) {
+            float3 bitan = (-duv_dy.x * dp_dx + duv_dx.x * dp_dy) / det;
+            float3 projected = bitan - true_n * dot(bitan, true_n);
+            t_crown_tip = normalize_safe(projected, t_crown_tip);
+        }
+        // Perturb along strand shift curve + live SpringBone velocity inertia
+        float strand_shift = 0.085 * sin(i.uv.x * 52.0) + 0.04 * cos(i.uv.x * 104.0);
+        float3 hair_vel = clamp(fg.hair_velocity_ws.xyz, float3(-1.5, -1.5, -1.5), float3(1.5, 1.5, 1.5));
+        float3 t_shift1 = normalize_safe(t_crown_tip + true_n * strand_shift + hair_vel * 0.18, t_crown_tip);
+        float3 t_shift2 = normalize_safe(t_crown_tip + true_n * (strand_shift - 0.14) + hair_vel * 0.24, t_crown_tip);
+
+        float3 hair_l_dir = (light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u)
+                                ? normalize_safe(fg.lights[3].pos_or_dir.xyz, key_dir)
+                                : key_dir;
+        float3 hair_l_col = (light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u)
+                                ? fg.lights[3].color_intensity.rgb
+                                : key_col;
+
+        float3 h1 = normalize_safe(hair_l_dir + view_v, view_v);
+        float3 h2 = normalize_safe(rim_dir_ws + view_v, view_v);
+        float sin1 = sqrt(max(0.0, 1.0 - dot(t_shift1, h1) * dot(t_shift1, h1)));
+        float sin2 = sqrt(max(0.0, 1.0 - dot(t_shift2, h2) * dot(t_shift2, h2)));
+        float lobe1 = pow(sin1, 34.0);
+        float lobe2 = pow(sin2, 18.0) * 0.55;
+
+        // Organic crown halo modulation responsive to head tilt
         float3 vn = normalize_safe(mul_col3(fg.view, true_n), float3(0.0, 0.0, 1.0));
-        float3 l3v = normalize_safe(mul_col3(fg.view, normalize_safe(fg.lights[3].pos_or_dir.xyz, float3(0.0, 1.0, 0.0))),
-                                    float3(0.0, 1.0, 0.0));
-        float tilt_x = vn.x - fg.head_fwd_world.x * 0.30;
-        float arc_y = vn.y + 0.045 * cos(tilt_x * 16.0);
-        float3 band_n = normalize_safe(float3(vn.x * 0.28, arc_y, vn.z), vn);
-        float3 band_l = normalize_safe(float3(l3v.x * 0.25, l3v.y + 0.18, max(l3v.z, 0.75)), float3(0.0, 0.45, 0.89));
-        float ring_sig = saturate(dot(band_n, band_l));
-        float ring_step = smoothstep(0.935, 0.945, ring_sig);
-        float3 hl_tint = lerp(float3(1.0, 1.0, 1.0), lit_rgba.rgb * 1.45 + 0.25, 0.35);
-        angel_term = fg.lights[3].color_intensity.rgb * hl_tint *
-                     (ring_step * 0.32 * hair_hl_intensity * lerp(0.45, 1.0, cel_lit));
+        float tilt_arch = smoothstep(0.10, 0.75, vn.y + 0.12 * cos((vn.x - fg.head_fwd_world.x * 0.30) * 14.0));
+        float spec_val = saturate((lobe1 + lobe2) * (0.45 + 0.55 * tilt_arch));
+        float ring_step = smoothstep(0.60, 0.66, spec_val);
+        float ring_edge_chroma = smoothstep(0.54, 0.60, spec_val) * (1.0 - ring_step);
+
+        float3 hl_tint = lerp(float3(1.0, 1.0, 1.0), lit_rgba.rgb * 1.45 + 0.22, 0.38);
+        float3 edge_col = lerp(hl_tint, hl_tint * float3(1.12, 0.90, 1.08), ring_edge_chroma);
+        angel_term = hair_l_col * edge_col *
+                     ((ring_step * 0.36 + ring_edge_chroma * 0.14) * hair_hl_intensity * lerp(0.45, 1.0, cel_lit));
     }
 
     float3 hdr = direct_term + rim_term + matcap_term + angel_term + emissive_term;
@@ -251,9 +313,15 @@ float4 ps_main(NprVsOut i) : SV_Target0 {
 [shader("vertex")]
 NprVsOut vs_orb(uint vid : SV_VertexID) {
     NprVsOut o = {};
+#ifdef __TARGET_SPIRV__
     float2 quad[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
     o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
     o.uv = o.clip_pos.xy * 0.5 + 0.5;
+#else
+    float2 quad[3] = {float2(-1.0, 1.0), float2(3.0, 1.0), float2(-1.0, -3.0)};
+    o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
+    o.uv = float2(o.clip_pos.x * 0.5 + 0.5, 0.5 - o.clip_pos.y * 0.5);
+#endif
     return o;
 }
 

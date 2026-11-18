@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_4.h>
 #include <windows.h>
 
@@ -122,6 +123,50 @@ bool SpoutOutput::detect_display_adapter_mismatch(const std::array<uint8_t, 8>& 
     return mismatch;
 }
 
+Expected<void> SpoutOutput::init_d3d11_device_for_luid(const std::array<uint8_t, 8>& luid, bool luid_valid) {
+    adapter_mismatch_ = detect_display_adapter_mismatch(luid, luid_valid);
+
+    // Match D3D11 device strictly to GPU LUID (`§11.2.1`)
+    IDXGIFactory4* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory))) || factory == nullptr) {
+        return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "CreateDXGIFactory1 failed for SpoutOutput")};
+    }
+
+    IDXGIAdapter1* adapter = nullptr;
+    if (luid_valid) {
+        LUID dev_luid{};
+        std::memcpy(&dev_luid, luid.data(), sizeof(dev_luid));
+        (void)factory->EnumAdapterByLuid(dev_luid, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&adapter));
+    }
+    if (adapter == nullptr) {
+        (void)factory->EnumAdapters1(0, &adapter);
+    }
+    factory->Release();
+    if (adapter == nullptr) {
+        return Unexpected<Error>{Error::make(ErrorCode::Unsupported, "No DXGI adapter available for SpoutOutput")};
+    }
+
+    ID3D11Device* d3d_dev = nullptr;
+    ID3D11DeviceContext* d3d_ctx = nullptr;
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL chosen_level = D3D_FEATURE_LEVEL_11_0;
+    const HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                         levels, 2u, D3D11_SDK_VERSION, &d3d_dev, &chosen_level, &d3d_ctx);
+    adapter->Release();
+    if (FAILED(hr) || d3d_dev == nullptr || d3d_ctx == nullptr) {
+        if (d3d_ctx != nullptr) {
+            d3d_ctx->Release();
+        }
+        if (d3d_dev != nullptr) {
+            d3d_dev->Release();
+        }
+        return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "D3D11CreateDevice failed for SpoutOutput")};
+    }
+    d3d_device_ = d3d_dev;
+    d3d_context_ = d3d_ctx;
+    return {};
+}
+
 Expected<void> SpoutOutput::init(rhi::RhiDevice& device, uint32_t width, uint32_t height, const char* sender_name,
                                  SpoutSharingMode mode) {
     shutdown();
@@ -131,6 +176,7 @@ Expected<void> SpoutOutput::init(rhi::RhiDevice& device, uint32_t width, uint32_
     }
 
     device_ = &device;
+    d3d12_mode_ = false;
     width_ = width;
     height_ = height;
     requested_mode_ = mode;
@@ -150,49 +196,10 @@ Expected<void> SpoutOutput::init(rhi::RhiDevice& device, uint32_t width, uint32_
     const char* effective_name = (sender_name != nullptr && sender_name[0] != '\0') ? sender_name : "Aether2.5D";
     std::snprintf(sender_name_.data(), sender_name_.size(), "%s", effective_name);
 
-    adapter_mismatch_ = detect_display_adapter_mismatch(device.gpu_info().luid, device.gpu_info().luid_valid);
-
-    // Match D3D11 device strictly to Vulkan GPU LUID (`§11.2.1`)
-    IDXGIFactory4* factory = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory))) || factory == nullptr) {
+    if (auto d3d_res = init_d3d11_device_for_luid(device.gpu_info().luid, device.gpu_info().luid_valid); !d3d_res) {
         shutdown();
-        return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "CreateDXGIFactory1 failed for SpoutOutput")};
+        return d3d_res;
     }
-
-    IDXGIAdapter1* adapter = nullptr;
-    if (device.gpu_info().luid_valid) {
-        LUID vk_luid{};
-        std::memcpy(&vk_luid, device.gpu_info().luid.data(), sizeof(vk_luid));
-        (void)factory->EnumAdapterByLuid(vk_luid, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&adapter));
-    }
-    if (adapter == nullptr) {
-        (void)factory->EnumAdapters1(0, &adapter);
-    }
-    factory->Release();
-    if (adapter == nullptr) {
-        shutdown();
-        return Unexpected<Error>{Error::make(ErrorCode::Unsupported, "No DXGI adapter available for SpoutOutput")};
-    }
-
-    ID3D11Device* d3d_dev = nullptr;
-    ID3D11DeviceContext* d3d_ctx = nullptr;
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-    D3D_FEATURE_LEVEL chosen_level = D3D_FEATURE_LEVEL_11_0;
-    const HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                         levels, 2u, D3D11_SDK_VERSION, &d3d_dev, &chosen_level, &d3d_ctx);
-    adapter->Release();
-    if (FAILED(hr) || d3d_dev == nullptr || d3d_ctx == nullptr) {
-        if (d3d_ctx != nullptr) {
-            d3d_ctx->Release();
-        }
-        if (d3d_dev != nullptr) {
-            d3d_dev->Release();
-        }
-        shutdown();
-        return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "D3D11CreateDevice failed for SpoutOutput")};
-    }
-    d3d_device_ = d3d_dev;
-    d3d_context_ = d3d_ctx;
 
     VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     cpci.queueFamilyIndex = device.transfer_family();
@@ -227,8 +234,48 @@ Expected<void> SpoutOutput::init(rhi::RhiDevice& device, uint32_t width, uint32_
     return {};
 }
 
+Expected<void> SpoutOutput::init_d3d12(uint32_t width, uint32_t height, const char* sender_name,
+                                       const std::array<uint8_t, 8>& luid, bool luid_valid, SpoutSharingMode mode) {
+    shutdown();
+    if (width == 0u || height == 0u) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::init_d3d12 invalid extent")};
+    }
+    d3d12_mode_ = true;
+    d3d12_luid_ = luid;
+    d3d12_luid_valid_ = luid_valid;
+    width_ = width;
+    height_ = height;
+    requested_mode_ = mode;
+    cpu_fallback_ = (mode == SpoutSharingMode::CpuCompatibility);
+    frames_published_ = 0u;
+    skipped_mutex_ = 0u;
+    last_publish_ms_ = 0.0;
+
+    const char* effective_name = (sender_name != nullptr && sender_name[0] != '\0') ? sender_name : "Aether2.5D";
+    std::snprintf(sender_name_.data(), sender_name_.size(), "%s", effective_name);
+
+    if (auto d3d_res = init_d3d11_device_for_luid(luid, luid_valid); !d3d_res) {
+        shutdown();
+        return d3d_res;
+    }
+    if (auto res = allocate_shared_targets(width_, height_); !res) {
+        shutdown();
+        return res;
+    }
+    if (auto res = register_spout_maps(); !res) {
+        shutdown();
+        return res;
+    }
+
+    initialized_ = true;
+    AETHER_LOG_INFO("output", "SpoutOutput (DX12) initialized: sender='%s' %ux%u mode=%s kmt=0x%08X",
+                    sender_name_.data(), width_, height_, cpu_fallback_ ? "CPU-Fallback" : "D3D12-SharedNT",
+                    share_handle_u32_);
+    return {};
+}
+
 Expected<void> SpoutOutput::resize(uint32_t width, uint32_t height) {
-    if (!initialized_ || device_ == nullptr) {
+    if (!initialized_ || (!d3d12_mode_ && device_ == nullptr)) {
         return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::resize called before init")};
     }
     if (width == 0u || height == 0u) {
@@ -238,7 +285,7 @@ Expected<void> SpoutOutput::resize(uint32_t width, uint32_t height) {
         return {};
     }
 
-    if (output_tl_counter_ > init_tl_baseline_) {
+    if (!d3d12_mode_ && output_tl_counter_ > init_tl_baseline_) {
         const VkSemaphore sem = device_->output_timeline();
         VkSemaphoreWaitInfo swi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
         swi.semaphoreCount = 1;
@@ -298,6 +345,9 @@ void SpoutOutput::shutdown() noexcept {
     initialized_ = false;
     cpu_fallback_ = false;
     adapter_mismatch_ = false;
+    d3d12_mode_ = false;
+    d3d12_luid_valid_ = false;
+    d3d12_luid_.fill(0u);
     share_handle_u32_ = 0u;
     kmt_handle_ = nullptr;
     width_ = 0u;
@@ -307,7 +357,7 @@ void SpoutOutput::shutdown() noexcept {
 
 Expected<void> SpoutOutput::allocate_shared_targets(uint32_t width, uint32_t height) {
     auto* d3d_dev = static_cast<ID3D11Device*>(d3d_device_);
-    if (d3d_dev == nullptr || device_ == nullptr) {
+    if (d3d_dev == nullptr || (!d3d12_mode_ && device_ == nullptr)) {
         return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput D3D11 device unavailable")};
     }
 
@@ -345,7 +395,9 @@ Expected<void> SpoutOutput::allocate_shared_targets(uint32_t width, uint32_t hei
     share_handle_u32_ = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(kmt));
 
     bool imported_vk = false;
-    if (requested_mode_ == SpoutSharingMode::GpuDefault && device_->gpu_info().external_memory_win32_active) {
+    if (d3d12_mode_) {
+        cpu_fallback_ = (requested_mode_ == SpoutSharingMode::CpuCompatibility);
+    } else if (requested_mode_ == SpoutSharingMode::GpuDefault && device_->gpu_info().external_memory_win32_active) {
         VkExternalMemoryImageCreateInfo ext_img_ci{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
         ext_img_ci.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT;
 
@@ -436,20 +488,24 @@ Expected<void> SpoutOutput::allocate_shared_targets(uint32_t width, uint32_t hei
         d3d_staging_tex_ = stg;
 
         const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4ull;
-        auto buf_res =
-            device_->create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
-                                   VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-        if (!buf_res) {
-            release_shared_targets();
-            return Unexpected<Error>{buf_res.error()};
+        if (!d3d12_mode_ && device_ != nullptr) {
+            auto buf_res =
+                device_->create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO,
+                                       VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+            if (!buf_res) {
+                release_shared_targets();
+                return Unexpected<Error>{buf_res.error()};
+            }
+            readback_buf_ = buf_res.value();
         }
-        readback_buf_ = buf_res.value();
     }
 
     return {};
 }
 
 void SpoutOutput::release_shared_targets() noexcept {
+    safe_release<ID3D11Texture2D>(d3d12_opened_tex_);
+    d3d12_opened_nt_handle_ = nullptr;
     if (device_ != nullptr && device_->device() != VK_NULL_HANDLE) {
         if (vk_shared_image_ != VK_NULL_HANDLE) {
             vkDestroyImage(device_->device(), vk_shared_image_, nullptr);
@@ -589,7 +645,7 @@ Expected<void> SpoutOutput::publish_frame(VkImage src_bgra_image, uint32_t width
 
     // Strict 1 ms SpoutAccessMutex timeout: skip cleanly instead of blocking T4 (`§11.2.3`)
     if (access_mutex_ != nullptr) {
-        const DWORD wait_res = WaitForSingleObject(static_cast<HANDLE>(access_mutex_), 1u);
+        const DWORD wait_res = wait_handle_high_res_us(access_mutex_, access_wait_timer_, 1000ULL);
         if (wait_res == WAIT_TIMEOUT) {
             ++skipped_mutex_;
             return {};
@@ -793,6 +849,92 @@ Expected<void> SpoutOutput::publish_frame(VkImage src_bgra_image, uint32_t width
 
     last_publish_ms_ = static_cast<double>(now_us() - t0_us) / 1000.0;
     ++frames_published_;
+    return {};
+}
+
+Expected<void> SpoutOutput::publish_d3d12_texture(rhi::D3D12Device& d3d12, const rhi::D3D12Texture& src_bgra8,
+                                                  std::span<const uint8_t> cpu_fallback_bgra) noexcept {
+    if (!initialized_ || d3d_device_ == nullptr || d3d_context_ == nullptr || d3d_shared_tex_ == nullptr) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture invalid state")};
+    }
+    if (src_bgra8.width != width_ || src_bgra8.height != height_) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture extent mismatch")};
+    }
+
+    if (access_mutex_ != nullptr) {
+        const DWORD wait_res = wait_handle_high_res_us(access_mutex_, access_wait_timer_, 1000ULL);
+        if (wait_res == WAIT_TIMEOUT) {
+            ++skipped_mutex_;
+            return {};
+        }
+        if (wait_res != WAIT_OBJECT_0 && wait_res != WAIT_ABANDONED) {
+            ++skipped_mutex_;
+            return {};
+        }
+    }
+
+    const uint64_t t0_us = now_us();
+    auto* d3d_dev = static_cast<ID3D11Device*>(d3d_device_);
+    auto* ctx = static_cast<ID3D11DeviceContext*>(d3d_context_);
+    auto* dst = static_cast<ID3D11Texture2D*>(d3d_shared_tex_);
+    bool copied = false;
+
+    if (!cpu_fallback_ && src_bgra8.shared_nt_handle != nullptr &&
+        src_bgra8.uav_index != rhi::kD3D12InvalidDescIndex) {
+        if (d3d12_opened_nt_handle_ != src_bgra8.shared_nt_handle) {
+            safe_release<ID3D11Texture2D>(d3d12_opened_tex_);
+            d3d12_opened_nt_handle_ = nullptr;
+            ID3D11Device1* dev1 = nullptr;
+            if (SUCCEEDED(d3d_dev->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&dev1))) &&
+                dev1 != nullptr) {
+                ID3D11Texture2D* opened = nullptr;
+                if (SUCCEEDED(dev1->OpenSharedResource1(static_cast<HANDLE>(src_bgra8.shared_nt_handle),
+                                                        __uuidof(ID3D11Texture2D),
+                                                        reinterpret_cast<void**>(&opened))) &&
+                    opened != nullptr) {
+                    d3d12_opened_tex_ = opened;
+                    d3d12_opened_nt_handle_ = src_bgra8.shared_nt_handle;
+                }
+                dev1->Release();
+            }
+        }
+        if (d3d12_opened_tex_ != nullptr) {
+            ctx->CopyResource(dst, static_cast<ID3D11Texture2D*>(d3d12_opened_tex_));
+            ctx->Flush();
+            copied = true;
+        } else {
+            cpu_fallback_ = true;
+        }
+    }
+
+    if (!copied && d3d12.d3d11on12_active() && src_bgra8.d3d11_wrapped != nullptr &&
+        src_bgra8.uav_index != rhi::kD3D12InvalidDescIndex && !cpu_fallback_bgra.empty()) {
+        // Note: D3D11On12 wrapped resource synchronization is also honored if host needs D3D11 staging copy.
+        if (d3d12.acquire_d3d11on12_resource(src_bgra8)) {
+            (void)d3d12.release_and_flush_d3d11on12_resource(src_bgra8);
+        }
+    }
+
+    const size_t need_bytes = static_cast<size_t>(width_) * height_ * 4u;
+    if (!copied && cpu_fallback_bgra.size() >= need_bytes) {
+        ctx->UpdateSubresource(dst, 0u, nullptr, cpu_fallback_bgra.data(), width_ * 4u, 0u);
+        ctx->Flush();
+        copied = true;
+    }
+
+    if (copied) {
+        if (count_semaphore_ != nullptr) {
+            (void)ReleaseSemaphore(static_cast<HANDLE>(count_semaphore_), 1L, nullptr);
+        }
+        last_publish_ms_ = static_cast<double>(now_us() - t0_us) / 1000.0;
+        ++frames_published_;
+    } else {
+        ++skipped_mutex_;
+    }
+
+    if (access_mutex_ != nullptr) {
+        ReleaseMutex(static_cast<HANDLE>(access_mutex_));
+    }
     return {};
 }
 

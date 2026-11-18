@@ -9,9 +9,16 @@ struct FsOut {
 [shader("vertex")]
 FsOut vs_fullscreen(uint vid : SV_VertexID) {
     FsOut o = {};
+#ifdef __TARGET_SPIRV__
     float2 quad[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
     o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
     o.uv = o.clip_pos.xy * 0.5 + 0.5;
+#else
+    // DX12 positive viewport maps NDC +Y -> screen top (uv.y = 0)
+    float2 quad[3] = {float2(-1.0, 1.0), float2(3.0, 1.0), float2(-1.0, -3.0)};
+    o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
+    o.uv = float2(o.clip_pos.x * 0.5 + 0.5, 0.5 - o.clip_pos.y * 0.5);
+#endif
     return o;
 }
 
@@ -33,7 +40,7 @@ float4 ps_compose(FsOut i) : SV_Target0 {
     if (dv <= 0.0) dv = 1.0;
     float2 frame_uv = float2((i.uv.x - x0) / (x1 - x0), (i.uv.y - y0) / (y1 - y0));
     float2 src_uv = float2(0.5, 0.5) + (frame_uv - float2(0.5, 0.5)) * float2(du, dv);
-    float4 fg = g_SampledImages[g_Pc.param0].Sample(g_Samplers[kSamplerLinearClamp], src_uv);
+    float4 fg = aether_sample(g_Pc.param0, kSamplerLinearClamp, src_uv);
     float a = saturate(fg.a);
     float3 bg_lin = float3(0.0, 0.0, 0.0);
     if ((g_Pc.param1 & 1u) != 0u) {

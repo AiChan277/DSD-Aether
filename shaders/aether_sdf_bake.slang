@@ -17,7 +17,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float4 n_mask = AETHER_LOAD(float4, g_Pc.aux_buf_bda, idx);
     if (n_mask.w < 0.5) {
         // Fallback neutral SDF value outside painted UV island
-        g_StorageImages[g_Pc.param0][tid.xy] = float4(0.5, 0.5, 0.5, 1.0);
+        aether_store(g_Pc.param0, tid.xy, float4(0.5, 0.5, 0.5, 1.0));
         return;
     }
 
@@ -37,5 +37,5 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         lit_acc += smoothstep(-0.04, 0.04, ndotl);
     }
     float sdf_val = saturate(lit_acc / float(steps));
-    g_StorageImages[g_Pc.param0][tid.xy] = float4(sdf_val, sdf_val, sdf_val, 1.0);
+    aether_store(g_Pc.param0, tid.xy, float4(sdf_val, sdf_val, sdf_val, 1.0));
 }

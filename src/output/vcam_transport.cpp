@@ -70,23 +70,10 @@ void copy_scaled_nv12(const uint8_t* src_y, const uint8_t* src_uv, uint32_t src_
 
 } // namespace
 
-Expected<void> VcamTransport::init(rhi::RhiDevice& device) {
-    shutdown();
-
-    if (device.device() == VK_NULL_HANDLE) {
-        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "VcamTransport::init null device")};
-    }
-
-    device_ = &device;
-    ext_host_mem_active_ = false;
-    slot_cursor_ = 0u;
-    frames_published_ = 0u;
-    last_dma_ms_ = 0.0;
-
+Expected<void> VcamTransport::open_shm_and_prefault() {
     HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0u,
                                         static_cast<DWORD>(AETHER_VCAM_SECTION_BYTES), L"Local\\AetherVCam_v1");
     if (mapping == nullptr) {
-        shutdown();
         return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "CreateFileMappingW(AetherVCam_v1) failed")};
     }
     const bool existed = (GetLastError() == ERROR_ALREADY_EXISTS);
@@ -94,7 +81,6 @@ Expected<void> VcamTransport::init(rhi::RhiDevice& device) {
     void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0u, 0u, AETHER_VCAM_SECTION_BYTES);
     if (view == nullptr) {
         CloseHandle(mapping);
-        shutdown();
         return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "MapViewOfFile(AetherVCam_v1) failed")};
     }
 
@@ -116,7 +102,26 @@ Expected<void> VcamTransport::init(rhi::RhiDevice& device) {
     hdr->nv12_offset_in_slot = AETHER_VCAM_NV12_OFFSET_IN_SLOT;
     write_volatile_long(&hdr->active_pin_flags, prev_pin_flags);
     write_volatile_long(&hdr->write_seq, 0L);
+    return {};
+}
 
+Expected<void> VcamTransport::init(rhi::RhiDevice& device) {
+    shutdown();
+
+    if (device.device() == VK_NULL_HANDLE) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "VcamTransport::init null device")};
+    }
+
+    device_ = &device;
+    ext_host_mem_active_ = false;
+    slot_cursor_ = 0u;
+    frames_published_ = 0u;
+    last_dma_ms_ = 0.0;
+
+    if (auto res = open_shm_and_prefault(); !res) {
+        shutdown();
+        return res;
+    }
     if (auto res = init_dma_resources(); !res) {
         shutdown();
         return res;
@@ -124,6 +129,20 @@ Expected<void> VcamTransport::init(rhi::RhiDevice& device) {
 
     AETHER_LOG_INFO("output", "VcamTransport initialized: Local\\AetherVCam_v1 (%u MB, %u slots, ext_host_mem=%d)",
                     AETHER_VCAM_SECTION_BYTES / (1024u * 1024u), AETHER_VCAM_SLOTS, ext_host_mem_active_ ? 1 : 0);
+    return {};
+}
+
+Expected<void> VcamTransport::init_host_only() {
+    shutdown();
+    ext_host_mem_active_ = false;
+    slot_cursor_ = 0u;
+    frames_published_ = 0u;
+    last_dma_ms_ = 0.0;
+    if (auto res = open_shm_and_prefault(); !res) {
+        shutdown();
+        return res;
+    }
+    AETHER_LOG_INFO("output", "VcamTransport initialized (Host/DX12 UMA): Local\\AetherVCam_v1");
     return {};
 }
 
@@ -254,9 +273,13 @@ Expected<void> VcamTransport::init_dma_resources() {
 
     if (!ext_host_mem_active_) {
         for (uint32_t s = 0; s < AETHER_VCAM_SLOTS; ++s) {
-            auto buf_res = device_->create_buffer(
-                AETHER_VCAM_SLOT_STRIDE_BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU,
-                VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+            auto buf_res = device_->is_uma()
+                               ? device_->create_uma_zero_copy_buffer(AETHER_VCAM_SLOT_STRIDE_BYTES,
+                                                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+                               : device_->create_buffer(AETHER_VCAM_SLOT_STRIDE_BYTES, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                        VMA_MEMORY_USAGE_GPU_TO_CPU,
+                                                        VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                                                            VMA_ALLOCATION_CREATE_MAPPED_BIT);
             if (!buf_res) {
                 return Unexpected<Error>{buf_res.error()};
             }
@@ -500,6 +523,53 @@ Expected<void> VcamTransport::publish_frame(VkImage src_bgra, VkImage src_nv12_y
     hdr->height = out_h;
     hdr->fps_milli = fps * 1000u;
     hdr->active_fourcc = (want_nv12 && !want_bgra) ? AETHER_VCAM_FOURCC_NV12 : AETHER_VCAM_FOURCC_ARGB32;
+    hdr->bgra_byte_size = out_bgra_bytes;
+    hdr->bottom_up = is_bottom_up ? 1u : 0u;
+    hdr->latest_slot = slot;
+    hdr->producer_qpc_us = present_qpc_us;
+    hdr->slot_qpc_us[slot] = present_qpc_us;
+    hdr->slot_frame_seq[slot] = frame_sequence;
+
+    write_volatile_long(&hdr->write_seq, (cur_seq + 2L) & ~1L);
+
+    last_dma_ms_ = static_cast<double>(now_us() - t0_us) / 1000.0;
+    ++frames_published_;
+    return {};
+}
+
+Expected<void> VcamTransport::publish_host_bgra8(std::span<const uint8_t> bgra, uint32_t width, uint32_t height,
+                                                 uint32_t fps, bool is_bottom_up, uint64_t frame_sequence,
+                                                 uint64_t present_qpc_us) noexcept {
+    if (shm_base_ == nullptr || width == 0u || height == 0u ||
+        bgra.size() < static_cast<size_t>(width) * height * 4u) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "VcamTransport::publish_host_bgra8 invalid args")};
+    }
+
+    const uint64_t t0_us = now_us();
+    const uint32_t out_w = std::min(width, AETHER_VCAM_MAX_WIDTH);
+    const uint32_t out_h = std::min(height, AETHER_VCAM_MAX_HEIGHT);
+    const bool downscale = (out_w != width || out_h != height);
+    const uint32_t out_bgra_bytes = out_w * out_h * 4u;
+
+    const uint32_t slot = slot_cursor_;
+    slot_cursor_ = (slot_cursor_ + 1u) % AETHER_VCAM_SLOTS;
+    uint8_t* slot_ptr =
+        shm_base_ + AETHER_VCAM_HEADER_BYTES + static_cast<size_t>(slot) * AETHER_VCAM_SLOT_STRIDE_BYTES;
+
+    auto* hdr = header();
+    const long cur_seq = read_volatile_long(&hdr->write_seq);
+    write_volatile_long(&hdr->write_seq, cur_seq | 1L);
+
+    if (!downscale) {
+        std::memcpy(slot_ptr, bgra.data(), out_bgra_bytes);
+    } else {
+        copy_scaled_bgra(bgra.data(), width, height, slot_ptr, out_w, out_h);
+    }
+
+    hdr->width = out_w;
+    hdr->height = out_h;
+    hdr->fps_milli = fps * 1000u;
+    hdr->active_fourcc = AETHER_VCAM_FOURCC_ARGB32;
     hdr->bgra_byte_size = out_bgra_bytes;
     hdr->bottom_up = is_bottom_up ? 1u : 0u;
     hdr->latest_slot = slot;

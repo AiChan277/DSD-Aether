@@ -235,7 +235,7 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             ImGui::SameLine();
             ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x));
             GraphicsSettingsModal::draw_gpu_selector_combo("##InspGpuCombo", on_air, rhi, render_view, settings, actions,
-                                                           settings_dirty);
+                                                           settings_dirty, &params);
             if (ImGui::Button(tr("Graphics Settings..."), ImVec2(full_w, 0.0f))) {
                 actions.request_open_graphics_settings = true;
             }
@@ -244,13 +244,37 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 if (draw_property_row(ParamId::RenderBackend, params, undo, fonts, row_actions, false, on_air)) {
                     actions.viewport.render_backend = static_cast<uint8_t>(params.get_int(ParamId::RenderBackend));
                 }
-                const bool rt_blocked = !render_view.rt_supported || render_view.render_backend == 1U;
-                const char* rt_reason = !render_view.rt_supported ? tr("Ray query unsupported on active GPU")
-                                        : rt_blocked              ? tr("Ray tracing needs the Vulkan backend")
-                                                                  : nullptr;
+                const bool dx11_blocked = (render_view.render_backend == 1U);
+                const bool rt_blocked = !render_view.rt_supported || dx11_blocked;
+                const char* rt_reason = !render_view.rt_supported
+                                            ? tr("Ray query / DXR unsupported on active GPU (using Traditional)")
+                                        : dx11_blocked ? tr("Ray tracing unavailable on DirectX 11")
+                                                       : nullptr;
+                if (draw_property_row(ParamId::RenderLightingMode, params, undo, fonts, row_actions)) {
+                    if (params.get_int(ParamId::RenderLightingMode) > 0 && rt_blocked) {
+                        (void)params.set(ParamId::RenderLightingMode, 0.0);
+                    }
+                    (void)params.set(ParamId::RenderRtEnabled,
+                                     params.get_int(ParamId::RenderLightingMode) > 0 ? 1.0 : 0.0);
+                    actions.viewport.lighting_dirty = true;
+                    settings_dirty = true;
+                }
                 if (draw_property_row(ParamId::RenderRtEnabled, params, undo, fonts, row_actions, false, rt_blocked,
                                       rt_reason)) {
+                    const bool on = params.get_bool(ParamId::RenderRtEnabled);
+                    if (!on) {
+                        (void)params.set(ParamId::RenderLightingMode, 0.0);
+                    } else if (params.get_int(ParamId::RenderLightingMode) == 0) {
+                        (void)params.set(ParamId::RenderLightingMode, 1.0);
+                    }
                     actions.viewport.lighting_dirty = true;
+                    settings_dirty = true;
+                }
+                if (draw_property_row(ParamId::RenderCircadianEnabled, params, undo, fonts, row_actions) ||
+                    draw_property_row(ParamId::RenderCircadianTimezone, params, undo, fonts, row_actions) ||
+                    draw_property_row(ParamId::RenderCircadianTimeMinutes, params, undo, fonts, row_actions)) {
+                    actions.viewport.lighting_dirty = true;
+                    settings_dirty = true;
                 }
                 static constexpr ParamId kLightingRows[] = {
                     ParamId::RenderFlatness,        ParamId::RenderLightScale,   ParamId::RenderKeyAzimuthDeg,
@@ -278,10 +302,17 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     ParamId::RenderFaceNormalFlatten,
                     ParamId::RenderCelBandSharpness,
                     ParamId::RenderShadowWarmCool,
+                    ParamId::RenderIndirectBleedStrength,
+                    ParamId::RenderRimDepthOffsetPx,
                     ParamId::RenderIroTsukeStrength,
                     ParamId::RenderCreaseStrength,
                     ParamId::RenderHairHighlight,
                     ParamId::RenderRimStepStrength,
+                    ParamId::Render2DFilterPro,
+                    ParamId::RenderFilterKuwaharaStrength,
+                    ParamId::RenderFilterDogInkBoost,
+                    ParamId::RenderFilterPaperWarmth,
+                    ParamId::RenderFilterPaperWarmthStrength,
                 };
                 bool style_changed = false;
                 for (const ParamId pid : kLive2dExtraRows) {
@@ -293,13 +324,39 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 end_property_table();
             }
             ImGui::Spacing();
+            if (params.get_bool(ParamId::RenderCircadianEnabled)) {
+                const int ov_min = params.get_int(ParamId::RenderCircadianTimeMinutes);
+                const float hr = (ov_min >= 0) ? (static_cast<float>(ov_min) / 60.0f) : render_view.circadian_hour_24;
+                const uint8_t ph =
+                    (ov_min >= 0) ? ((hr >= 5.0f && hr < 7.0f)     ? 1u
+                                     : (hr >= 7.0f && hr < 15.5f)  ? 2u
+                                     : (hr >= 15.5f && hr < 18.0f) ? 3u
+                                                                   : 0u)
+                                  : render_view.circadian_phase;
+                static constexpr const char* kPhaseNames[4] = {
+                    "Night Studio",
+                    "Dawn",
+                    "Daytime",
+                    "Golden Hour",
+                };
+                const int hh = static_cast<int>(hr) % 24;
+                const int mm = std::clamp(static_cast<int>((hr - static_cast<float>(hh)) * 60.0f), 0, 59);
+                char cbuf[160]{};
+                std::snprintf(cbuf, sizeof(cbuf), "%02d:%02d · %s (Key %.0fK)", hh, mm,
+                              kPhaseNames[std::min<uint8_t>(ph, 3u)],
+                              static_cast<double>(render_view.circadian_key_kelvin));
+                draw_status_badge(fonts, tr("Solar Time"), cbuf, t.status_ok);
+            }
             draw_status_badge(fonts, tr("Active Denoiser"), render_view.denoiser_active_name,
                               render_view.denoiser_fallback_triggered ? t.status_warn : t.text_primary);
-            if (render_view.render_backend == 1U) {
+            if (render_view.render_backend == 1U || render_view.render_backend == 2U) {
                 char dx_buf[192]{};
+                const float ms = (render_view.render_backend == 2U) ? render_view.dx12_render_ms
+                                                                    : render_view.dx11_render_ms;
                 std::snprintf(dx_buf, sizeof(dx_buf), "%s · %.2f ms", render_view.backend_detail,
-                              static_cast<double>(render_view.dx11_render_ms));
-                draw_status_badge(fonts, tr("DirectX 11"), dx_buf, t.text_primary);
+                              static_cast<double>(ms));
+                draw_status_badge(fonts, tr(render_view.render_backend == 2U ? "DirectX 12" : "DirectX 11"), dx_buf,
+                                  t.text_primary);
             }
             ImGui::Spacing();
         }
@@ -332,6 +389,29 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     actions.viewport.mic_gain = params.get_float(ParamId::TrackingMicGain);
                     actions.viewport.mic_noise_gate_db = params.get_float(ParamId::TrackingMicNoiseGate);
                     actions.viewport.audio_lipsync_dirty = true;
+                    settings_dirty = true;
+                }
+                static constexpr ParamId kNpuBoundRows[] = {
+                    ParamId::TrackingNpuBoundsEnabled,   ParamId::TrackingNpuAntiClipEnabled,
+                    ParamId::TrackingNpuSafeBoxPreview,  ParamId::TrackingNpuBoundsX,
+                    ParamId::TrackingNpuBoundsY,         ParamId::TrackingNpuBoundsZ,
+                    ParamId::TrackingNpuSoftElasticity,  ParamId::TrackingNpuMaxPitchDeg,
+                    ParamId::TrackingNpuAntiClipMargin,
+                };
+                bool bounds_changed = false;
+                for (const ParamId pid : kNpuBoundRows) {
+                    bounds_changed |= draw_property_row(pid, params, undo, fonts, row_actions);
+                }
+                if (bounds_changed) {
+                    actions.viewport.npu_bounds_enabled = params.get_bool(ParamId::TrackingNpuBoundsEnabled);
+                    actions.viewport.npu_anti_clip_enabled = params.get_bool(ParamId::TrackingNpuAntiClipEnabled);
+                    actions.viewport.npu_bounds_half = {params.get_float(ParamId::TrackingNpuBoundsX),
+                                                        params.get_float(ParamId::TrackingNpuBoundsY),
+                                                        params.get_float(ParamId::TrackingNpuBoundsZ)};
+                    actions.viewport.npu_soft_elasticity = params.get_float(ParamId::TrackingNpuSoftElasticity);
+                    actions.viewport.npu_max_pitch_deg = params.get_float(ParamId::TrackingNpuMaxPitchDeg);
+                    actions.viewport.npu_anti_clip_margin = params.get_float(ParamId::TrackingNpuAntiClipMargin);
+                    actions.viewport.npu_bounds_dirty = true;
                     settings_dirty = true;
                 }
                 end_property_table();

@@ -18,10 +18,14 @@
 #include "output/output_ring.hpp"
 #include "plugin_runner/native_plugin_manager.hpp"
 #include "renderer/asset_upload/asset_job.hpp"
+#include "renderer/circadian_lighting.hpp"
 #include "renderer/dx11_bridge.hpp"
+#include "renderer/dx12_bridge.hpp"
 #include "renderer/npr_renderer.hpp"
+#include "renderer/sdf_generator.hpp"
 #include "rhi/rhi_device.hpp"
 #include "rhi/rhi_swapchain.hpp"
+#include "tracking/npu_postprocess.hpp"
 #include "ui/dev_shell.hpp"
 #include "ui/panels/viewport/camera_presets.hpp"
 #include "ui/params/project_settings.hpp"
@@ -1227,14 +1231,32 @@ int run_application(const AppLaunchOptions& opts) {
         // against the frame timeline and destroyed only after the GPU has passed that epoch.
         GarbageCollector gc;
         renderer::Dx11Bridge dx11_bridge;
+        renderer::Dx12Bridge dx12_bridge;
         dx11_bridge.attach(*rhi, gc);
+        dx12_bridge.attach(*rhi, gc);
         renderer::RenderBackend active_backend = renderer::RenderBackend::Vulkan;
         uint8_t requested_backend_ui = 0xFFU; // last UI value seen; 0xFF = none yet
         std::array<char, 96> backend_detail{};
         backend_detail[0] = '\0';
         if (opts.render_backend == "dx11" || opts.render_backend == "directx11") {
             active_backend = renderer::RenderBackend::DirectX11;
+        } else if (opts.render_backend == "dx12" || opts.render_backend == "directx12") {
+            active_backend = renderer::RenderBackend::DirectX12;
         }
+        auto configure_dx12_for_avatar = [&]() -> bool {
+            if (active_backend != renderer::RenderBackend::DirectX12 || current_avatar == nullptr) {
+                return false;
+            }
+            const auto outs = npr_renderer.graph().outputs();
+            const uint32_t ow = outs.output_width != 0U ? outs.output_width : active_out_cfg.width;
+            const uint32_t oh = outs.output_height != 0U ? outs.output_height : active_out_cfg.height;
+            const auto v = static_cast<uint32_t>(current_avatar->rest_vertices.size());
+            if (auto rc = dx12_bridge.configure(ow, oh, v, &rhi->gpu_info()); !rc) {
+                AETHER_LOG_ERROR("renderer", "DirectX 12 backend unavailable: %s", rc.error().c_str());
+                return false;
+            }
+            return true;
+        };
         auto retire_avatar = [&](std::unique_ptr<renderer::GpuAvatar> old) {
             if (old == nullptr) {
                 return;
@@ -1280,6 +1302,16 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.hair_highlight_intensity = npr_renderer.lighting().hair_highlight_intensity;
         vp_actions.rim_step_strength = npr_renderer.lighting().rim_step_strength;
         if (opts.smoke_frames == 0) {
+            if (rhi->is_intel_igpu() || !rhi->rt_supported()) {
+                (void)shell.workspace().params().set(ui::ParamId::RenderLightingMode, 0.0);
+                (void)shell.workspace().params().set(ui::ParamId::RenderRtEnabled, 0.0);
+                vp_actions.lighting_mode = 0u;
+                vp_actions.rt_enabled = false;
+            } else {
+                vp_actions.lighting_mode = static_cast<uint8_t>(
+                    std::clamp(boot_params.get_int(ui::ParamId::RenderLightingMode), 0, 2));
+                vp_actions.rt_enabled = (vp_actions.lighting_mode > 0u) && boot_params.get_bool(ui::ParamId::RenderRtEnabled);
+            }
             vp_actions.target_fps_mode = static_cast<uint8_t>(boot_params.get_int(ui::ParamId::RenderTargetFps));
             vp_actions.vsync_enabled = boot_params.get_bool(ui::ParamId::RenderVsync);
             vp_actions.background_eco_mode = boot_params.get_bool(ui::ParamId::RenderBackgroundEco);
@@ -1374,6 +1406,7 @@ int run_application(const AppLaunchOptions& opts) {
             destroy_preview_resources(false);
             asset_job.reset();
             dx11_bridge.release();
+            dx12_bridge.release();
             current_avatar.reset();
             (void)gc.flush_all_epochs();
             destroy_vp_sampler();
@@ -1396,7 +1429,13 @@ int run_application(const AppLaunchOptions& opts) {
                                      dev_res.error().c_str());
                     return false;
                 }
-                render_cfg.enable_rt = rhi->rt_supported();
+                    render_cfg.enable_rt = rhi->rt_supported();
+                if (rhi->is_intel_igpu() || !rhi->rt_supported()) {
+                    (void)shell.workspace().params().set(ui::ParamId::RenderLightingMode, 0.0);
+                    (void)shell.workspace().params().set(ui::ParamId::RenderRtEnabled, 0.0);
+                    vp_actions.lighting_mode = 0u;
+                    vp_actions.rt_enabled = false;
+                }
                 if (auto init_res = npr_renderer.init(*rhi, render_cfg); !init_res) {
                     AETHER_LOG_FATAL("renderer", "NprRenderer re-init after GPU switch failed: %s",
                                      init_res.error().c_str());
@@ -1832,6 +1871,8 @@ int run_application(const AppLaunchOptions& opts) {
                     }
                     dx11_bridge.bind_avatar(current_avatar.get());
                     (void)configure_dx11_for_avatar();
+                    (void)dx12_bridge.bind_avatar(current_avatar.get());
+                    (void)configure_dx12_for_avatar();
                     baked_face_sdf_applied = false;
                     avatar_bone_heights = extract_avatar_bone_heights(*current_avatar);
                     camera = renderer::fit_camera_to_avatar(*current_avatar);
@@ -1910,26 +1951,73 @@ int run_application(const AppLaunchOptions& opts) {
             }
             if (vp_actions.lighting_dirty) {
                 auto& rig = npr_renderer.lighting();
-                rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
-                rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
-                rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
-                rig.lights[1].orbit_elevation_deg = vp_actions.fill_elevation_deg;
-                rig.lights[2].orbit_azimuth_deg = vp_actions.rim_azimuth_deg;
-                rig.lights[2].orbit_elevation_deg = vp_actions.rim_elevation_deg;
-                rig.lights[0].intensity = vp_actions.key_intensity;
-                rig.lights[1].intensity = vp_actions.fill_intensity;
-                rig.lights[2].intensity = vp_actions.rim_intensity;
+                rig.lighting_mode = vp_actions.lighting_mode;
+                rig.enable_2d_filter_pro = vp_actions.filter_2d_pro;
+                rig.painterly_flatten_strength = vp_actions.filter_kuwahara_strength;
+                rig.dog_ink_boost = vp_actions.filter_dog_ink_boost;
+                rig.enable_paper_warmth = vp_actions.filter_paper_warmth;
+                rig.paper_warmth_strength = vp_actions.filter_paper_warmth_strength;
+                rig.indirect_bleed_strength = vp_actions.indirect_bleed_strength;
+                rig.rim_depth_offset_px = vp_actions.rim_depth_offset_px;
+                rig.circadian_enabled = vp_actions.circadian_enabled;
+                rig.circadian_timezone = vp_actions.circadian_timezone_idx;
+                rig.circadian_time_minutes = vp_actions.circadian_time_override_min;
+                if (!vp_actions.circadian_enabled) {
+                    rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
+                    rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
+                    rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
+                    rig.lights[1].orbit_elevation_deg = vp_actions.fill_elevation_deg;
+                    rig.lights[2].orbit_azimuth_deg = vp_actions.rim_azimuth_deg;
+                    rig.lights[2].orbit_elevation_deg = vp_actions.rim_elevation_deg;
+                    rig.lights[0].intensity = vp_actions.key_intensity;
+                    rig.lights[1].intensity = vp_actions.fill_intensity;
+                    rig.lights[2].intensity = vp_actions.rim_intensity;
+                    rig.lights[0].color[0] = 1.0f;
+                    rig.lights[0].color[1] = 0.98f;
+                    rig.lights[0].color[2] = 0.95f;
+                    rig.lights[1].color[0] = 0.62f;
+                    rig.lights[1].color[1] = 0.76f;
+                    rig.lights[1].color[2] = 1.0f;
+                    rig.lights[2].color[0] = 0.78f;
+                    rig.lights[2].color[1] = 0.89f;
+                    rig.lights[2].color[2] = 1.0f;
+                    rig.shadow_warm_cool_shift = vp_actions.shadow_warm_cool_shift;
+                }
                 rig.global_live2d_flatness = vp_actions.live2d_flatness;
                 rig.bloom_intensity = vp_actions.bloom_intensity;
                 rig.outline_width_scale = vp_actions.outline_scale;
                 rig.face_normal_flatten = vp_actions.face_normal_flatten;
                 rig.cel_band_sharpness = vp_actions.cel_band_sharpness;
-                rig.shadow_warm_cool_shift = vp_actions.shadow_warm_cool_shift;
                 rig.iro_tsuke_strength = vp_actions.iro_tsuke_strength;
                 rig.crease_strength = vp_actions.crease_strength;
                 rig.hair_highlight_intensity = vp_actions.hair_highlight_intensity;
                 rig.rim_step_strength = vp_actions.rim_step_strength;
                 vp_actions.lighting_dirty = false;
+            }
+            if (vp_actions.npu_bounds_dirty) {
+                tracking::NpuMovementBoundsConfig mb_cfg{};
+                mb_cfg.enable_bounds = vp_actions.npu_bounds_enabled;
+                mb_cfg.enable_anti_clip = vp_actions.npu_anti_clip_enabled;
+                mb_cfg.bounds_min = {-vp_actions.npu_bounds_half[0], -vp_actions.npu_bounds_half[1],
+                                     -vp_actions.npu_bounds_half[2]};
+                mb_cfg.bounds_max = {vp_actions.npu_bounds_half[0], vp_actions.npu_bounds_half[1],
+                                     vp_actions.npu_bounds_half[2]};
+                mb_cfg.soft_wall_elasticity = vp_actions.npu_soft_elasticity;
+                mb_cfg.max_head_pitch_deg = vp_actions.npu_max_pitch_deg;
+                mb_cfg.anti_clip_margin_m = vp_actions.npu_anti_clip_margin;
+                pipeline->set_movement_bounds_config(mb_cfg);
+                vp_actions.npu_bounds_dirty = false;
+            }
+            renderer::CircadianPhase live_circadian_phase = renderer::CircadianPhase::Daytime;
+            float live_circadian_hour = 12.0f;
+            float live_circadian_kelvin = 5800.0f;
+            if (vp_actions.circadian_enabled) {
+                live_circadian_hour = renderer::resolve_circadian_hour(vp_actions.circadian_timezone_idx,
+                                                                       vp_actions.circadian_time_override_min);
+                const auto cres = renderer::evaluate_circadian_lighting(live_circadian_hour);
+                live_circadian_phase = cres.phase;
+                live_circadian_kelvin = cres.key_kelvin;
+                renderer::apply_circadian_to_rig(cres, npr_renderer.lighting());
             }
             if (vp_actions.request_bake_face_sdf) {
                 vp_actions.request_bake_face_sdf = false;
@@ -1946,6 +2034,9 @@ int run_application(const AppLaunchOptions& opts) {
                     auto sdf_res = npr_renderer.bake_and_apply_face_sdf(sdf_in);
                     if (sdf_res) {
                         baked_face_sdf_applied = true;
+                        if (auto dx_sdf = renderer::OfflineSdfGenerator::bake_face_sdf(sdf_in); dx_sdf) {
+                            (void)dx12_bridge.apply_face_sdf(dx_sdf.value());
+                        }
                     } else {
                         AETHER_LOG_ERROR("renderer", "Generate Face SDF failed: %s", sdf_res.error().c_str());
                     }
@@ -2123,19 +2214,25 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
-            // Apply a backend change requested from the Inspector (render.backend), then reclaim retired objects.
+            // Apply a backend change requested from the Inspector/Graphics Settings (render.backend), then reclaim retired objects.
             if (vp_actions.render_backend != requested_backend_ui) {
                 const bool first_sync = (requested_backend_ui == 0xFFU);
                 requested_backend_ui = vp_actions.render_backend;
-                const auto wanted = (vp_actions.render_backend == 1U) ? renderer::RenderBackend::DirectX11
-                                                                      : renderer::RenderBackend::Vulkan;
+                const auto wanted = (vp_actions.render_backend == 1U)   ? renderer::RenderBackend::DirectX11
+                                    : (vp_actions.render_backend == 2U) ? renderer::RenderBackend::DirectX12
+                                                                        : renderer::RenderBackend::Vulkan;
                 // A CLI --render-backend wins over the persisted setting on the first sync.
                 if (!(first_sync && !opts.render_backend.empty()) && wanted != active_backend) {
                     active_backend = wanted;
                     if (active_backend == renderer::RenderBackend::Vulkan) {
                         dx11_bridge.release();
-                    } else {
+                        dx12_bridge.release();
+                    } else if (active_backend == renderer::RenderBackend::DirectX11) {
+                        dx12_bridge.release();
                         dx11_bridge.bind_avatar(current_avatar.get());
+                    } else {
+                        dx11_bridge.release();
+                        (void)dx12_bridge.bind_avatar(current_avatar.get());
                     }
                     shell.workspace().push_toast(ui::ToastSeverity::Info, "Render Backend",
                                                  renderer::render_backend_name(active_backend), frame_now_s);
@@ -2150,6 +2247,16 @@ int run_application(const AppLaunchOptions& opts) {
                     dx11_bridge.release();
                     shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 11 Unavailable",
                                                  "Falling back to the Vulkan renderer", frame_now_s);
+                }
+            } else if (active_backend == renderer::RenderBackend::DirectX12 && current_avatar != nullptr) {
+                const bool was_ready = dx12_bridge.ready();
+                if (!configure_dx12_for_avatar()) {
+                    active_backend = renderer::RenderBackend::Vulkan;
+                    dx12_bridge.release();
+                    shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 12 Unavailable",
+                                                 "Falling back to the Vulkan renderer", frame_now_s);
+                } else if (!was_ready) {
+                    (void)dx12_bridge.bind_avatar(current_avatar.get());
                 }
             }
             (void)gc.collect_epoch(completed_frame_timeline(*rhi), 16U);
@@ -2302,7 +2409,13 @@ int run_application(const AppLaunchOptions& opts) {
             render_req.frame_slot = frame.frame_slot;
             render_req.debug_view =
                 static_cast<renderer::ShadingDebugView>(std::min<uint8_t>(vp_actions.debug_view, 13));
-            render_req.rt_enabled = vp_actions.rt_enabled && rhi->rt_supported();
+            render_req.rt_enabled = vp_actions.rt_enabled &&
+                                    ((active_backend == renderer::RenderBackend::DirectX12)
+                                         ? (dx12_bridge.d3d12_device() != nullptr &&
+                                            dx12_bridge.d3d12_device()->dxr_supported())
+                                         : rhi->rt_supported());
+            render_req.lighting_mode = vp_actions.lighting_mode;
+            render_req.hair_velocity_ws = skin_snap.hair_velocity_ws;
             render_req.premul_alpha = active_out_cfg.premul_alpha;
             render_req.need_straight_alpha = ndi_needed || !active_out_cfg.premul_alpha;
             render_req.need_bottom_up = vcam_consumer_active && out_status.vcam_rgb_pin_connected;
@@ -2336,8 +2449,13 @@ int run_application(const AppLaunchOptions& opts) {
             }
             if (active_backend == renderer::RenderBackend::DirectX11 && current_avatar != nullptr) {
                 render_req.rt_enabled = false;
+                render_req.lighting_mode = 0u;
                 if (dx11_bridge.render(*current_avatar, npr_renderer.lighting(), camera)) {
                     dx11_bridge.fill_request(render_req);
+                }
+            } else if (active_backend == renderer::RenderBackend::DirectX12 && current_avatar != nullptr) {
+                if (dx12_bridge.render(render_req)) {
+                    dx12_bridge.fill_request(render_req);
                 }
             }
 
@@ -2353,7 +2471,11 @@ int run_application(const AppLaunchOptions& opts) {
                     break;
                 }
                 if (render_req.external_color_image != VK_NULL_HANDLE) {
-                    dx11_bridge.on_submitted(tl_val);
+                    if (active_backend == renderer::RenderBackend::DirectX12) {
+                        dx12_bridge.on_submitted(tl_val);
+                    } else {
+                        dx11_bridge.on_submitted(tl_val);
+                    }
                 }
             }
             slot_submitted[frame.frame_slot] = true;
@@ -2368,7 +2490,8 @@ int run_application(const AppLaunchOptions& opts) {
             avatar_view.viewport_w = fg_out.width;
             avatar_view.viewport_h = fg_out.height;
             avatar_view.wireframe_supported =
-                (active_backend == renderer::RenderBackend::Vulkan) && npr_renderer.wireframe_supported();
+                (active_backend == renderer::RenderBackend::DirectX12) ||
+                ((active_backend == renderer::RenderBackend::Vulkan) && npr_renderer.wireframe_supported());
             {
                 const float cp = std::cos(camera.pitch_rad);
                 const float sp = std::sin(camera.pitch_rad);
@@ -2424,8 +2547,17 @@ int run_application(const AppLaunchOptions& opts) {
             {
                 const auto& gp_latest = npr_renderer.graph().timing().latest_snapshot();
                 const auto& den = npr_renderer.graph().denoiser();
-                render_view.rt_supported = rhi->rt_supported();
+                render_view.rt_supported =
+                    (active_backend == renderer::RenderBackend::DirectX12 && dx12_bridge.d3d12_device() != nullptr)
+                        ? dx12_bridge.d3d12_device()->dxr_supported()
+                        : rhi->rt_supported();
                 render_view.rt_enabled = render_req.rt_enabled;
+                render_view.lighting_mode = vp_actions.lighting_mode;
+                render_view.is_uma = rhi->is_uma();
+                render_view.is_intel_igpu = rhi->is_intel_igpu();
+                render_view.circadian_phase = static_cast<uint8_t>(live_circadian_phase);
+                render_view.circadian_hour_24 = live_circadian_hour;
+                render_view.circadian_key_kelvin = live_circadian_kelvin;
                 render_view.debug_view = static_cast<uint8_t>(render_req.debug_view);
                 render_view.denoiser_requested = vp_actions.denoiser_kind;
                 render_view.denoiser_active_name = den.active_name();
@@ -2446,12 +2578,22 @@ int run_application(const AppLaunchOptions& opts) {
                 }
                 render_view.render_backend = static_cast<uint8_t>(active_backend);
                 {
-                    const auto bs = dx11_bridge.stats();
-                    std::snprintf(backend_detail.data(), backend_detail.size(), "%s%s, %ux%u",
-                                  bs.shared_texture ? "shared texture" : "CPU copy", bs.warp ? " (WARP)" : "", bs.width,
-                                  bs.height);
+                    if (active_backend == renderer::RenderBackend::DirectX12) {
+                        const auto bs = dx12_bridge.stats();
+                        std::snprintf(backend_detail.data(), backend_detail.size(), "%s%s, %ux%u",
+                                      bs.shared_texture ? "NT shared" : "sRGB staging",
+                                      bs.uma_zero_copy ? " (UMA)" : "", bs.width, bs.height);
+                        render_view.dx12_render_ms = bs.last_render_ms;
+                        render_view.dx11_render_ms = 0.0f;
+                    } else {
+                        const auto bs = dx11_bridge.stats();
+                        std::snprintf(backend_detail.data(), backend_detail.size(), "%s%s, %ux%u",
+                                      bs.shared_texture ? "shared texture" : "CPU copy", bs.warp ? " (WARP)" : "",
+                                      bs.width, bs.height);
+                        render_view.dx11_render_ms = bs.last_render_ms;
+                        render_view.dx12_render_ms = 0.0f;
+                    }
                     render_view.backend_detail = backend_detail.data();
-                    render_view.dx11_render_ms = bs.last_render_ms;
                     const auto gs = gc.stats();
                     render_view.gc_retired_pending = gs.retired_pending;
                     render_view.gc_reclaimed_total = gs.retired_reclaimed_total;
@@ -2808,6 +2950,8 @@ int run_application(const AppLaunchOptions& opts) {
         rhi->wait_idle();
         const auto dx11_final = dx11_bridge.stats();
         dx11_bridge.release();
+        const auto dx12_final = dx12_bridge.stats();
+        dx12_bridge.release();
         const uint32_t gc_flushed = gc.flush_all_epochs();
         const GcStats gc_final = gc.stats();
 
@@ -2830,11 +2974,17 @@ int run_application(const AppLaunchOptions& opts) {
                     static_cast<unsigned long long>(imgui_arena.os_fallback_allocs()),
                     imgui_arena.steady_bump_growth_bytes(), static_cast<double>(final_telem.ui_cpu.mean_ms),
                     static_cast<double>(final_telem.ui_cpu.p95_ms));
-        std::printf("[AETHER_SMOKE_EXT] backend=%s dx11_frames=%llu dx11_path=%s gc_reclaimed=%llu "
+        const char* backend_cli_name = (active_backend == renderer::RenderBackend::DirectX11)   ? "dx11"
+                                       : (active_backend == renderer::RenderBackend::DirectX12) ? "dx12"
+                                                                                                : "vulkan";
+        const char* bridge_path =
+            (active_backend == renderer::RenderBackend::DirectX12)
+                ? (dx12_final.frames == 0ULL ? "none" : (dx12_final.shared_texture ? "nt_shared" : "cpu_srgb"))
+                : (dx11_final.frames == 0ULL ? "none" : (dx11_final.shared_texture ? "shared" : "cpu"));
+        std::printf("[AETHER_SMOKE_EXT] backend=%s dx11_frames=%llu dx12_frames=%llu dx11_path=%s gc_reclaimed=%llu "
                     "gc_flushed_at_exit=%u gc_bytes=%llu\n",
-                    active_backend == renderer::RenderBackend::DirectX11 ? "dx11" : "vulkan",
-                    static_cast<unsigned long long>(dx11_final.frames),
-                    dx11_final.frames == 0ULL ? "none" : (dx11_final.shared_texture ? "shared" : "cpu"),
+                    backend_cli_name, static_cast<unsigned long long>(dx11_final.frames),
+                    static_cast<unsigned long long>(dx12_final.frames), bridge_path,
                     static_cast<unsigned long long>(gc_final.retired_reclaimed_total), gc_flushed,
                     static_cast<unsigned long long>(gc_final.bytes_reclaimed_total));
         std::fflush(stdout);

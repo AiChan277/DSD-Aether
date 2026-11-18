@@ -196,6 +196,8 @@ struct PrecisionDarkTokens {
         hex_col32(0xA855F7FF), // AudioFrame DSP envelope & formants: purple
     };
     ImU32 col32_pin_hollow_fill = hex_col32(0x0B0D10FF);
+    ImU32 col32_safe_box_edge = hex_col32(0x10B981D9);
+    ImU32 col32_safe_box_fill = hex_col32(0x10B98114);
 
     // 2.5D Light Orbit Gizmo dark vector sphere (§1 BUG-07)
     ImU32 col32_orb_fill = hex_col32(0x141820FF);

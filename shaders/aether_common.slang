@@ -101,9 +101,12 @@ struct GpuFrameGlobals {
     float4 avatar_rot_sincos; // x = cos(yaw), y = sin(yaw), z = yaw_rad, w = 1
     float4 npr_style_params;  // x=face_norm_flatten, y=cel_band_sharpness, z=shadow_warm_cool_shift, w=iro_tsuke_strength
     float4 npr_style_params2; // x=crease_strength, y=hair_highlight_intensity, z=rim_step_strength, w=reserved
+    float4 hair_velocity_ws;  // xyz=smoothed SpringBone hair velocity (m/s), w=indirect_bleed_strength k_gi
+    float4 filter_pro_params; // x=kuwahara_flatten, y=dog_ink_boost, z=paper_warmth, w=rim_depth_offset_px
     GpuLight lights[8];
 };
 
+#ifdef __TARGET_SPIRV__
 [[vk::push_constant]] ConstantBuffer<GpuPushConstants> g_Pc;
 
 [[vk::binding(0, 0)]] Texture2D<float4> g_SampledImages[];
@@ -111,16 +114,85 @@ struct GpuFrameGlobals {
 [[vk::binding(2, 0)]] RWTexture2D<float4> g_StorageImages[];
 [[vk::binding(3, 0)]] Texture2D<uint4> g_UintSampledImages[];
 
-#ifdef __TARGET_SPIRV__
 #define AETHER_LOAD(T, addr, idx) (((T*)(addr))[idx])
 #define AETHER_STORE(T, addr, idx, val) (((T*)(addr))[idx] = (val))
-#else
-T aether_default<T>() {
-    T v = {};
-    return v;
+
+float4 aether_sample(uint slot, uint samp, float2 uv) {
+    return g_SampledImages[slot].Sample(g_Samplers[samp], uv);
 }
-#define AETHER_LOAD(T, addr, idx) aether_default<T>()
-#define AETHER_STORE(T, addr, idx, val) ((void)(addr))
+float4 aether_sample_nu(uint slot, uint samp, float2 uv) {
+    return g_SampledImages[NonUniformResourceIndex(slot)].Sample(g_Samplers[samp], uv);
+}
+float4 aether_sample_level(uint slot, uint samp, float2 uv, float lod) {
+    return g_SampledImages[slot].SampleLevel(g_Samplers[samp], uv, lod);
+}
+float4 aether_sample_level_nu(uint slot, uint samp, float2 uv, float lod) {
+    return g_SampledImages[NonUniformResourceIndex(slot)].SampleLevel(g_Samplers[samp], uv, lod);
+}
+float4 aether_load(uint slot, int2 coord) {
+    return g_SampledImages[slot].Load(int3(coord, 0));
+}
+uint4 aether_uload(uint slot, int2 coord) {
+    return g_UintSampledImages[slot].Load(int3(coord, 0));
+}
+void aether_store(uint slot, uint2 coord, float4 val) {
+    g_StorageImages[slot][coord] = val;
+}
+#else
+ConstantBuffer<GpuPushConstants> g_Pc : register(b0, space0);
+
+T aether_dxil_load<T>(uint64_t h, uint idx) {
+    uint desc = uint(h & 0xFFFFFu);
+    uint off = uint(h >> 32u) + idx * sizeof(T);
+    if ((uint(h) & 0x100000u) != 0u) {
+        RWByteAddressBuffer b = ResourceDescriptorHeap[desc];
+        return b.Load<T>(off);
+    }
+    ByteAddressBuffer b = ResourceDescriptorHeap[desc];
+    return b.Load<T>(off);
+}
+void aether_dxil_store<T>(uint64_t h, uint idx, T val) {
+    uint desc = uint(h & 0xFFFFFu);
+    uint off = uint(h >> 32u) + idx * sizeof(T);
+    RWByteAddressBuffer b = ResourceDescriptorHeap[desc];
+    b.Store<T>(off, val);
+}
+
+#define AETHER_LOAD(T, addr, idx) aether_dxil_load<T>((addr), (idx))
+#define AETHER_STORE(T, addr, idx, val) aether_dxil_store<T>((addr), (idx), (val))
+
+float4 aether_sample(uint slot, uint samp, float2 uv) {
+    Texture2D<float4> t = ResourceDescriptorHeap[slot];
+    SamplerState s = SamplerDescriptorHeap[samp];
+    return t.Sample(s, uv);
+}
+float4 aether_sample_nu(uint slot, uint samp, float2 uv) {
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+    SamplerState s = SamplerDescriptorHeap[samp];
+    return t.Sample(s, uv);
+}
+float4 aether_sample_level(uint slot, uint samp, float2 uv, float lod) {
+    Texture2D<float4> t = ResourceDescriptorHeap[slot];
+    SamplerState s = SamplerDescriptorHeap[samp];
+    return t.SampleLevel(s, uv, lod);
+}
+float4 aether_sample_level_nu(uint slot, uint samp, float2 uv, float lod) {
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+    SamplerState s = SamplerDescriptorHeap[samp];
+    return t.SampleLevel(s, uv, lod);
+}
+float4 aether_load(uint slot, int2 coord) {
+    Texture2D<float4> t = ResourceDescriptorHeap[slot];
+    return t.Load(int3(coord, 0));
+}
+uint4 aether_uload(uint slot, int2 coord) {
+    Texture2D<uint4> t = ResourceDescriptorHeap[slot];
+    return t.Load(int3(coord, 0));
+}
+void aether_store(uint slot, uint2 coord, float4 val) {
+    RWTexture2D<float4> w = ResourceDescriptorHeap[slot];
+    w[coord] = val;
+}
 #endif
 
 static const uint kSamplerLinearClamp = 0;
@@ -219,4 +291,41 @@ float3 linear_to_srgb(float3 c) {
 
 float luminance(float3 c) {
     return dot(max(c, 0.0), float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 normalize_chroma(float3 c) {
+    float l = luminance(c);
+    if (l <= 1e-4) {
+        return float3(1.0, 1.0, 1.0);
+    }
+    return clamp(max(c, 0.0) / l, float3(0.45, 0.45, 0.45), float3(1.65, 1.65, 1.65));
+}
+
+float quantize_cel(float l_eff, float shift, float feather) {
+    return smoothstep(shift - feather, shift + feather, l_eff);
+}
+
+// 3-Band Spherical Harmonics L0/L1/L2 ambient built from active studio Key/Fill/Rim rig + sky/ground bounce.
+float3 eval_3band_sh_ambient(float3 n, GpuFrameGlobals fg) {
+    float3 key_col = (fg.state_u32.y > 0u) ? fg.lights[0].color_intensity.rgb : float3(0.95, 0.94, 0.96);
+    float3 fill_col = (fg.state_u32.y > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u)
+                          ? fg.lights[1].color_intensity.rgb
+                          : float3(0.45, 0.56, 0.80);
+    float3 fill_dir = (fg.state_u32.y > 1u)
+                          ? normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(-0.6, 0.25, 0.7))
+                          : float3(-0.6, 0.25, 0.7);
+    float3 sky_col = lerp(float3(0.46, 0.58, 0.86), fill_col * 0.85, 0.55);
+    float3 ground_col = lerp(float3(0.28, 0.24, 0.27), key_col * 0.26, 0.50);
+
+    // Zonal L0 + L1 directional + L2 quadratic up/down envelope
+    float y = n.y;
+    float3 l0 = (sky_col + ground_col) * 0.28 + fill_col * 0.14;
+    float3 l1 = (sky_col - ground_col) * (0.24 * y) + fill_col * (0.34 * saturate(dot(n, fill_dir) * 0.5 + 0.5));
+    float l2_band = 0.08 * (3.0 * y * y - 1.0);
+    float3 l2 = lerp(ground_col, sky_col, saturate(y * 0.5 + 0.5)) * max(l2_band, -0.05);
+    return max(l0 + l1 + l2, float3(0.06, 0.06, 0.08));
+}
+
+float2 ndc_to_screen_uv(float2 ndc) {
+    return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }

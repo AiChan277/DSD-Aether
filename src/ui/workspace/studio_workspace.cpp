@@ -408,6 +408,26 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.crease_strength = params_.get_float(ParamId::RenderCreaseStrength);
     v.hair_highlight_intensity = params_.get_float(ParamId::RenderHairHighlight);
     v.rim_step_strength = params_.get_float(ParamId::RenderRimStepStrength);
+    v.lighting_mode = static_cast<uint8_t>(std::clamp(params_.get_int(ParamId::RenderLightingMode), 0, 2));
+    v.indirect_bleed_strength = params_.get_float(ParamId::RenderIndirectBleedStrength);
+    v.rim_depth_offset_px = params_.get_float(ParamId::RenderRimDepthOffsetPx);
+    v.filter_2d_pro = params_.get_bool(ParamId::Render2DFilterPro);
+    v.filter_kuwahara_strength = params_.get_float(ParamId::RenderFilterKuwaharaStrength);
+    v.filter_dog_ink_boost = params_.get_float(ParamId::RenderFilterDogInkBoost);
+    v.filter_paper_warmth = params_.get_bool(ParamId::RenderFilterPaperWarmth);
+    v.filter_paper_warmth_strength = params_.get_float(ParamId::RenderFilterPaperWarmthStrength);
+    v.circadian_enabled = params_.get_bool(ParamId::RenderCircadianEnabled);
+    v.circadian_timezone_idx = params_.get_int(ParamId::RenderCircadianTimezone);
+    v.circadian_time_override_min = params_.get_int(ParamId::RenderCircadianTimeMinutes);
+    v.npu_bounds_enabled = params_.get_bool(ParamId::TrackingNpuBoundsEnabled);
+    v.npu_anti_clip_enabled = params_.get_bool(ParamId::TrackingNpuAntiClipEnabled);
+    v.npu_bounds_half = {params_.get_float(ParamId::TrackingNpuBoundsX),
+                         params_.get_float(ParamId::TrackingNpuBoundsY),
+                         params_.get_float(ParamId::TrackingNpuBoundsZ)};
+    v.npu_soft_elasticity = params_.get_float(ParamId::TrackingNpuSoftElasticity);
+    v.npu_max_pitch_deg = params_.get_float(ParamId::TrackingNpuMaxPitchDeg);
+    v.npu_anti_clip_margin = params_.get_float(ParamId::TrackingNpuAntiClipMargin);
+    v.npu_bounds_dirty = true;
     v.target_fps_mode = static_cast<uint8_t>(params_.get_int(ParamId::RenderTargetFps));
     v.vsync_enabled = params_.get_bool(ParamId::RenderVsync);
     v.background_eco_mode = params_.get_bool(ParamId::RenderBackgroundEco);

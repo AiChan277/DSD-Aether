@@ -104,6 +104,7 @@ struct EvaluatedPhysicalDevice {
     bool has_nonuniform_storage{false};
     bool has_shader_draw_parameters{false};
     bool has_demote_to_helper{false};
+    bool has_shader_float16{false};
 };
 
 [[nodiscard]] EvaluatedPhysicalDevice evaluate_physical_device(VkPhysicalDevice pd, bool need_swapchain) {
@@ -233,6 +234,8 @@ struct EvaluatedPhysicalDevice {
     eval.has_nonuniform_storage = (vk12.shaderStorageImageArrayNonUniformIndexing == VK_TRUE);
     eval.has_shader_draw_parameters = (vk11.shaderDrawParameters == VK_TRUE);
     eval.has_demote_to_helper = (vk13.shaderDemoteToHelperInvocation == VK_TRUE);
+    eval.has_shader_float16 = (vk12.shaderFloat16 == VK_TRUE);
+    eval.info.supports_fp16 = eval.has_shader_float16;
 
     eval.info.supports_accel_struct = eval.has_accel_struct && (as_feat.accelerationStructure == VK_TRUE);
     eval.has_as_update_after_bind = (as_feat.descriptorBindingAccelerationStructureUpdateAfterBind == VK_TRUE);
@@ -269,7 +272,27 @@ struct EvaluatedPhysicalDevice {
     eval.info.host_visible_vram_mb = host_vis_bytes / (1024ULL * 1024ULL);
     eval.info.rebar_enabled = rebar_bytes >= (256ULL * 1024ULL * 1024ULL);
 
+    bool all_device_local_host_visible = (mem.memoryTypeCount > 0u);
+    bool saw_device_local = false;
+    for (uint32_t t = 0; t < mem.memoryTypeCount; ++t) {
+        const auto mflags = mem.memoryTypes[t].propertyFlags;
+        if ((mflags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+            saw_device_local = true;
+            if ((mflags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+                all_device_local_host_visible = false;
+            }
+        }
+    }
+    eval.info.is_uma =
+        (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) || (saw_device_local && all_device_local_host_visible);
+    eval.info.is_intel_igpu = (eval.info.vendor_id == 0x8086u) && eval.info.is_uma;
+    eval.info.estimated_bandwidth_gbps =
+        eval.info.is_uma ? 80u : (eval.info.is_discrete ? (eval.info.dedicated_vram_mb >= 8192u ? 320u : 224u) : 64u);
+
     const bool rt_ready = eval.info.supports_accel_struct && eval.info.supports_ray_query && eval.has_deferred_host_ops;
+    eval.info.recommended_lighting_mode =
+        (eval.info.is_uma || eval.info.is_intel_igpu || !rt_ready) ? uint8_t{0} : uint8_t{1};
+
     eval.desc.device_name = eval.info.device_name;
     eval.desc.vendor_id = eval.info.vendor_id;
     eval.desc.device_id = eval.info.device_id;
@@ -279,10 +302,15 @@ struct EvaluatedPhysicalDevice {
     eval.desc.dedicated_vram_mb = eval.info.dedicated_vram_mb;
     eval.desc.host_visible_vram_mb = eval.info.host_visible_vram_mb;
     eval.desc.rebar_enabled = eval.info.rebar_enabled;
+    eval.desc.is_uma = eval.info.is_uma;
+    eval.desc.is_intel_igpu = eval.info.is_intel_igpu;
+    eval.desc.supports_fp16 = eval.info.supports_fp16;
     eval.desc.supports_ray_query = eval.info.supports_ray_query;
     eval.desc.supports_accel_struct = eval.info.supports_accel_struct;
     eval.desc.supports_calibrated_timestamps = eval.has_calibrated_timestamps;
     eval.desc.supports_external_memory_win32 = eval.has_ext_mem_win32;
+    eval.desc.estimated_bandwidth_gbps = eval.info.estimated_bandwidth_gbps;
+    eval.desc.recommended_lighting_mode = eval.info.recommended_lighting_mode;
     eval.desc.luid = eval.info.luid;
     eval.desc.luid_valid = eval.info.luid_valid;
     eval.desc.device_uuid = eval.info.device_uuid;
@@ -676,6 +704,7 @@ Expected<RhiDevice*> RhiDevice::create(const RhiDeviceConfig& cfg) {
     vk12.shaderSampledImageArrayNonUniformIndexing = chosen->has_nonuniform_sampled ? VK_TRUE : VK_FALSE;
     vk12.shaderStorageImageArrayNonUniformIndexing = chosen->has_nonuniform_storage ? VK_TRUE : VK_FALSE;
     vk12.scalarBlockLayout = chosen->has_scalar_block_layout ? VK_TRUE : VK_FALSE;
+    vk12.shaderFloat16 = chosen->has_shader_float16 ? VK_TRUE : VK_FALSE;
     vk12.pNext = &vk13;
 
     VkPhysicalDeviceVulkan11Features vk11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
@@ -879,6 +908,14 @@ Expected<RhiBuffer> RhiDevice::create_buffer(VkDeviceSize size, VkBufferUsageFla
         out.device_address = buffer_device_address(out.handle);
     }
     return out;
+}
+
+Expected<RhiBuffer> RhiDevice::create_uma_zero_copy_buffer(VkDeviceSize size, VkBufferUsageFlags usage) const {
+    const VmaAllocationCreateFlags flags =
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT |
+        (gpu_info_.is_uma ? VmaAllocationCreateFlags{0} : VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT);
+    const VmaMemoryUsage mem = gpu_info_.is_uma ? VMA_MEMORY_USAGE_AUTO : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    return create_buffer(size, usage, mem, flags);
 }
 
 void RhiDevice::destroy_buffer(RhiBuffer& buf) const noexcept {

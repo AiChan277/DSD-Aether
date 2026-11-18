@@ -41,4 +41,12 @@ class HighResTimer {
     bool high_res_{false};
 };
 
+/**
+ * Waits for a Win32 mutex/event handle with sub-millisecond high-res timer backoff up to `timeout_us`
+ * (avoiding the 15.6 ms Win32 scheduler quantum on short waits, without `Sleep()`).
+ * Returns Win32 `WAIT_OBJECT_0` (0), `WAIT_ABANDONED` (0x80), or `WAIT_TIMEOUT` (0x102).
+ */
+[[nodiscard]] uint32_t wait_handle_high_res_us(void* win32_handle, HighResTimer& backoff_timer,
+                                               uint64_t timeout_us) noexcept;
+
 } // namespace aether

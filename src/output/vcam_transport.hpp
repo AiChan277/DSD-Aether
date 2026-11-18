@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 namespace aether::output {
 
@@ -13,8 +14,9 @@ namespace aether::output {
  * Producer side of `Local\AetherVCam_v1` shared-memory transport (`§11.3`).
  * - Transfers GPU `OUT_BGRA8` (or bottom-up / `NV12`) via Vulkan transfer queue (`DMA <= 1.1 ms`)
  *   into 3 host-mapped shared-memory slots using `VK_EXT_external_memory_host` when aligned & supported,
- *   or pre-allocated host-visible readback buffers + single memcpy fallback.
- * - Zero heap allocations in `publish_frame()` (`HR-01`).
+ *   or pre-allocated host-visible / UMA zero-copy readback buffers + single memcpy fallback.
+ * - Also supports direct host/DX12 UMA readback publication (`init_host_only` + `publish_host_bgra8`).
+ * - Zero heap allocations in `publish_frame()` / `publish_host_bgra8()` (`HR-01`).
  */
 class VcamTransport {
   public:
@@ -25,6 +27,7 @@ class VcamTransport {
     VcamTransport& operator=(const VcamTransport&) = delete;
 
     [[nodiscard]] Expected<void> init(rhi::RhiDevice& device);
+    [[nodiscard]] Expected<void> init_host_only();
     void shutdown() noexcept;
 
     /** Returns true when an external DirectShow consumer has an active RGB pin connected (`§11.1`). */
@@ -37,6 +40,10 @@ class VcamTransport {
                                                uint32_t width, uint32_t height, uint32_t fps, bool is_bottom_up,
                                                uint64_t frame_sequence, uint64_t present_qpc_us,
                                                uint64_t wait_timeline_value) noexcept;
+    /** Publishes CPU/UMA-mapped BGRA8 bytes directly into `Local\AetherVCam_v1` seqlock slots (`HR-01`). */
+    [[nodiscard]] Expected<void> publish_host_bgra8(std::span<const uint8_t> bgra, uint32_t width, uint32_t height,
+                                                    uint32_t fps, bool is_bottom_up, uint64_t frame_sequence,
+                                                    uint64_t present_qpc_us) noexcept;
 
     [[nodiscard]] bool is_open() const noexcept { return shm_base_ != nullptr; }
     [[nodiscard]] bool using_external_host_mem() const noexcept { return ext_host_mem_active_; }
@@ -48,6 +55,7 @@ class VcamTransport {
     }
 
   private:
+    Expected<void> open_shm_and_prefault();
     Expected<void> init_dma_resources();
     void destroy_dma_resources() noexcept;
 

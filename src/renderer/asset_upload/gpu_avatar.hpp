@@ -69,9 +69,11 @@ struct GpuAvatar {
 
     // Pre-sized rest geometry & zero-alloc live preview scratch (`HR-01`, `P3-07`)
     std::vector<AetherVertex25D> rest_vertices;
+    std::vector<AetherVertexSurface> rest_surfaces;
     std::vector<uint32_t> rest_indices;
     std::vector<AetherVertexSkin> skin_vertices;
     std::vector<AetherMorphDelta> morph_deltas;
+    std::vector<uint8_t> cpu_texture_pixels; // Retained for instant Vulkan <-> DX12 live backend switch
     std::vector<AetherVertex25D> skinned_vertices_scratch;
     std::vector<float> morph_weights_scratch;
     std::vector<std::array<float, 3>> joint_rest_world_pos;

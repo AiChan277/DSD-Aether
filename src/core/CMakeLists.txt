@@ -1,5 +1,6 @@
 add_library(aether_core STATIC
     arena.hpp
+    circadian_timezones.hpp
     clock.cpp
     clock.hpp
     cpu_topology.cpp

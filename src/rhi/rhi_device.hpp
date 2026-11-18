@@ -60,10 +60,15 @@ struct GpuAdapterDescriptor {
     uint64_t dedicated_vram_mb{0};
     uint64_t host_visible_vram_mb{0};
     bool rebar_enabled{false};
+    bool is_uma{false};
+    bool is_intel_igpu{false};
+    bool supports_fp16{false};
     bool supports_ray_query{false};
     bool supports_accel_struct{false};
     bool supports_calibrated_timestamps{false};
     bool supports_external_memory_win32{false};
+    uint32_t estimated_bandwidth_gbps{0};
+    uint8_t recommended_lighting_mode{1};
     std::array<uint8_t, 8> luid{};
     bool luid_valid{false};
     std::array<uint8_t, VK_UUID_SIZE> device_uuid{};
@@ -98,9 +103,14 @@ struct SelectedGpuInfo {
     uint64_t dedicated_vram_mb{0};
     uint64_t host_visible_vram_mb{0};
     bool is_discrete{false};
+    bool is_uma{false};
+    bool is_intel_igpu{false};
     bool rebar_enabled{false};
+    bool supports_fp16{false};
     bool texture_compression_bc{false};
     bool fill_mode_non_solid{false};
+    uint32_t estimated_bandwidth_gbps{0};
+    uint8_t recommended_lighting_mode{1};
     std::array<uint8_t, 8> luid{};
     bool luid_valid{false};
     std::array<uint8_t, VK_UUID_SIZE> device_uuid{};
@@ -152,6 +162,10 @@ class RhiDevice {
     [[nodiscard]] const RhiExtDispatch& ext() const noexcept { return ext_; }
     [[nodiscard]] bool rt_supported() const noexcept { return gpu_info_.rt_enabled; }
     [[nodiscard]] bool fill_mode_non_solid_supported() const noexcept { return gpu_info_.fill_mode_non_solid; }
+    [[nodiscard]] bool is_uma() const noexcept { return gpu_info_.is_uma; }
+    [[nodiscard]] bool is_intel_igpu() const noexcept { return gpu_info_.is_intel_igpu; }
+    [[nodiscard]] bool fp16_supported() const noexcept { return gpu_info_.supports_fp16; }
+    [[nodiscard]] uint8_t recommended_lighting_mode() const noexcept { return gpu_info_.recommended_lighting_mode; }
 
     [[nodiscard]] bool validation_active() const noexcept { return validation_active_; }
     [[nodiscard]] bool sync_validation_active() const noexcept { return sync_validation_active_; }
@@ -166,6 +180,9 @@ class RhiDevice {
     [[nodiscard]] Expected<RhiBuffer> create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                                     VmaMemoryUsage mem_usage,
                                                     VmaAllocationCreateFlags vma_flags = 0) const;
+    /** Creates a persistent-mapped zero-copy buffer on UMA devices (`HOST_VISIBLE | DEVICE_LOCAL`),
+     * or ReBAR / host-coherent staging-free buffer on discrete GPUs. */
+    [[nodiscard]] Expected<RhiBuffer> create_uma_zero_copy_buffer(VkDeviceSize size, VkBufferUsageFlags usage) const;
     void destroy_buffer(RhiBuffer& buf) const noexcept;
     [[nodiscard]] VkDeviceAddress buffer_device_address(VkBuffer buffer) const noexcept;
 

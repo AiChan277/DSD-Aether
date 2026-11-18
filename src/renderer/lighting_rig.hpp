@@ -63,6 +63,19 @@ struct LightingRig {
     uint32_t tone_mode{1}; // 0 = Standard clamp, 1 = Soft highlights (AgX shoulder)
     float bg_rgba[4]{0.0f, 0.0f, 0.0f, 0.0f};
 
+    // Tasks 3-7 extensions: 3-tier lighting, pre-quantized color bleed, dynamic rim, 2D Filter Pro, circadian
+    uint8_t lighting_mode{1}; // 0 = Traditional (Raster+SDF), 1 = Hybrid RT, 2 = 2.5D Path Tracing
+    bool enable_2d_filter_pro{true};
+    float painterly_flatten_strength{0.55f};
+    float dog_ink_boost{0.65f};
+    bool enable_paper_warmth{false};
+    float paper_warmth_strength{0.20f};
+    float indirect_bleed_strength{0.75f};
+    float rim_depth_offset_px{3.0f};
+    bool circadian_enabled{false};
+    int32_t circadian_timezone{0};
+    int32_t circadian_time_minutes{-1}; // -1 = Live Clock, 0..1439 = Manual preview scrub
+
     [[nodiscard]] static LightingRig default_three_point() noexcept {
         LightingRig rig{};
         rig.active_count = 4;

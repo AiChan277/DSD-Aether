@@ -194,6 +194,53 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             const bool rt_on = params.get_bool(ParamId::RenderRtEnabled);
             if (ImGui::MenuItem(tr("Ray Tracing"), nullptr, rt_on, rhi.rt_supported())) {
                 (void)params.set(ParamId::RenderRtEnabled, rt_on ? 0.0 : 1.0);
+                if (rt_on) {
+                    (void)params.set(ParamId::RenderLightingMode, 0.0);
+                } else if (params.get_int(ParamId::RenderLightingMode) == 0) {
+                    (void)params.set(ParamId::RenderLightingMode, 1.0);
+                }
+                actions.viewport.lighting_dirty = true;
+                settings_dirty = true;
+            }
+            if (ImGui::BeginMenu(tr("Lighting Mode"))) {
+                const int cur_lm = params.get_int(ParamId::RenderLightingMode);
+                static constexpr const char* kLightLabels[3] = {
+                    "Traditional (Fast)",
+                    "Hybrid Ray Tracing",
+                    "2.5D Path Tracing",
+                };
+                for (int li = 0; li < 3; ++li) {
+                    const bool ok = (li == 0) || rhi.rt_supported();
+                    if (ImGui::MenuItem(kLightLabels[li], nullptr, cur_lm == li, ok)) {
+                        (void)params.set(ParamId::RenderLightingMode, static_cast<double>(li));
+                        (void)params.set(ParamId::RenderRtEnabled, li > 0 ? 1.0 : 0.0);
+                        actions.viewport.lighting_dirty = true;
+                        settings_dirty = true;
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu(tr("Render Backend"))) {
+                const int cur_bk = params.get_int(ParamId::RenderBackend);
+                static constexpr const char* kBackendLabels[3] = {"Vulkan 1.3", "DirectX 11", "DirectX 12"};
+                for (int bi = 0; bi < 3; ++bi) {
+                    if (ImGui::MenuItem(kBackendLabels[bi], nullptr, cur_bk == bi)) {
+                        (void)params.set(ParamId::RenderBackend, static_cast<double>(bi));
+                        actions.viewport.render_backend = static_cast<uint8_t>(bi);
+                        settings_dirty = true;
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            const bool f2d = params.get_bool(ParamId::Render2DFilterPro);
+            if (ImGui::MenuItem(tr("2D Filter Pro"), nullptr, f2d)) {
+                (void)params.set(ParamId::Render2DFilterPro, f2d ? 0.0 : 1.0);
+                actions.viewport.lighting_dirty = true;
+                settings_dirty = true;
+            }
+            const bool circ = params.get_bool(ParamId::RenderCircadianEnabled);
+            if (ImGui::MenuItem(tr("Circadian Lighting"), nullptr, circ)) {
+                (void)params.set(ParamId::RenderCircadianEnabled, circ ? 0.0 : 1.0);
                 actions.viewport.lighting_dirty = true;
                 settings_dirty = true;
             }

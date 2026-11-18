@@ -5,6 +5,7 @@
 #include "core/triple_buffer.hpp"
 #include "tracking/camera_source.hpp"
 #include "tracking/landmark_solver.hpp"
+#include "tracking/npu_postprocess.hpp"
 #include "tracking/ort_router.hpp"
 
 #include <array>
@@ -51,7 +52,14 @@ struct TrackingStatsSnapshot {
     bool neutral_calibrated{false};
     uint32_t stable_lock_frames{0};
     float head_euler_deg[3]{0.0f, 0.0f, 0.0f};
+    uint64_t npu_bounds_compressed_count{0};
+    uint64_t npu_clip_projected_count{0};
 };
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 
 /**
  * Real-time `T1` Capture & ONNX Tracking Engine (`§2.2`, `§8`).
@@ -81,6 +89,9 @@ class TrackingEngine {
     }
     [[nodiscard]] bool hand_tracking_enabled() const noexcept {
         return hand_tracking_enabled_.load(std::memory_order_acquire);
+    }
+    void set_movement_bounds_config(const NpuMovementBoundsConfig& cfg) noexcept {
+        bounds_config_buf_.publish(cfg);
     }
     [[nodiscard]] AetherStatus switch_camera_source(std::unique_ptr<ICameraSource> next_source) noexcept;
 
@@ -115,8 +126,17 @@ class TrackingEngine {
     std::atomic<float> last_head_pitch_deg_{0.0f};
     std::atomic<float> last_head_yaw_deg_{0.0f};
     std::atomic<float> last_head_roll_deg_{0.0f};
+    std::atomic<uint64_t> npu_bounds_compressed_count_{0};
+    std::atomic<uint64_t> npu_clip_projected_count_{0};
+    LockFreeTripleBuffer<NpuMovementBoundsConfig> bounds_config_buf_{};
+    NpuPostProcessor npu_post_{};
+    NpuMovementBoundsConfig active_bounds_cfg_{};
     mutable LockFreeTripleBuffer<LiveCameraPreviewFrame> preview_buffer_{};
     bool initialized_{false};
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 } // namespace aether::tracking

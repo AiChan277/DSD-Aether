@@ -33,24 +33,24 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
     }
 
     bool write_half = ((tid.x & 1u) == 0u) && ((tid.y & 1u) == 0u);
-    int3 p = int3(int2(tid.xy), 0);
+    int2 p = int2(tid.xy);
     uint depth_slot = fg.gbuffer_extra_ids[0].x;
-    float hw_depth = g_SampledImages[depth_slot].Load(p).x;
+    float hw_depth = aether_load(depth_slot, p).x;
     uint csm_slot = g_Pc.param3 & 0xFFFFu;
 
-    if (hw_depth >= 0.99998 || csm_slot == 0xFFFFu) {
-        g_StorageImages[g_Pc.param0][tid.xy] = float4(1.0, 1.0, 0.0, 1.0);
-        g_StorageImages[g_Pc.param1][tid.xy] = float4(1.0, 1.0, 0.0, 1.0);
+    if (hw_depth >= 0.99998) {
+        aether_store(g_Pc.param0, tid.xy, float4(1.0, 1.0, 0.0, 1.0));
+        aether_store(g_Pc.param1, tid.xy, float4(1.0, 1.0, 0.0, 1.0));
         if (write_half) {
-            g_StorageImages[g_Pc.param2][tid.xy >> 1u] = float4(0.0, 0.0, 0.0, 1.0);
+            aether_store(g_Pc.param2, tid.xy >> 1u, float4(0.0, 0.0, 0.0, 1.0));
         }
         return;
     }
 
     uint gb_n_slot = fg.gbuffer_ids[0].x;
     uint gb_misc_slot = fg.gbuffer_ids[0].w;
-    float3 view_n = oct_decode(g_SampledImages[gb_n_slot].Load(p).xy);
-    float4 misc = g_SampledImages[gb_misc_slot].Load(p);
+    float3 view_n = oct_decode(aether_load(gb_n_slot, p).xy);
+    float4 misc = aether_load(gb_misc_slot, p);
 
     float true_view_z = -fg.camera_pos_world.w;
     if (hw_depth + fg.proj.col2.z < 0.0) {
@@ -62,28 +62,35 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
 
-    float4 sc = mul_col(fg.shadow_view_proj[0], float4(world_pos + world_n * 0.005, 1.0));
-    float2 suv = sc.xy / max(abs(sc.w), 1e-5) * 0.5 + 0.5;
-    float sz = sc.z / max(abs(sc.w), 1e-5);
-
     float vis = 1.0;
-    if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sz > 0.0 && sz < 1.0 && misc.y < 0.5) {
-        float texel = 1.0 / 2048.0;
-        float occ = 0.0;
-        for (int dy = -1; dy <= 1; dy += 2) {
-            for (int dx = -1; dx <= 1; dx += 2) {
-                float d = g_SampledImages[csm_slot].SampleLevel(
-                    g_Samplers[kSamplerNearestClamp], suv + float2(float(dx), float(dy)) * texel, 0).x;
-                occ += (sz - 0.003 > d) ? 0.0 : 1.0;
+    if (csm_slot != 0xFFFFu && misc.y < 0.5) {
+        float4 sc = mul_col(fg.shadow_view_proj[0], float4(world_pos + world_n * 0.006, 1.0));
+        float2 sc_ndc = sc.xy / max(abs(sc.w), 1e-5);
+#ifdef __TARGET_SPIRV__
+        float2 suv = sc_ndc * 0.5 + 0.5;
+#else
+        float2 suv = ndc_to_screen_uv(sc_ndc);
+#endif
+        float sz = sc.z / max(abs(sc.w), 1e-5);
+        if (suv.x > 0.01 && suv.x < 0.99 && suv.y > 0.01 && suv.y < 0.99 && sz > 0.0 && sz < 1.0) {
+            float texel = 1.0 / 2048.0;
+            float occ = 0.0;
+            for (int dy = -1; dy <= 1; dy += 2) {
+                for (int dx = -1; dx <= 1; dx += 2) {
+                    float d = aether_sample_level(
+                        csm_slot, kSamplerNearestClamp, suv + float2(float(dx), float(dy)) * texel, 0).x;
+                    occ += (sz - 0.003 > d) ? 0.0 : 1.0;
+                }
             }
+            vis = occ * 0.25;
         }
-        vis = occ * 0.25;
     }
 
-    float rim_occ = saturate(0.5 + 0.5 * (-view_n.z));
-    g_StorageImages[g_Pc.param0][tid.xy] = float4(vis, 1.0, 0.0, 1.0);
-    g_StorageImages[g_Pc.param1][tid.xy] = float4(rim_occ, 1.0, 0.0, 1.0);
+    float rim_occ = saturate(0.55 + 0.45 * (-view_n.z));
+    aether_store(g_Pc.param0, tid.xy, float4(vis, 1.0, 0.0, 1.0));
+    aether_store(g_Pc.param1, tid.xy, float4(rim_occ, 1.0, 0.0, 1.0));
     if (write_half) {
-        g_StorageImages[g_Pc.param2][tid.xy >> 1u] = float4(0.0, 0.0, 0.0, 1.0);
+        float3 sh_amb = eval_3band_sh_ambient(world_n, fg) * fg.light_params.w;
+        aether_store(g_Pc.param2, tid.xy >> 1u, float4(sh_amb, 1.0));
     }
 }

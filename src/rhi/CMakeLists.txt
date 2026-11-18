@@ -1,6 +1,8 @@
 add_library(aether_rhi STATIC
     bindless.cpp
     bindless.hpp
+    d3d12_device.cpp
+    d3d12_device.hpp
     gpu_timing.cpp
     gpu_timing.hpp
     rebar_ring.cpp
@@ -25,3 +27,7 @@ target_link_libraries(aether_rhi PUBLIC
     Vulkan::Vulkan
     GPUOpen::VulkanMemoryAllocator
 )
+
+if(WIN32)
+    target_link_libraries(aether_rhi PUBLIC d3d12 dxgi d3d11 dxguid)
+endif()

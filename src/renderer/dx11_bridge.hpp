@@ -15,6 +15,7 @@ namespace aether::renderer {
 enum class RenderBackend : uint8_t {
     Vulkan = 0,    // Full 14-pass NPR + ray tracing frame graph (default)
     DirectX11 = 1, // Direct3D 11 compatibility renderer, handed to Vulkan through Dx11Bridge
+    DirectX12 = 2, // Production DirectX 12 SM 6.6 + DXR 1.1 backend via Dx12Bridge
 };
 
 [[nodiscard]] const char* render_backend_name(RenderBackend b) noexcept;

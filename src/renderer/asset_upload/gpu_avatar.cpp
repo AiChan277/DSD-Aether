@@ -827,9 +827,15 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         }
     };
     assign_stream_pod(staged->stream_offsets[AETHER_STREAM_VERTEX25D], v25_bytes, avatar->rest_vertices);
+    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_SURFACE], surf_bytes, avatar->rest_surfaces);
     assign_stream_pod(staged->stream_offsets[AETHER_STREAM_INDEX_U32], idx_bytes, avatar->rest_indices);
     assign_stream_pod(staged->stream_offsets[AETHER_STREAM_SKIN], skin_bytes, avatar->skin_vertices);
     assign_stream_pod(staged->stream_offsets[AETHER_STREAM_MORPH_DELTAS], morph_bytes, avatar->morph_deltas);
+    const uint64_t tex_pix_bytes = staged->requirements.stream_bytes[AETHER_STREAM_TEXTURE_PIXELS];
+    if (tex_pix_bytes > 0) {
+        const uint8_t* tp = mapped + staged->stream_offsets[AETHER_STREAM_TEXTURE_PIXELS];
+        avatar->cpu_texture_pixels.assign(tp, tp + static_cast<size_t>(tex_pix_bytes));
+    }
     avatar->skinned_vertices_scratch.assign(avatar->rest_vertices.begin(), avatar->rest_vertices.end());
     avatar->morph_weights_scratch.assign(avatar->morph_ranges.size(), 0.0f);
 
@@ -849,12 +855,9 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         avatar->vertex25d_buf = res.value();
 
         for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
-            auto dyn_res = rhi.create_buffer(v25_bytes,
-                                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                             VMA_MEMORY_USAGE_AUTO,
-                                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                                                 VMA_ALLOCATION_CREATE_MAPPED_BIT);
+            auto dyn_res = rhi.create_uma_zero_copy_buffer(
+                v25_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
             if (!dyn_res) {
                 cleanup_staged();
                 return make_unexpected(dyn_res.error());
@@ -936,9 +939,7 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     if (!avatar->bone_line_scratch.empty()) {
         const VkDeviceSize bone_bytes =
             static_cast<VkDeviceSize>(avatar->bone_line_scratch.size()) * sizeof(BoneLineVertex);
-        auto b_res = rhi.create_buffer(bone_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
-                                       VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                                           VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        auto b_res = rhi.create_uma_zero_copy_buffer(bone_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         if (!b_res) {
             cleanup_staged();
             return make_unexpected(b_res.error());
@@ -950,9 +951,7 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         avatar->bone_line_vertex_count = static_cast<uint32_t>(avatar->bone_line_scratch.size());
 
         for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
-            auto db_res = rhi.create_buffer(bone_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
-                                            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                                                VMA_ALLOCATION_CREATE_MAPPED_BIT);
+            auto db_res = rhi.create_uma_zero_copy_buffer(bone_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
             if (!db_res) {
                 cleanup_staged();
                 return make_unexpected(db_res.error());

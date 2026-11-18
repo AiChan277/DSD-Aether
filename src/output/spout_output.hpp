@@ -1,11 +1,14 @@
 #pragma once
 
+#include "core/clock.hpp"
 #include "core/expected.hpp"
 #include "output/output_config.hpp"
+#include "rhi/d3d12_device.hpp"
 #include "rhi/rhi_device.hpp"
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 namespace aether::output {
 
@@ -41,6 +44,10 @@ class SpoutOutput {
     [[nodiscard]] Expected<void> init(rhi::RhiDevice& device, uint32_t width, uint32_t height,
                                       const char* sender_name = "Aether2.5D",
                                       SpoutSharingMode mode = SpoutSharingMode::GpuDefault);
+    /** Initializes a standalone DirectX 12 (`D3D11On12` / NT shared handle) Spout2 sender without Vulkan. */
+    [[nodiscard]] Expected<void> init_d3d12(uint32_t width, uint32_t height, const char* sender_name,
+                                            const std::array<uint8_t, 8>& luid, bool luid_valid,
+                                            SpoutSharingMode mode = SpoutSharingMode::GpuDefault);
     [[nodiscard]] Expected<void> resize(uint32_t width, uint32_t height);
     void shutdown() noexcept;
 
@@ -51,6 +58,9 @@ class SpoutOutput {
      */
     [[nodiscard]] Expected<void> publish_frame(VkImage src_bgra_image, uint32_t width, uint32_t height,
                                                uint64_t wait_timeline_value) noexcept;
+    /** Publishes a DX12 rendered BGRA8 texture via shared NT handle (`OpenSharedResource1`) or CPU fallback. */
+    [[nodiscard]] Expected<void> publish_d3d12_texture(rhi::D3D12Device& d3d12, const rhi::D3D12Texture& src_bgra8,
+                                                       std::span<const uint8_t> cpu_fallback_bgra = {}) noexcept;
 
     [[nodiscard]] bool is_active() const noexcept { return initialized_; }
     [[nodiscard]] bool using_cpu_fallback() const noexcept { return cpu_fallback_; }
@@ -67,12 +77,18 @@ class SpoutOutput {
     [[nodiscard]] static bool detect_display_adapter_mismatch(const std::array<uint8_t, 8>& luid, bool luid_valid);
 
   private:
+    Expected<void> init_d3d11_device_for_luid(const std::array<uint8_t, 8>& luid, bool luid_valid);
     Expected<void> allocate_shared_targets(uint32_t width, uint32_t height);
     void release_shared_targets() noexcept;
     Expected<void> register_spout_maps();
     void unregister_spout_maps() noexcept;
 
     rhi::RhiDevice* device_{nullptr};
+    bool d3d12_mode_{false};
+    std::array<uint8_t, 8> d3d12_luid_{};
+    bool d3d12_luid_valid_{false};
+    void* d3d12_opened_nt_handle_{nullptr};
+    void* d3d12_opened_tex_{nullptr};
     uint32_t width_{0};
     uint32_t height_{0};
     SpoutSharingMode requested_mode_{SpoutSharingMode::GpuDefault};
@@ -113,6 +129,7 @@ class SpoutOutput {
     uint64_t frames_published_{0};
     uint64_t skipped_mutex_{0};
     double last_publish_ms_{0.0};
+    HighResTimer access_wait_timer_{};
 };
 
 } // namespace aether::output

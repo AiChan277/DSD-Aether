@@ -1,5 +1,6 @@
 #include "ui/widgets/property_row.hpp"
 
+#include "core/circadian_timezones.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/theme/tr.hpp"
@@ -364,14 +365,24 @@ bool draw_property_row(ParamId id, ParamStore& store, UndoStack& undo, const UiF
     } else if (spec.type == ParamType::Enum && spec.enum_labels != nullptr) {
         const int item_count = count_enum_items(spec.enum_labels);
         const int cur_idx = std::clamp(static_cast<int>(std::llround(cur_val)), 0, std::max(0, item_count - 1));
+        const bool is_circadian_tz = (id == ParamId::RenderCircadianTimezone);
+        const bool wide_tz_preview = is_circadian_tz && (ImGui::GetContentRegionAvail().x >= 220.0f * scale);
         char preview[64]{"--"};
         if (!mixed) {
-            (void)extract_enum_item(spec.enum_labels, cur_idx, preview, sizeof(preview));
+            if (wide_tz_preview) {
+                std::snprintf(preview, sizeof(preview), "%s", core::circadian_timezone_at(cur_idx).full_label);
+            } else {
+                (void)extract_enum_item(spec.enum_labels, cur_idx, preview, sizeof(preview));
+            }
         }
         if (ImGui::BeginCombo("##ctrl", preview, ImGuiComboFlags_HeightLarge)) {
             for (int i = 0; i < item_count; ++i) {
                 char item_txt[64]{};
-                (void)extract_enum_item(spec.enum_labels, i, item_txt, sizeof(item_txt));
+                if (is_circadian_tz) {
+                    std::snprintf(item_txt, sizeof(item_txt), "%s", core::circadian_timezone_at(i).full_label);
+                } else {
+                    (void)extract_enum_item(spec.enum_labels, i, item_txt, sizeof(item_txt));
+                }
                 const bool sel = (!mixed && i == cur_idx);
                 if (ImGui::Selectable(item_txt, sel)) {
                     const double next_val = static_cast<double>(i);
@@ -426,7 +437,13 @@ bool draw_property_row(ParamId id, ParamStore& store, UndoStack& undo, const UiF
     }
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-        ImGui::SetTooltip("%s\n(%s · %s)", tr(spec.tooltip), spec.id, param_owner_name(spec.owner));
+        if (id == ParamId::RenderCircadianTimezone && !mixed) {
+            const int cur_idx = static_cast<int>(std::llround(cur_val));
+            ImGui::SetTooltip("%s\n%s\n(%s · %s)", core::circadian_timezone_at(cur_idx).full_label, tr(spec.tooltip),
+                              spec.id, param_owner_name(spec.owner));
+        } else {
+            ImGui::SetTooltip("%s\n(%s · %s)", tr(spec.tooltip), spec.id, param_owner_name(spec.owner));
+        }
     }
 
     // Standard property right-click context menu (§12.5)

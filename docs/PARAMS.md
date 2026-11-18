@@ -27,7 +27,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.bloom_intensity` | Render | Premul Bloom | `float` | T3 | `0.06` | `[0.0, 1.5]` | — | `/aether/param/render.bloom_intensity` | persist, project, osc, graph, undoable |
 | `render.rt_enabled` | Render | Ray Tracing | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | `/aether/param/render.rt_enabled` | persist, project, osc, undoable |
 | `render.denoiser` | Render | Denoiser Backend | `enum` | T3 | `0.0` | `[0.0, 5.0]` | — | — | persist, app, undoable |
-| `render.backend` | Render | Render Backend | `enum` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `render.backend` | Render | Render Backend | `enum` | T3 | `0.0` | `[0.0, 2.0]` | — | — | persist, app, undoable |
 | `render.target_fps` | Render | Target FPS | `enum` | T3 | `1.0` | `[0.0, 3.0]` | — | — | persist, app, undoable |
 | `render.vsync` | Render | VSync | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
 | `render.background_eco` | Render | Background Eco | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
@@ -40,6 +40,16 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.crease_strength` | Render | Crease Ink | `float` | T3 | `0.75` | `[0.0, 1.0]` | — | `/aether/param/render.crease_strength` | persist, project, osc, undoable |
 | `render.hair_highlight` | Render | Hair Highlight | `float` | T3 | `0.85` | `[0.0, 1.5]` | — | `/aether/param/render.hair_highlight` | persist, project, osc, undoable |
 | `render.rim_step_strength` | Render | Rim Cutout | `float` | T3 | `0.65` | `[0.0, 1.5]` | — | `/aether/param/render.rim_step_strength` | persist, project, osc, undoable |
+| `render.lighting_mode` | Render | Lighting Mode | `enum` | T3 | `1.0` | `[0.0, 2.0]` | — | — | persist, app, undoable |
+| `render.indirect_bleed_strength` | Render | Pre-Cel GI Bleed | `float` | T3 | `0.55` | `[0.0, 1.5]` | — | `/aether/param/render.indirect_bleed_strength` | persist, project, osc, undoable |
+| `render.rim_depth_offset_px` | Render | Rim Depth Offset | `float` | T3 | `2.8` | `[0.0, 6.0]` | px | `/aether/param/render.rim_depth_offset_px` | persist, project, osc, undoable |
+| `render.filter_2d_pro` | Render | 2D Filter Pro | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.filter_kuwahara` | Render | Painterly Flatten | `float` | T3 | `0.55` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.filter_dog_ink` | Render | DoG Ink AA | `float` | T3 | `0.60` | `[0.0, 1.5]` | — | — | persist, project, undoable |
+| `render.filter_paper_warmth` | Render | Anime Paper Warmth | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.filter_paper_warmth_amt` | Render | Warmth Strength | `float` | T3 | `0.25` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.circadian_enabled` | Render | Circadian Lighting | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.circadian_time_min` | Render | Time Override | `int` | T3 | `-1.0` | `[-1.0, 1439.0]` | min | — | persist, project, undoable |
 | `rnd.debug.force_device_lost` | Diagnostics | Force Device Lost | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | runtime |
 | `tracking.ep_mode` | Tracking | Execution Provider | `enum` | T1 | `0.0` | `[0.0, 4.0]` | — | — | persist, app |
 | `tracking.smoothing_cutoff_hz` | Tracking | Filter Cutoff | `float` | T2 | `1.2` | `[0.2, 10.0]` | Hz | `/aether/param/tracking.smoothing_cutoff_hz` | persist, project, osc, undoable |
@@ -51,6 +61,15 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `tracking.mic_gain` | Tracking | Mic Gain | `float` | T2 | `1.25` | `[0.10, 4.00]` | x | — | persist, app |
 | `tracking.mic_noise_gate` | Tracking | Mic Noise Gate | `float` | T2 | `-48.0` | `[-72.0, -18.0]` | dB | — | persist, app |
 | `tracking.hand_enabled` | Tracking | Hand Tracking | `bool` | T1 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `tracking.npu_bounds_enabled` | Tracking | NPU Safe-Zone Box | `bool` | T1 | `1.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `tracking.npu_anti_clip_enabled` | Tracking | Predictive Anti-Clip | `bool` | T1 | `1.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `tracking.npu_safe_box_preview` | Tracking | Show Safe Box | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |
+| `tracking.npu_bounds_x` | Tracking | Safe Box Width X | `float` | T1 | `0.35` | `[0.08, 1.20]` | m | — | persist, app, undoable |
+| `tracking.npu_bounds_y` | Tracking | Safe Box Height Y | `float` | T1 | `0.22` | `[0.08, 1.00]` | m | — | persist, app, undoable |
+| `tracking.npu_bounds_z` | Tracking | Safe Box Depth Z | `float` | T1 | `0.30` | `[0.08, 1.20]` | m | — | persist, app, undoable |
+| `tracking.npu_soft_elasticity` | Tracking | Wall Elasticity | `float` | T1 | `0.35` | `[0.05, 0.95]` | — | — | persist, app, undoable |
+| `tracking.npu_max_pitch_deg` | Tracking | Max Head Pitch | `float` | T1 | `42.0` | `[15.0, 78.0]` | deg | — | persist, app, undoable |
+| `tracking.npu_anti_clip_margin` | Tracking | Anti-Clip Margin | `float` | T1 | `0.035` | `[0.005, 0.150]` | m | — | persist, app, undoable |
 | `output.resolution` | Output | Resolution Preset | `enum` | T4 | `1.0` | `[0.0, 3.0]` | — | — | persist, project, undoable |
 | `output.fps` | Output | Output Frame Rate | `int` | T4 | `60.0` | `[30.0, 120.0]` | fps | — | persist, project, undoable |
 | `output.premul_alpha` | Output | Premultiplied Alpha | `bool` | T4 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |

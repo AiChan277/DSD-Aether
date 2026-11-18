@@ -119,6 +119,10 @@ struct alignas(16) GpuFrameGlobals {
     float avatar_rot_sincos[4]{1.0f, 0.0f, 0.0f, 1.0f};
     float npr_style_params[4]{0.85f, 0.025f, 0.75f, 0.85f};
     float npr_style_params2[4]{0.75f, 0.85f, 0.65f, 0.0f};
+    // xyz = smoothed SpringBone hair velocity (m/s), w = pre-quantization GI bleed strength k_gi
+    float hair_velocity_ws[4]{0.0f, 0.0f, 0.0f, 0.75f};
+    // x = Kuwahara/painterly flatten, y = DoG ink boost, z = anime paper warmth, w = rim depth offset (px)
+    float filter_pro_params[4]{0.65f, 0.70f, 0.22f, 3.0f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

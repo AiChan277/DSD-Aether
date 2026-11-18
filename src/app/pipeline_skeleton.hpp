@@ -40,7 +40,8 @@ struct SkinningSnapshot {
     std::array<aether::animation::SpringColliderOverlay, aether::animation::kMaxOverlayColliders> spring_colliders{};
     std::array<aether::animation::SpringSegmentOverlay, aether::animation::kMaxOverlaySpringSegments>
         spring_segments{};
-    uint64_t reserved_[1]{};
+    std::array<float, 3> hair_velocity_ws{0.0f, 0.0f, 0.0f};
+    uint32_t reserved_pad2_{0};
 };
 
 struct TrackingHudSnapshot {
@@ -173,6 +174,11 @@ class PipelineSkeleton {
     /** Wait-free audio lip-sync parameter update (`HR-02`) called by T3. */
     void set_audio_lipsync_params(bool assist_enabled, float mic_gain, float noise_gate_db) noexcept;
 
+    /** Wait-free NPU movement safe-zone bounding box & anti-clipping config push to T1 (`Task 8`). */
+    void set_movement_bounds_config(const tracking::NpuMovementBoundsConfig& cfg) noexcept {
+        (void)movement_bounds_mailbox_.store(cfg);
+    }
+
     [[nodiscard]] TrackingHudSnapshot latest_tracking_hud() noexcept;
     [[nodiscard]] bool acquire_live_preview(tracking::LiveCameraPreviewFrame& out) noexcept;
     [[nodiscard]] TelemetrySnapshot latest_telemetry() noexcept;
@@ -214,6 +220,7 @@ class PipelineSkeleton {
     ParamMailbox<float> sim_gain_mailbox_{};
     ParamMailbox<aether::animation::RestSkeletonMetrics> rest_metrics_mailbox_{};
     ParamMailbox<aether::output::OutputConfig> output_cfg_mailbox_{};
+    ParamMailbox<tracking::NpuMovementBoundsConfig> movement_bounds_mailbox_{};
     TelemetryHub telemetry_hub_{};
     aether::output::DspSyncBridge dsp_reader_bridge_{};
     uint64_t t3_dsp_stale_count_{0};

@@ -140,10 +140,17 @@ template <typename T> class ParamMailbox {
     }
 
   private:
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
     struct StampedValue {
         uint64_t epoch{0};
         T value{};
     };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
     LockFreeTripleBuffer<StampedValue> buffer_{};
     alignas(64) uint64_t writer_epoch_{0};

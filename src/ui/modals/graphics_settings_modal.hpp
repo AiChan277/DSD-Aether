@@ -34,7 +34,8 @@ class GraphicsSettingsModal {
     /** Shared GPU device selector combo used by both GraphicsSettingsModal and InspectorPanel. */
     static void draw_gpu_selector_combo(const char* widget_id, bool on_air, const rhi::RhiDevice& rhi,
                                         const DevShellRenderView& render_view, AppSettings& settings,
-                                        StudioActions& actions, bool& out_settings_dirty);
+                                        StudioActions& actions, bool& out_settings_dirty,
+                                        ParamStore* opt_params = nullptr);
 
     /** Formats an 8-byte adapter LUID as 16 lowercase hex characters. */
     static void format_luid_hex(const std::array<uint8_t, 8>& luid, char* out, size_t cap) noexcept;

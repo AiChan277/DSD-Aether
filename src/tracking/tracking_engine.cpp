@@ -30,6 +30,12 @@ AetherStatus TrackingEngine::initialize(const TrackingRouterConfig& router_cfg, 
     standby_frame_ = std::make_unique<CapturedFrameBuffer>();
     face_roi_ = RoiRectNorm{};
     solver_.reset();
+    npu_post_.reset();
+    active_bounds_cfg_ = NpuMovementBoundsConfig{};
+    bounds_config_buf_.publish(active_bounds_cfg_);
+    (void)bounds_config_buf_.read_latest(active_bounds_cfg_);
+    npu_bounds_compressed_count_.store(0, std::memory_order_relaxed);
+    npu_clip_projected_count_.store(0, std::memory_order_relaxed);
     frame_seq_ = 0;
     total_frames_ = 0;
     roi_locked_.store(false, std::memory_order_release);
@@ -241,6 +247,15 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
         ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height, hands_enabled,
         cam_frame, &hand_rois.left_roi, &hand_rois.right_roi, router_.buffers().m1_hands_world.data());
 
+    (void)bounds_config_buf_.read_latest(active_bounds_cfg_);
+    const NpuPostProcessDiagnostics post_diag = npu_post_.process(out_frame, active_bounds_cfg_);
+    if (post_diag.translation_compressed) {
+        npu_bounds_compressed_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (post_diag.collision_projected) {
+        npu_clip_projected_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     out_buffer.publish(out_frame);
     ++total_frames_;
 
@@ -314,6 +329,8 @@ TrackingStatsSnapshot TrackingEngine::snapshot_stats() const {
     s.head_euler_deg[0] = last_head_pitch_deg_.load(std::memory_order_relaxed);
     s.head_euler_deg[1] = last_head_yaw_deg_.load(std::memory_order_relaxed);
     s.head_euler_deg[2] = last_head_roll_deg_.load(std::memory_order_relaxed);
+    s.npu_bounds_compressed_count = npu_bounds_compressed_count_.load(std::memory_order_relaxed);
+    s.npu_clip_projected_count = npu_clip_projected_count_.load(std::memory_order_relaxed);
     return s;
 }
 

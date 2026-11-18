@@ -100,7 +100,9 @@ struct FrameRenderRequest {
     bool encode_output_bgra{true};
     bool encode_output_nv12{true};
     bool throttle_rt_accel_struct{false};
-    uint8_t aa_mode{0}; // 0=Off, 1=FXAA, 2=TAA-Lite
+    uint8_t aa_mode{0};       // 0=Off, 1=FXAA, 2=TAA-Lite
+    uint8_t lighting_mode{1}; // 0=Traditional (No RT), 1=Hybrid RT, 2=Real-Time 2.5D Path Tracing
+    std::array<float, 3> hair_velocity_ws{0.0f, 0.0f, 0.0f};
     bool clear_swapchain{true};
     core::ViewportAspectMode viewport_aspect_mode{core::ViewportAspectMode::FitAuto};
     VkImageView swapchain_view{VK_NULL_HANDLE};
