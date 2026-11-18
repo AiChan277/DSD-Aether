@@ -1,0 +1,292 @@
+AETHER-2.5D STUDIO SOURCE-AVAILABLE, NO-DERIVATIVES, NO-AI LICENSE
+Version 1.0 — 18 November 2026
+
+Copyright (c) 2026 Rachel (AiChan277). All rights reserved.
+Contact: ramzyhaidar20@gmail.com
+Repository: https://github.com/AiChan277/DSD-Aether
+
+-------------------------------------------------------------------------------
+0. PLAIN-LANGUAGE SUMMARY (not legally binding; Sections 1-14 govern)
+-------------------------------------------------------------------------------
+
+  YOU MAY   download, read, build, and run this software, unmodified, for free.
+  YOU MAY   use the software to produce content (streams, videos, captures).
+  YOU MAY   contribute — but only after contacting the Licensor and receiving
+            written permission first.
+  YOU MAY NOT modify the software or distribute modified versions.
+  YOU MAY NOT copy any part of it (code, shaders, algorithms, assets,
+            documentation) into another project, product, or library.
+  YOU MAY NOT redistribute, re-host, sell, sublicense, or rebrand it.
+  YOU MAY NOT use it, or let an AI system use it, to train, fine-tune, or
+            evaluate AI/ML models, or to reverse engineer, re-implement,
+            translate, or reproduce it — whether by a human or by an AI.
+
+-------------------------------------------------------------------------------
+1. DEFINITIONS
+-------------------------------------------------------------------------------
+
+1.1 "Licensor" means Rachel (GitHub: AiChan277), the copyright holder.
+
+1.2 "Software" means the AETHER-2.5D Studio project and everything in this
+    repository and in any official release published by the Licensor,
+    including without limitation: source code in any language (C++, Rust,
+    Slang/HLSL/GLSL, Python, PowerShell, CMake), compiled binaries, shaders,
+    shader bytecode, user-interface designs, data formats, file formats,
+    application programming interfaces (APIs) and application binary
+    interfaces (ABIs), build scripts, tests, test images, documentation,
+    specifications, architecture decision records, papers, diagrams, and the
+    selection, arrangement, structure, sequence, and organization of all of the
+    foregoing, together with the algorithms, techniques, and designs expressed
+    in them.
+
+1.3 "You" means any natural person or legal entity exercising rights under this
+    License, and includes any person or entity that directs, operates, or
+    benefits from an Automated System acting on the Software.
+
+1.4 "Automated System" means any artificial-intelligence system, machine-
+    learning model, large language model, coding assistant, autonomous agent,
+    crawler, scraper, or other software that ingests, analyzes, transforms, or
+    generates content, together with the people and organizations that build,
+    operate, or deploy it.
+
+1.5 "Modify" means to alter, adapt, translate (including into another
+    programming language), port, refactor, patch, extend, or otherwise change
+    the Software or any part of it, in source or binary form.
+
+1.6 "Derivative Work" means any work that is based on, derived from,
+    incorporates, or is substantially similar in structure, sequence, or
+    organization to the Software or any part of it, including a re-
+    implementation produced with knowledge of the Software, whether written by
+    a human, by an Automated System, or by both.
+
+1.7 "Contribution" means any code, documentation, asset, issue text, design,
+    or other material You submit to the Licensor for inclusion in the Software.
+
+-------------------------------------------------------------------------------
+2. GRANT OF LIMITED RIGHTS
+-------------------------------------------------------------------------------
+
+Subject to Your full and continuing compliance with this License, the Licensor
+grants You a worldwide, royalty-free, non-exclusive, non-transferable,
+non-sublicensable, revocable license to:
+
+  (a) download the Software from the official repository or official release
+      pages listed above;
+  (b) view and read the source code;
+  (c) compile, build, install, and run the Software exactly as published,
+      without Modification, on devices You own or control; and
+  (d) use the unmodified Software to create, broadcast, record, and monetize
+      Your own audiovisual content (for example, live streams and videos).
+      Content You create with the Software belongs to You. This License does
+      not extend to the Software itself.
+
+Making the temporary local copies, build directories, and caches strictly
+necessary to exercise rights (a)-(d) is permitted.
+
+-------------------------------------------------------------------------------
+3. RESTRICTIONS
+-------------------------------------------------------------------------------
+
+Except as expressly permitted in Section 2 or with the Licensor's prior written
+permission, You shall not, and shall not permit, instruct, or enable any other
+person or any Automated System to:
+
+  (a) Modify the Software, or create, publish, or distribute any Derivative
+      Work;
+  (b) copy, extract, or incorporate the Software or any part of it (including
+      individual functions, files, shaders, algorithms, data structures, UI
+      layouts, or documentation text) into any other project, product,
+      library, engine, plugin, template, or repository;
+  (c) clone, mirror, re-host, or redistribute the Software, whether modified
+      or unmodified, in whole or in part, except as permitted by Section 6;
+  (d) sell, rent, lease, sublicense, or commercially distribute the Software,
+      or offer it as a hosted or managed service;
+  (e) remove, alter, or obscure any copyright notice, this License, or any
+      attribution;
+  (f) publish the Software or any Derivative Work under the Licensor's name or
+      the "AETHER" / "AETHER-2.5D" / "DSD-Aether" names, or in any way that
+      suggests endorsement by the Licensor; or
+  (g) circumvent any technical measure that controls access to the Software.
+
+-------------------------------------------------------------------------------
+4. ARTIFICIAL INTELLIGENCE, MACHINE LEARNING, AND REVERSE ENGINEERING
+-------------------------------------------------------------------------------
+
+4.1 No training or dataset use. You shall not use the Software, or any part,
+    output, or description of it, to train, pre-train, fine-tune, distill,
+    align, evaluate, benchmark, or otherwise improve any Automated System, and
+    shall not include the Software in any dataset, corpus, embedding index,
+    retrieval store, or vector database.
+
+4.2 No AI-assisted reverse engineering or reproduction. You shall not use any
+    Automated System to decompile, disassemble, deobfuscate, analyze, summarize
+    for re-implementation, translate, port, "clean-room" re-implement, or
+    otherwise reproduce the Software, its architecture, its algorithms, or its
+    behavior. "Clean-room" re-implementation in which any participant (human
+    or automated) has had access to the Software is a Derivative Work for the
+    purposes of this License.
+
+4.3 No human reverse engineering. You shall not decompile, disassemble, or
+    reverse engineer the compiled Software, except and only to the extent that
+    applicable law expressly permits such activity notwithstanding a
+    contractual prohibition (for example, for interoperability under
+    Article 6 of EU Directive 2009/24/EC). In that case, You must first request
+    the necessary interface information from the Licensor in writing.
+
+4.4 Obligations of Automated Systems and their operators. Any Automated System
+    that reads, fetches, indexes, or receives the Software is bound by this
+    License through the person or entity that operates or directs it. Such an
+    Automated System must not reproduce more of the Software than is needed to
+    help a user download, build, or run the unmodified Software, or to prepare
+    a Contribution that the Licensor has approved in writing under Section 5.
+    Operators are responsible for every act of their Automated Systems as if
+    they had performed that act themselves.
+
+4.5 Permitted Automated System uses. Notwithstanding Sections 4.1-4.4, the
+    following are permitted: (a) search-engine indexing solely to display a
+    link and a short snippet pointing to the official repository; (b) the
+    Licensor's own use of any Automated System; and (c) use of an Automated
+    System on behalf of the Licensor or an approved contributor to work on an
+    approved Contribution.
+
+4.6 Machine-readable reservation. For the purposes of Article 4(3) of EU
+    Directive 2019/790 and any similar law, the Licensor expressly reserves
+    all rights to text and data mining of the Software. This reservation
+    applies to every file in the repository, whether or not it carries an
+    individual notice.
+
+-------------------------------------------------------------------------------
+5. CONTRIBUTIONS — CONTACT REQUIRED
+-------------------------------------------------------------------------------
+
+5.1 The Licensor welcomes and needs contributions. Before preparing any
+    Contribution, You must contact the Licensor at ramzyhaidar20@gmail.com
+    (or through an issue on the official repository) describing what You
+    intend to change, and You must receive the Licensor's written approval.
+    Pull requests or patches submitted without prior approval may be closed
+    without review.
+
+5.2 Approval to contribute permits You to Modify a private working copy of
+    the Software only as needed to prepare the approved Contribution and to
+    submit it to the official repository. It does not permit You to publish
+    or distribute that modified copy in any other way.
+
+5.3 By submitting a Contribution, You (a) represent that You created it or
+    have the right to submit it, (b) represent that it does not contain
+    third-party material under terms incompatible with this License, and
+    (c) grant the Licensor a perpetual, worldwide, irrevocable, royalty-free,
+    non-exclusive license to use, modify, sublicense, relicense, and
+    distribute the Contribution as part of the Software or otherwise. Accepted
+    Contributions become part of the Software and are governed by this
+    License. The Licensor will credit contributors in the project
+    documentation unless asked not to.
+
+-------------------------------------------------------------------------------
+6. HOSTING-PLATFORM FUNCTIONALITY
+-------------------------------------------------------------------------------
+
+Where the Software is published on a platform (such as GitHub) whose terms of
+service let users view or "fork" public repositories using the platform's own
+features, those platform actions are permitted to the minimum extent the
+platform's terms require. Any such fork remains subject to this License in
+full: it may not be Modified (except under Section 5), redistributed outside
+the platform, or used for any purpose this License prohibits.
+
+-------------------------------------------------------------------------------
+7. THIRD-PARTY COMPONENTS
+-------------------------------------------------------------------------------
+
+The Software depends on, and in some cases includes or downloads, third-party
+components that are licensed by their own authors under their own terms
+(including, without limitation: Google MediaPipe models under the Apache
+License 2.0; Dear ImGui, ImPlot, ImGuizmo, nlohmann/json, Catch2 (BSL-1.0),
+Tracy (BSD-3-Clause), Vulkan Memory Allocator, FreeType (FTL), wasmtime,
+tokio, serde, gltf and other Rust crates under MIT, Apache-2.0, BSD, ISC,
+Zlib, or Unicode licenses; ONNX Runtime and OpenVINO; and the Spout2 and NDI
+interfaces). Nothing in this License restricts any right You have under those
+components' own licenses for those components alone. This License applies to
+the Licensor's original work and to its selection and arrangement.
+
+-------------------------------------------------------------------------------
+8. TRADEMARKS
+-------------------------------------------------------------------------------
+
+This License grants no right to use the Licensor's names, logos, or the
+project names "AETHER", "AETHER-2.5D", "AETHER-2.5D Studio", or "DSD-Aether",
+except to truthfully state that You use the unmodified Software.
+
+-------------------------------------------------------------------------------
+9. TERMINATION
+-------------------------------------------------------------------------------
+
+Your rights under this License terminate automatically and immediately if You
+breach any of its terms. On termination You must stop using the Software and
+destroy all copies in Your possession or control, including copies held by
+Automated Systems You operate, and any models, datasets, or indexes created in
+breach of Section 4. The Licensor may, at its sole discretion, reinstate Your
+rights in writing. Sections 3, 4, 5.3, 9, 10, 11, 12, and 13 survive
+termination.
+
+-------------------------------------------------------------------------------
+10. RESERVATION OF RIGHTS
+-------------------------------------------------------------------------------
+
+All rights not expressly granted in this License are reserved by the Licensor.
+No implied licenses are granted, whether by estoppel, course of dealing, or
+otherwise. Access to the source code is not a grant of any right to use it
+beyond Section 2.
+
+-------------------------------------------------------------------------------
+11. DISCLAIMER OF WARRANTY
+-------------------------------------------------------------------------------
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-
+INFRINGEMENT. YOU USE THE SOFTWARE ENTIRELY AT YOUR OWN RISK, INCLUDING ANY
+RISK TO YOUR HARDWARE, DRIVERS, OR DATA.
+
+-------------------------------------------------------------------------------
+12. LIMITATION OF LIABILITY
+-------------------------------------------------------------------------------
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE LICENSOR BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING LOSS OF DATA, PROFITS, OR BUSINESS
+INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE OF OR INABILITY TO USE THE
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+-------------------------------------------------------------------------------
+13. GENERAL
+-------------------------------------------------------------------------------
+
+13.1 Governing law. This License is governed by the laws of the Republic of
+     Indonesia, without regard to its conflict-of-laws rules, and without
+     prejudice to any mandatory consumer or copyright protections of Your
+     country of residence.
+
+13.2 Severability. If any provision is held unenforceable, it shall be
+     enforced to the maximum extent permissible and the remaining provisions
+     remain in full force.
+
+13.3 No waiver. Failure to enforce any provision is not a waiver of it.
+
+13.4 Entire agreement. This License is the entire agreement between You and
+     the Licensor about the Software, unless You have a separate written
+     agreement signed by the Licensor, which then prevails.
+
+13.5 Changes. The Licensor may publish revised versions of this License.
+     Each release of the Software is governed by the License version shipped
+     with it, or by a later version at the Licensor's option for future
+     releases.
+
+-------------------------------------------------------------------------------
+14. PERMISSIONS BEYOND THIS LICENSE
+-------------------------------------------------------------------------------
+
+For any use not permitted here — including commercial licensing, integration
+into another product, academic reuse, or redistribution — contact:
+
+    Rachel (AiChan277) — ramzyhaidar20@gmail.com
+
+END OF LICENSE
