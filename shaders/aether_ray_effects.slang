@@ -43,12 +43,91 @@ float3 sample_cosine_hemisphere(float3 n, float u1, float u2) {
     return normalize(t * x + b * y + n * z);
 }
 
-// Pass 4: Inline RayQuery soft directional cone shadows, occluded Fresnel rim, and half-res diffuse bounce (§10.6).
-// PushConstants:
-//   param0: rt_shadow_raw storage slot
-//   param1: rim_occ_raw storage slot
-//   param2: bounce_half storage slot
-//   param3: (high 16 = half_w | low 16 = flags)
+// Keep hemisphere bounce rays safely above N_geom horizon plane (never used to bend shadow rays).
+float3 fold_ray_above_geom_horizon(float3 dir, float3 geom_n, float min_ndot) {
+    float d = dot(dir, geom_n);
+    if (d < min_ndot) {
+        float3 tang = dir - geom_n * d;
+        float tang_len2 = dot(tang, tang);
+        float3 refl = (tang_len2 > 1e-8)
+                          ? normalize(tang * rsqrt(tang_len2) * sqrt(max(1.0 - min_ndot * min_ndot, 0.0)) +
+                                      geom_n * max(abs(d), min_ndot + 0.03))
+                          : geom_n;
+        return normalize_safe(refl, geom_n);
+    }
+    return dir;
+}
+
+bool passes_rt_alpha_test(uint tri_id, float2 bary) {
+    if (g_Pc.draw_data_bda == 0ul || g_Pc.vertex_buf_bda == 0ul || g_Pc.aux_buf_bda == 0ul) {
+        return true;
+    }
+    uint4 meta = AETHER_LOAD(uint4, g_Pc.draw_data_bda, tri_id);
+    GpuMaterial hmat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, meta.w);
+    if ((hmat.extra_slots[3] == 0u) && (hmat.toon_params.w <= 0.001)) {
+        return true;
+    }
+    GpuSkinnedVertex v0 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.x);
+    GpuSkinnedVertex v1 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.y);
+    GpuSkinnedVertex v2 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.z);
+    float w0 = 1.0 - bary.x - bary.y;
+    float2 uv_hit = v0.uv * w0 + v1.uv * bary.x + v2.uv * bary.y;
+    float alpha = aether_sample_level(hmat.tex_slots.x, kSamplerLinearClamp, uv_hit, 0).a * hmat.lit_color.a;
+    float cutoff = (hmat.toon_params.w > 0.001) ? hmat.toon_params.w : 0.5;
+    return alpha >= cutoff;
+}
+
+float3 eval_bounce_hit_radiance(uint tri_id, float2 bary, float3 hit_world, float3 bdir, float3 key_dir,
+                                float3 key_col, float3 fill_col, GpuFrameGlobals fg, int2 max_p) {
+    if (g_Pc.draw_data_bda == 0ul || g_Pc.vertex_buf_bda == 0ul || g_Pc.aux_buf_bda == 0ul) {
+        return fill_col * 0.20;
+    }
+    uint4 meta = AETHER_LOAD(uint4, g_Pc.draw_data_bda, tri_id);
+    GpuSkinnedVertex v0 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.x);
+    GpuSkinnedVertex v1 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.y);
+    GpuSkinnedVertex v2 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.z);
+    float w0 = 1.0 - bary.x - bary.y;
+    float2 uv_hit = v0.uv * w0 + v1.uv * bary.x + v2.uv * bary.y;
+
+    GpuMaterial hmat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, meta.w);
+    float3 hit_albedo = aether_sample_level(hmat.tex_slots.x, kSamplerLinearClamp, uv_hit, 0).rgb * hmat.lit_color.rgb;
+    float3 hit_n = normalize_safe(
+        v0.true_norm_hair.xyz * w0 + v1.true_norm_hair.xyz * bary.x + v2.true_norm_hair.xyz * bary.y, -bdir);
+    if (dot(hit_n, bdir) > 0.0 && ((hmat.extra_slots[2] & 1u) != 0u)) {
+        hit_n = -hit_n;
+    }
+
+    float hit_ndl = saturate(dot(hit_n, key_dir) * 0.65 + 0.35);
+    float3 hit_rad = hit_albedo * (key_col * hit_ndl * 0.78 + fill_col * 0.22) + hmat.emission_and_shift.rgb;
+
+    // Blend temporal prev_hdr ONLY when hit_world is actually visible on screen (depth match within 3.5 cm).
+    if ((g_Pc.param3 & 1u) != 0u && fg.gbuffer_ids[1].w != 0xFFFFFFFFu) {
+        float4 hit_clip = mul_col(fg.view_proj, float4(hit_world, 1.0));
+        if (hit_clip.w > 1e-4) {
+            float2 hit_uv = ndc_to_screen_uv(hit_clip.xy / hit_clip.w);
+            if (all(hit_uv > 0.002) && all(hit_uv < 0.998)) {
+                int2 hp = clamp(int2(hit_uv * fg.viewport_size.xy), int2(0, 0), max_p);
+                float h_depth = aether_load(fg.gbuffer_extra_ids[0].x, hp).x;
+                if (h_depth < 0.9999 && (h_depth + fg.proj.col2.z) < 0.0) {
+                    float scene_vz = -fg.proj.col3.z / (h_depth + fg.proj.col2.z);
+                    float hit_vz = mul_col(fg.view, float4(hit_world, 1.0)).z;
+                    if (abs(hit_vz - scene_vz) < 0.04) {
+                        float3 prev_hdr =
+                            aether_sample_level(fg.gbuffer_ids[1].w, kSamplerLinearClamp, hit_uv, 0).rgb;
+                        hit_rad = lerp(hit_rad, prev_hdr, 0.40);
+                    }
+                }
+            }
+        }
+    }
+    return hit_rad;
+}
+
+// Pass 4: Dual-Normal 4-Mask Alpha-Tested RayQuery Shadows, Rim Occ & True-Albedo 1-Bounce GI.
+// Outputs:
+//   param0 (rt_shadow_raw): float4(shadow_vis, min_hit_t_norm, 0.0, 1.0)
+//   param1 (rim_occ_raw):   float4(rim_vis, rim_t, 0.0, 1.0)
+//   param2 (bounce_half):   float4(indirect_diffuse_chroma_rgb, 1.0)
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs_main(uint3 tid : SV_DispatchThreadID) {
@@ -59,7 +138,6 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    int3 p = int3(int2(tid.xy), 0);
     int2 ip = int2(tid.xy);
     int2 max_p = int2(int(w) - 1, int(h) - 1);
     uint depth_slot = fg.gbuffer_extra_ids[0].x;
@@ -76,16 +154,20 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     }
 
     uint gb_n_slot = fg.gbuffer_ids[0].x;
-    uint gb_mv_slot = fg.gbuffer_ids[0].y;
     uint gb_mat_slot = fg.gbuffer_ids[0].z;
     uint gb_misc_slot = fg.gbuffer_ids[0].w;
+
     float3 view_n = oct_decode(aether_load(gb_n_slot, ip).xy);
     float3 view_nr = oct_decode(aether_load(gb_n_slot, clamp(ip + int2(1, 0), int2(0, 0), max_p)).xy);
     float3 view_nd = oct_decode(aether_load(gb_n_slot, clamp(ip + int2(0, 1), int2(0, 0), max_p)).xy);
     float curvature = saturate(length(view_nr - view_n) + length(view_nd - view_n));
-    float4 misc = aether_load(gb_misc_slot, ip);
 
-    // Reconstruct un-flattened world position and geometric ray origin (§10.4)
+    float4 misc = aether_load(gb_misc_slot, ip);
+    uint packed_mat = aether_uload(gb_mat_slot, ip).x;
+    uint rt_class = (packed_mat >> 10u) & 3u;
+    bool is_face_px = (rt_class == 0u) || (misc.y > 0.5);
+
+    // Reconstruct un-flattened world position & Dual-Normal vectors (N_proxy + N_geom)
     float true_view_z = -fg.camera_pos_world.w;
     if (hw_depth + fg.proj.col2.z < 0.0) {
         true_view_z = -fg.proj.col3.z / (hw_depth + fg.proj.col2.z);
@@ -95,12 +177,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         fg.proj, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
+    float3 view_geom_n = oct_decode(misc.zw);
+    float3 world_geom_n = normalize_safe(mul_col3(fg.inv_view, view_geom_n), world_n);
 
-    // Spherized proxy normal offset along avatar chest/neck proxy center prevents low-poly chord self-shadowing
-    float3 torso_center = fg.avatar_pos_scale.xyz + float3(0.0, 1.15 * max(fg.avatar_pos_scale.w, 0.1), 0.0);
-    float3 sphere_dir = normalize_safe(world_pos - torso_center, world_n);
-    float3 spherized_n = normalize_safe(lerp(world_n, sphere_dir, 0.30 + 0.25 * curvature), world_n);
-    float3 ray_origin = world_pos + spherized_n * (0.011 + 0.0018 * abs(true_view_z) + 0.012 * curvature);
+    // Dual-Normal Ray Launching: offset RayOrigin along true N_geom
+    float curvature_bias = 0.0020 + 0.0014 * abs(true_view_z) + 0.006 * curvature;
+    float3 ray_origin = world_pos + world_geom_n * max(0.0015, curvature_bias);
 
     uint frame_idx = fg.state_u32.x;
     uint lighting_mode = (fg.state_u32.w >> 10u) & 3u;
@@ -108,16 +190,21 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float j0 = ign_blue_noise(tid.xy, frame_idx);
     float j1 = ign_blue_noise(tid.xy ^ uint2(31u, 17u), frame_idx + 17u);
 
-    // Exclude HairCast instances (0x04) from face-SDF pixels so anime face shadows stay clean (§10.6)
-    uint trace_mask = (misc.y > 0.5) ? 0xFBu : 0xFFu;
+    // FaceSkin (0x01) excludes self-intersection from facial polygons; traces Hair (0x02) | HandsProps (0x04) | BodyCloth (0x08).
+    uint shadow_mask = is_face_px ? 0xFEu : 0xFFu;
 
-    // 1) Soft cone directional RT shadows (antithetic stratified samples for smooth penumbra)
+    // 1) Alpha-tested soft cone directional RT shadows
     float shadow_vis = 1.0;
     float min_t_norm = 1.0;
     float weight_sum = 0.0;
     float vis_accum = 0.0;
 
     uint light_count = min(fg.state_u32.y, 4u);
+    float3 primary_key_dir = float3(0.35, 0.55, 0.75);
+    if (light_count > 0u) {
+        primary_key_dir = compute_world_light_dir(fg.lights[0], world_pos);
+    }
+
     for (uint li = 0u; li < light_count; ++li) {
         GpuLight l = fg.lights[li];
         bool enabled = (l.role_and_flags.y & 1u) != 0u;
@@ -126,55 +213,60 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             continue;
         }
         float3 ldir = compute_world_light_dir(l, world_pos);
-        float ndl_ray = dot(world_n, ldir);
+        float ndl_geom = dot(world_geom_n, ldir);
         float lw = max(luminance(l.color_intensity.rgb), 0.1);
-        float term_fade = smoothstep(0.02, 0.22, ndl_ray);
-        if (term_fade <= 0.001) {
-            vis_accum += lw;
+
+        // Smooth terminator factor on non-face surfaces: facing-away triangles enter shadow (0.0), NEVER force 1.0!
+        float geom_face = is_face_px ? 1.0 : smoothstep(-0.20, 0.06, ndl_geom);
+        if (geom_face <= 0.001) {
             weight_sum += lw;
             continue;
         }
-        float cone_r = max(l.direction_radius.w, is_path_trace ? 0.032 : 0.02);
-        // Smooth curvature-scaled t_min bias prevents jagged triangles on neck/chest self-occluding
-        float tmin_bias = 0.018 + 0.028 * (1.0 - saturate(ndl_ray)) + 0.024 * curvature;
-        float3 light_origin = ray_origin + spherized_n * (0.008 * curvature + 0.006 * (1.0 - saturate(ndl_ray)));
 
-        RayDesc r0 = {};
-        r0.Origin = light_origin;
-        r0.Direction = sample_cone(ldir, cone_r, j0, j1);
-        r0.TMin = tmin_bias;
-        r0.TMax = 2.8;
+        // Respect true fixture angular radius (0.53 deg sun, 0.8 deg Dedolight, soft SkyPanel/Window)
+        float cone_r = max(l.direction_radius.w, 0.0045);
+        float tmin_bias = is_face_px ? 0.004 : (0.006 + 0.012 * (1.0 - saturate(ndl_geom)) + 0.010 * curvature);
+        float3 light_origin = ray_origin + world_geom_n * (0.0015 + 0.003 * curvature);
 
-        RayQuery<RAY_FLAG_NONE> q0;
-        q0.TraceRayInline(g_Tlas, RAY_FLAG_NONE, trace_mask, r0);
-        q0.Proceed();
-        float s0 = 1.0;
-        if (q0.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-            min_t_norm = min(min_t_norm, clamp(q0.CommittedRayT() / 0.45, 0.0, 1.0));
-            s0 = 0.0;
+        uint s_count = (cone_r >= 0.05) ? 4u : 2u;
+        float s_accum = 0.0;
+        for (uint si = 0u; si < s_count; ++si) {
+            float su0 = frac(j0 + 0.25 * float(si) + 0.125 * float(si & 1u));
+            float su1 = frac(j1 + 0.618034 * float(si));
+            RayDesc r = {};
+            r.Origin = light_origin;
+            r.Direction = sample_cone(ldir, cone_r, su0, su1);
+            r.TMin = tmin_bias;
+            r.TMax = 2.8;
+
+            RayQuery<RAY_FLAG_NONE> q;
+            q.TraceRayInline(g_Tlas, RAY_FLAG_NONE, shadow_mask, r);
+            while (q.Proceed()) {
+                if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+                    if (passes_rt_alpha_test(q.CandidateInstanceID() + q.CandidatePrimitiveIndex(),
+                                             q.CandidateTriangleBarycentrics())) {
+                        q.CommitNonOpaqueTriangleHit();
+                    }
+                }
+            }
+            if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+                min_t_norm = min(min_t_norm, clamp(q.CommittedRayT() / 0.45, 0.0, 1.0));
+            } else {
+                s_accum += 1.0;
+            }
         }
 
-        RayDesc r1 = {};
-        r1.Origin = light_origin;
-        r1.Direction = sample_cone(ldir, cone_r, frac(j0 + 0.5), frac(j1 + 0.5));
-        r1.TMin = tmin_bias;
-        r1.TMax = 2.8;
-
-        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q1;
-        q1.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, trace_mask, r1);
-        q1.Proceed();
-        float s1 = (q1.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0 : 1.0;
-
-        float vis = lerp(1.0, 0.5 * (s0 + s1), term_fade);
+        float vis = (s_accum / float(s_count)) * geom_face;
         vis_accum += lw * vis;
         weight_sum += lw;
     }
     if (weight_sum > 1e-5) {
         shadow_vis = vis_accum / weight_sum;
     }
+
     aether_store(g_Pc.param0, tid.xy, float4(shadow_vis, min_t_norm, 0.0, 1.0));
 
-    // 2) Occluded Fresnel rim trace (only traced where Fresnel > 0.2 per §10.6)
+    // 2) Occluded Fresnel rim trace (only traced where Fresnel > 0.2)
     float3 view_v = normalize_safe(-view_pos, float3(0.0, 0.0, 1.0));
     float fresnel = pow(saturate(1.0 - abs(dot(view_n, view_v))), 2.5);
     float rim_vis = 1.0;
@@ -188,11 +280,18 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         RayDesc rr = {};
         rr.Origin = ray_origin;
         rr.Direction = j_rim;
-        rr.TMin = 0.014 + 0.016 * curvature;
+        rr.TMin = 0.006 + 0.010 * curvature;
         rr.TMax = max(fg.light_params.y, 0.45);
-        RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> qr;
-        qr.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFFu, rr);
-        qr.Proceed();
+        RayQuery<RAY_FLAG_NONE> qr;
+        qr.TraceRayInline(g_Tlas, RAY_FLAG_NONE, 0xFFu, rr);
+        while (qr.Proceed()) {
+            if (qr.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+                if (passes_rt_alpha_test(qr.CandidateInstanceID() + qr.CandidatePrimitiveIndex(),
+                                         qr.CandidateTriangleBarycentrics())) {
+                    qr.CommitNonOpaqueTriangleHit();
+                }
+            }
+        }
         if (qr.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
             rim_vis = 0.0;
             rim_t = clamp(qr.CommittedRayT() / rr.TMax, 0.0, 1.0);
@@ -200,7 +299,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     }
     aether_store(g_Pc.param1, tid.xy, float4(rim_vis, rim_t, 0.0, 1.0));
 
-    // 3) 1-Bounce Indirect Color Bleeding + Path Tracing GI (half-res spatial-temporal bounce_half)
+    // 3) True-Albedo 1-Bounce Indirect Color Bleeding + Path Tracing GI (half-res -> denoised by SVGF)
     if (write_half) {
         float3 key_col = (light_count > 0u) ? fg.lights[0].color_intensity.rgb : float3(1.0, 0.96, 0.92);
         float3 fill_col = (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u)
@@ -212,54 +311,34 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         for (uint si = 0u; si < sample_n; ++si) {
             float u1 = frac(j0 + 0.381966 * float(si));
             float u2 = frac(j1 + 0.618034 * float(si));
-            float3 bdir = sample_cosine_hemisphere(world_n, u1, u2);
+            float3 bdir = fold_ray_above_geom_horizon(sample_cosine_hemisphere(world_n, u1, u2), world_geom_n, 0.05);
             RayDesc rb = {};
             rb.Origin = ray_origin;
             rb.Direction = bdir;
-            rb.TMin = 0.014 + 0.014 * curvature;
-            rb.TMax = max(fg.light_params.z, is_path_trace ? 0.42 : 0.28);
+            rb.TMin = 0.005 + 0.008 * curvature;
+            rb.TMax = max(fg.light_params.z, is_path_trace ? 0.45 : 0.28);
             RayQuery<RAY_FLAG_NONE> qb;
             qb.TraceRayInline(g_Tlas, RAY_FLAG_NONE, 0xFFu, rb);
-            qb.Proceed();
+            while (qb.Proceed()) {
+                if (qb.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+                    if (passes_rt_alpha_test(qb.CandidateInstanceID() + qb.CandidatePrimitiveIndex(),
+                                             qb.CandidateTriangleBarycentrics())) {
+                        qb.CommitNonOpaqueTriangleHit();
+                    }
+                }
+            }
             if (qb.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
                 float hit_t = qb.CommittedRayT();
                 float atten = 1.0 - saturate(hit_t / rb.TMax);
                 float3 hit_world = rb.Origin + rb.Direction * hit_t;
-                float4 hit_clip = mul_col(fg.view_proj, float4(hit_world, 1.0));
-                float3 hit_chroma = key_col;
-
-                if (hit_clip.w > 1e-4) {
-                    float2 hit_uv = ndc_to_screen_uv(hit_clip.xy / hit_clip.w);
-                    if (all(hit_uv > 0.002) && all(hit_uv < 0.998)) {
-                        int2 hp = clamp(int2(hit_uv * fg.viewport_size.xy), int2(0, 0), max_p);
-                        float h_depth = aether_load(depth_slot, hp).x;
-                        uint hit_mat_id = aether_uload(gb_mat_slot, hp).x;
-                        float4 hit_misc = aether_load(gb_misc_slot, hp);
-                        if (h_depth < 0.9999 && g_Pc.aux_buf_bda != 0ul) {
-                            GpuMaterial hmat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, hit_mat_id);
-                            float3 mat_col = max(hmat.lit_color.rgb, float3(0.15, 0.15, 0.15)) *
-                                             lerp(float3(1.0, 1.0, 1.0), hmat.bounce_tint_zflat.rgb, 0.65);
-                            if (hit_misc.y > 0.5) {
-                                mat_col = lerp(mat_col, float3(0.98, 0.78, 0.68), 0.45); // Warm skin bleed
-                            }
-                            if ((g_Pc.param3 & 1u) != 0u && fg.gbuffer_ids[1].w != 0xFFFFFFFFu) {
-                                float3 prev_hdr =
-                                    aether_sample_level(fg.gbuffer_ids[1].w, kSamplerLinearClamp, hit_uv, 0).rgb;
-                                mat_col = lerp(mat_col * key_col, prev_hdr, 0.55);
-                                hit_chroma = mat_col + hmat.emission_and_shift.rgb * (is_path_trace ? 1.25 : 0.45);
-                            } else {
-                                hit_chroma = mat_col * key_col + hmat.emission_and_shift.rgb * (is_path_trace ? 1.25 : 0.45);
-                            }
-                        } else if ((g_Pc.param3 & 1u) != 0u && fg.gbuffer_ids[1].w != 0xFFFFFFFFu) {
-                            hit_chroma = aether_sample_level(fg.gbuffer_ids[1].w, kSamplerLinearClamp, hit_uv, 0).rgb;
-                        }
-                    }
-                }
-                bounce_rgb += min(hit_chroma, float3(2.5, 2.5, 2.5)) * (atten * fg.light_params.w);
+                float3 hit_chroma = eval_bounce_hit_radiance(
+                    qb.CommittedInstanceID() + qb.CommittedPrimitiveIndex(),
+                    qb.CommittedTriangleBarycentrics(),
+                    hit_world, bdir, primary_key_dir, key_col, fill_col, fg, max_p);
+                bounce_rgb += min(hit_chroma, float3(1.5, 1.5, 1.5)) * (atten * fg.light_params.w);
             } else if (is_path_trace) {
-                // Cosine-weighted soft studio sky/hair/fill bounce contribution when ray escapes silhouette
                 float sky_t = saturate(bdir.y * 0.5 + 0.5);
-                bounce_rgb += lerp(key_col * 0.12, fill_col * 0.48, sky_t) * fg.light_params.w;
+                bounce_rgb += lerp(key_col * 0.04, fill_col * 0.16, sky_t) * fg.light_params.w;
             }
         }
         bounce_rgb /= float(sample_n);

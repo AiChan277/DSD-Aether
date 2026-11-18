@@ -123,6 +123,15 @@ struct alignas(16) GpuFrameGlobals {
     float hair_velocity_ws[4]{0.0f, 0.0f, 0.0f, 0.75f};
     // x = Kuwahara/painterly flatten, y = DoG ink boost, z = anime paper warmth, w = rim depth offset (px)
     float filter_pro_params[4]{0.65f, 0.70f, 0.22f, 3.0f};
+    // x = fixture_id (0..5), y = cos_inner, z = cos_outer, w = emitter_aspect_or_ring_r
+    float photometric_params0[4]{0.0f, -1.0f, -1.0f, 2.15f};
+    // x = barndoor_softness, y = cie_sky_strength, z = ground_bounce_strength, w = exposure_flux_norm
+    float photometric_params1[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    // x = eye_catchlight_intensity, y = eye_catchlight_size, z = crease_disguise_eff, w = coaxial_flag
+    float eye_catchlight_params[4]{0.85f, 1.00f, 0.0f, 0.0f};
+    // xyz = world position of eye sphere center, w = cornea_radius (m)
+    float eye_left_center_r[4]{-0.032f, 1.40f, 0.025f, 0.014f};
+    float eye_right_center_r[4]{0.032f, 1.40f, 0.025f, 0.014f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

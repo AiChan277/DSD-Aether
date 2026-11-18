@@ -123,17 +123,19 @@ class Dx12FrameGraph {
     std::vector<uint32_t> cutout_draws_{};
     std::vector<uint32_t> transparent_draws_{};
 
-    // DXR Tier 1.1 BLAS/TLAS buffers & scratch
-    rhi::D3D12Buffer blas_opaque_buf_{};
-    rhi::D3D12Buffer blas_hair_buf_{};
+    // DXR Tier 1.1 4-Mask BLAS/TLAS buffers & scratch (FaceSkin 0x01, Hair 0x02, HandsProps 0x04, BodyCloth 0x08)
+    struct DxrBlasBucket {
+        rhi::D3D12Buffer buf{};
+        uint32_t tri_count{0};
+        uint32_t tri_offset{0};
+        uint32_t geom_count{0};
+        std::vector<uint8_t> geom_bytes{};
+    };
+    std::array<DxrBlasBucket, 4> blas_buckets_{};
+    rhi::D3D12Buffer rt_index_buf_{};
+    rhi::D3D12Buffer rt_tri_meta_buf_{};
     rhi::D3D12Buffer tlas_buf_{};
     rhi::D3D12Buffer dxr_scratch_buf_{};
-    uint32_t blas_opaque_tri_count_{0};
-    uint32_t blas_hair_tri_count_{0};
-    std::vector<uint8_t> opaque_geom_bytes_{}; // D3D12_RAYTRACING_GEOMETRY_DESC[] allocated at bind_avatar time
-    uint32_t opaque_geom_count_{0};
-    std::vector<uint8_t> hair_geom_bytes_{};
-    uint32_t hair_geom_count_{0};
 
     // Size-dependent render targets
     rhi::D3D12Texture depth_stencil_{};
@@ -151,6 +153,8 @@ class Dx12FrameGraph {
     rhi::D3D12Texture rim_occ_denoised_{};
     rhi::D3D12Texture prev_rim_occ_{};
     rhi::D3D12Texture bounce_half_{};
+    rhi::D3D12Texture bounce_denoised_{};
+    rhi::D3D12Texture prev_bounce_{};
 
     rhi::D3D12Texture hdr_scene_{};
     rhi::D3D12Texture crease_mask_{};

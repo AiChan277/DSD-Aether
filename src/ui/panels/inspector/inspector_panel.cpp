@@ -1,5 +1,6 @@
 #include "ui/panels/inspector/inspector_panel.hpp"
 
+#include "renderer/lighting_rig.hpp"
 #include "ui/modals/graphics_settings_modal.hpp"
 #include "ui/panels/viewport/camera_presets.hpp"
 #include "ui/panels/viewport/viewport_panel.hpp"
@@ -270,6 +271,21 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     actions.viewport.lighting_dirty = true;
                     settings_dirty = true;
                 }
+                if (draw_property_row(ParamId::RenderLightingFixture, params, undo, fonts, row_actions)) {
+                    const int fix_idx = std::clamp(params.get_int(ParamId::RenderLightingFixture), 0, 5);
+                    renderer::LightingRig tmp = renderer::LightingRig::default_three_point();
+                    renderer::apply_lighting_fixture_preset(
+                        tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
+                        fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
+                    (void)params.set(ParamId::RenderKeyAzimuthDeg, tmp.lights[0].orbit_azimuth_deg);
+                    (void)params.set(ParamId::RenderKeyElevationDeg, tmp.lights[0].orbit_elevation_deg);
+                    (void)params.set(ParamId::RenderKeyIntensity, tmp.lights[0].intensity);
+                    (void)params.set(ParamId::RenderFillIntensity, tmp.lights[1].intensity);
+                    (void)params.set(ParamId::RenderRimIntensity, tmp.lights[2].intensity);
+                    (void)params.set(ParamId::RenderPhotometricBeamAngleDeg, tmp.photometric_beam_angle_deg);
+                    actions.viewport.lighting_dirty = true;
+                    settings_dirty = true;
+                }
                 if (draw_property_row(ParamId::RenderCircadianEnabled, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::RenderCircadianTimezone, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::RenderCircadianTimeMinutes, params, undo, fonts, row_actions)) {
@@ -277,6 +293,11 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     settings_dirty = true;
                 }
                 static constexpr ParamId kLightingRows[] = {
+                    ParamId::RenderPhotometricBeamAngleDeg,
+                    ParamId::RenderEyeCatchlightIntensity,
+                    ParamId::RenderEyeCatchlightSize,
+                    ParamId::RenderCreaseDisguiseEnabled,
+                    ParamId::RenderCreaseDisguiseStrength,
                     ParamId::RenderFlatness,        ParamId::RenderLightScale,   ParamId::RenderKeyAzimuthDeg,
                     ParamId::RenderKeyElevationDeg, ParamId::RenderKeyIntensity, ParamId::RenderFillIntensity,
                     ParamId::RenderRimIntensity,    ParamId::RenderOutlineScale, ParamId::RenderBloomIntensity,
@@ -296,32 +317,45 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 if (draw_property_row(ParamId::RenderDebugView, params, undo, fonts, row_actions)) {
                     actions.viewport.debug_view = static_cast<uint8_t>(params.get_int(ParamId::RenderDebugView));
                 }
-                static constexpr ParamId kLive2dExtraRows[] = {
+                static constexpr ParamId kCoreRenderRows[] = {
                     ParamId::RenderTargetFps,
                     ParamId::RenderAaMode,
-                    ParamId::RenderFaceNormalFlatten,
-                    ParamId::RenderCelBandSharpness,
-                    ParamId::RenderShadowWarmCool,
-                    ParamId::RenderIndirectBleedStrength,
-                    ParamId::RenderRimDepthOffsetPx,
-                    ParamId::RenderIroTsukeStrength,
-                    ParamId::RenderCreaseStrength,
-                    ParamId::RenderHairHighlight,
-                    ParamId::RenderRimStepStrength,
-                    ParamId::Render2DFilterPro,
-                    ParamId::RenderFilterKuwaharaStrength,
-                    ParamId::RenderFilterDogInkBoost,
-                    ParamId::RenderFilterPaperWarmth,
-                    ParamId::RenderFilterPaperWarmthStrength,
                 };
-                bool style_changed = false;
-                for (const ParamId pid : kLive2dExtraRows) {
-                    style_changed |= draw_property_row(pid, params, undo, fonts, row_actions);
-                }
-                if (style_changed) {
-                    actions.viewport.lighting_dirty = true;
+                for (const ParamId pid : kCoreRenderRows) {
+                    if (draw_property_row(pid, params, undo, fonts, row_actions)) {
+                        actions.viewport.lighting_dirty = true;
+                    }
                 }
                 end_property_table();
+            }
+            if (ImGui::TreeNodeEx(tr("Lighting & Shading Detail"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                if (begin_property_table("##shading_detail")) {
+                    static constexpr ParamId kLive2dExtraRows[] = {
+                        ParamId::RenderFaceNormalFlatten,
+                        ParamId::RenderCelBandSharpness,
+                        ParamId::RenderShadowWarmCool,
+                        ParamId::RenderIndirectBleedStrength,
+                        ParamId::RenderRimDepthOffsetPx,
+                        ParamId::RenderIroTsukeStrength,
+                        ParamId::RenderCreaseStrength,
+                        ParamId::RenderHairHighlight,
+                        ParamId::RenderRimStepStrength,
+                        ParamId::Render2DFilterPro,
+                        ParamId::RenderFilterKuwaharaStrength,
+                        ParamId::RenderFilterDogInkBoost,
+                        ParamId::RenderFilterPaperWarmth,
+                        ParamId::RenderFilterPaperWarmthStrength,
+                    };
+                    bool style_changed = false;
+                    for (const ParamId pid : kLive2dExtraRows) {
+                        style_changed |= draw_property_row(pid, params, undo, fonts, row_actions);
+                    }
+                    if (style_changed) {
+                        actions.viewport.lighting_dirty = true;
+                    }
+                    end_property_table();
+                }
+                ImGui::TreePop();
             }
             ImGui::Spacing();
             if (params.get_bool(ParamId::RenderCircadianEnabled)) {

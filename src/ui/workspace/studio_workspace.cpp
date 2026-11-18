@@ -416,6 +416,12 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.filter_dog_ink_boost = params_.get_float(ParamId::RenderFilterDogInkBoost);
     v.filter_paper_warmth = params_.get_bool(ParamId::RenderFilterPaperWarmth);
     v.filter_paper_warmth_strength = params_.get_float(ParamId::RenderFilterPaperWarmthStrength);
+    v.lighting_fixture = std::clamp(params_.get_int(ParamId::RenderLightingFixture), 0, 5);
+    v.photometric_beam_angle_deg = params_.get_float(ParamId::RenderPhotometricBeamAngleDeg);
+    v.eye_catchlight_intensity = params_.get_float(ParamId::RenderEyeCatchlightIntensity);
+    v.eye_catchlight_size = params_.get_float(ParamId::RenderEyeCatchlightSize);
+    v.crease_disguise_enabled = params_.get_bool(ParamId::RenderCreaseDisguiseEnabled);
+    v.crease_disguise_strength = params_.get_float(ParamId::RenderCreaseDisguiseStrength);
     v.circadian_enabled = params_.get_bool(ParamId::RenderCircadianEnabled);
     v.circadian_timezone_idx = params_.get_int(ParamId::RenderCircadianTimezone);
     v.circadian_time_override_min = params_.get_int(ParamId::RenderCircadianTimeMinutes);

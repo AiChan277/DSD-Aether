@@ -103,6 +103,24 @@ pub fn oct_encode_snorm16_u32(v: [f32; 3]) -> u32 {
     u32::from(ix as u16) | (u32::from(iy as u16) << 16)
 }
 
+/// Encodes a unit normal into biased `2 x 15-bit` octahedral coordinates with bit 31 set as validity flag.
+#[inline]
+#[must_use]
+pub fn oct_encode_healed_valid_u32(v: [f32; 3]) -> u32 {
+    let n = Vec3::from_array(v).normalize_or(Vec3::Z);
+    let denom = n.x.abs() + n.y.abs() + n.z.abs();
+    let (mut ox, mut oy) = (n.x / denom.max(1e-6), n.y / denom.max(1e-6));
+    if n.z < 0.0 {
+        let sx = ox;
+        let sy = oy;
+        ox = (1.0 - sy.abs()) * if sx >= 0.0 { 1.0 } else { -1.0 };
+        oy = (1.0 - sx.abs()) * if sy >= 0.0 { 1.0 } else { -1.0 };
+    }
+    let ix = ((ox * 16_383.0).round().clamp(-16_383.0, 16_383.0) as i32 + 16_383) as u32;
+    let iy = ((oy * 16_383.0).round().clamp(-16_383.0, 16_383.0) as i32 + 16_383) as u32;
+    (1u32 << 31) | ((iy & 0x7FFFu32) << 15) | (ix & 0x7FFFu32)
+}
+
 #[inline]
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
@@ -314,9 +332,9 @@ pub fn bake_into_arena(
         }
     }
 
-    // 4. Seam-welded smooth outline tangents (`smooth_tangent`) & body/neck shading proxy across coincident positions (§6.7)
+    // 4. Seam-welded smooth outline tangents (`smooth_tangent`) + Rule-B safe coincident-vertex healed normals
     let mut smooth_accum: AHashMap<u64, Vec3> = AHashMap::with_capacity(v_count);
-    if bake_proxy || bake_smooth_tangent {
+    if bake_smooth_tangent {
         for sm in &avatar.submeshes {
             for tri in sm.indices.chunks_exact(3) {
                 let i0 = tri[0] as usize;
@@ -337,13 +355,78 @@ pub fn bake_into_arena(
         }
     }
 
+    // Rule B coincident-vertex normal healing:
+    // ONLY average normals within the SAME submesh & material, distance < 1e-4 m, dihedral < 50 deg (dot > 0.6427876).
+    let mut vert_submesh = vec![usize::MAX; v_count];
+    for (s_idx, sm) in avatar.submeshes.iter().enumerate() {
+        for &vi in &sm.indices {
+            let idx = vi as usize;
+            if idx < v_count && vert_submesh[idx] == usize::MAX {
+                vert_submesh[idx] = s_idx;
+            }
+        }
+    }
+    let true_normals: Vec<Vec3> = avatar
+        .vertices
+        .iter()
+        .map(|rv| Vec3::from_array(rv.normal).normalize_or(Vec3::Y))
+        .collect();
+    let mut grid: AHashMap<(usize, i32, i32, i32), Vec<usize>> = AHashMap::with_capacity(v_count);
+    for (i, rv) in avatar.vertices.iter().enumerate() {
+        let s_idx = vert_submesh[i];
+        if s_idx == usize::MAX {
+            continue;
+        }
+        let gx = (rv.position[0] * 10_000.0).floor() as i32;
+        let gy = (rv.position[1] * 10_000.0).floor() as i32;
+        let gz = (rv.position[2] * 10_000.0).floor() as i32;
+        grid.entry((s_idx, gx, gy, gz)).or_default().push(i);
+    }
+    let healed_normals: Vec<Vec3> = (0..v_count)
+        .into_par_iter()
+        .map(|i| {
+            let n_i = true_normals[i];
+            let s_idx = vert_submesh[i];
+            if s_idx == usize::MAX {
+                return n_i;
+            }
+            let mat_i = avatar.submeshes[s_idx].material_index;
+            let p_i = Vec3::from_array(avatar.vertices[i].position);
+            let gx = (p_i.x * 10_000.0).floor() as i32;
+            let gy = (p_i.y * 10_000.0).floor() as i32;
+            let gz = (p_i.z * 10_000.0).floor() as i32;
+            let mut acc = n_i;
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if let Some(bucket) = grid.get(&(s_idx, gx + dx, gy + dy, gz + dz)) {
+                            for &j in bucket {
+                                if j == i || avatar.submeshes[vert_submesh[j]].material_index != mat_i {
+                                    continue;
+                                }
+                                let p_j = Vec3::from_array(avatar.vertices[j].position);
+                                if (p_i - p_j).length_squared() < 1e-8 {
+                                    let n_j = true_normals[j];
+                                    if n_i.dot(n_j) > 0.642_787_6 {
+                                        acc += n_j;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            acc.normalize_or(n_i)
+        })
+        .collect();
+
     // 5. Bake VERTEX25D + SURFACE in parallel via Rayon
     out_v25d
         .par_iter_mut()
         .zip(out_surf.par_iter_mut())
         .zip(avatar.vertices.par_iter().enumerate())
         .for_each(|((v25, vsurf), (i, rv))| {
-            let tn = Vec3::from_array(rv.normal).normalize_or(Vec3::Y);
+            let tn = true_normals[i];
 
             // Region-weighted z_flatten_weight <= 0.85 (§6.7)
             let z_flat = if rv.flatten_override >= 0.0 {
@@ -371,23 +454,14 @@ pub fn bake_into_arena(
                 acc.clamp(0.0, 0.85)
             };
 
-            // Spherized proxy normal on face; seam-welded smooth normal on body/neck to avoid low-poly facet self-shadows (§6.7)
+            // Spherized proxy normal ONLY on face vertices for analytic anime face shadow;
+            // keep all body/clothing/hair normals 100% unmodified when Disguise Low-Poly Creases is OFF.
             let proxy = if bake_proxy && is_face_vert[i] {
                 let mut d = Vec3::from_array(rv.position) - c_face_ws;
                 d.y *= 0.35;
                 let ellip = d.normalize_or(tn);
                 let alpha = smoothstep(0.4, 0.8, head_weights[i]);
                 slerp_unit(tn, ellip, alpha)
-            } else if bake_proxy {
-                let k = quantize_weld_key(rv.position, eps);
-                let smooth_n = smooth_accum
-                    .get(&k)
-                    .map_or(tn, |acc| acc.normalize_or(tn));
-                if tn.dot(smooth_n) > 0.25 {
-                    slerp_unit(tn, smooth_n, 0.90)
-                } else {
-                    tn
-                }
             } else {
                 tn
             };
@@ -425,7 +499,7 @@ pub fn bake_into_arena(
                 color_rgba8: u32::from_le_bytes(rv.color),
                 tangent_oct: oct_encode_snorm16_u32(any_tangent),
                 flags: u32::from(is_face_vert[i]),
-                _reserved: 0,
+                _reserved: oct_encode_healed_valid_u32(healed_normals[i].to_array()),
             };
         });
 

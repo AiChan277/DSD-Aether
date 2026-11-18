@@ -1,5 +1,6 @@
 #include "ui/modals/graphics_settings_modal.hpp"
 
+#include "renderer/lighting_rig.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/theme/tr.hpp"
@@ -351,7 +352,26 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                     active_tab_ = 1;
                     ImGui::Spacing();
                     if (begin_property_table("##gfx_live2d")) {
+                        if (draw_property_row(ParamId::RenderLightingFixture, params, undo, fonts, row_actions)) {
+                            const int fix_idx = std::clamp(params.get_int(ParamId::RenderLightingFixture), 0, 5);
+                            renderer::LightingRig tmp = renderer::LightingRig::default_three_point();
+                            renderer::apply_lighting_fixture_preset(
+                                tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
+                                fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
+                            (void)params.set(ParamId::RenderKeyAzimuthDeg, tmp.lights[0].orbit_azimuth_deg);
+                            (void)params.set(ParamId::RenderKeyElevationDeg, tmp.lights[0].orbit_elevation_deg);
+                            (void)params.set(ParamId::RenderKeyIntensity, tmp.lights[0].intensity);
+                            (void)params.set(ParamId::RenderFillIntensity, tmp.lights[1].intensity);
+                            (void)params.set(ParamId::RenderRimIntensity, tmp.lights[2].intensity);
+                            (void)params.set(ParamId::RenderPhotometricBeamAngleDeg, tmp.photometric_beam_angle_deg);
+                            actions.viewport.lighting_dirty = true;
+                        }
                         static constexpr ParamId kStyleRows[] = {
+                            ParamId::RenderPhotometricBeamAngleDeg,
+                            ParamId::RenderEyeCatchlightIntensity,
+                            ParamId::RenderEyeCatchlightSize,
+                            ParamId::RenderCreaseDisguiseEnabled,
+                            ParamId::RenderCreaseDisguiseStrength,
                             ParamId::RenderFlatness,
                             ParamId::RenderFaceNormalFlatten,
                             ParamId::RenderCelBandSharpness,
@@ -505,6 +525,9 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                 ParamId::RenderRimStepStrength,    ParamId::RenderBloomIntensity,
                 ParamId::RenderRtEnabled,          ParamId::Render2DFilterPro,
                 ParamId::RenderFilterKuwaharaStrength, ParamId::RenderFilterDogInkBoost,
+                ParamId::RenderLightingFixture,    ParamId::RenderPhotometricBeamAngleDeg,
+                ParamId::RenderEyeCatchlightIntensity, ParamId::RenderEyeCatchlightSize,
+                ParamId::RenderCreaseDisguiseEnabled,  ParamId::RenderCreaseDisguiseStrength,
                 ParamId::RenderFilterPaperWarmth,  ParamId::RenderFilterPaperWarmthStrength,
                 ParamId::RenderCircadianEnabled,   ParamId::RenderCircadianTimezone,
                 ParamId::RenderCircadianTimeMinutes,

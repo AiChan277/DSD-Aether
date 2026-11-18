@@ -83,7 +83,7 @@ struct ScopedUiRig {
 TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 90U); // 70 + lighting/2D Filter Pro/circadian (11) + NPU bounds (9)
+    REQUIRE(kParamCount == 96U); // 90 + photometric/catchlight (4) + [TESTING] crease disguise (2)
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);
@@ -96,6 +96,14 @@ TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project re
     REQUIRE(store.set(ParamId::AppUiScalePct, 125.0));
     REQUIRE(store.get_int(ParamId::AppUiScalePct) == 125);
     REQUIRE(store.epoch() > e0);
+
+    // Photometric fixture & [TESTING] crease disguise parameter bounds
+    // Photometric fixture, catchlight & [TESTING] crease disguise defaults + bounds
+    REQUIRE_FALSE(store.get_bool(ParamId::RenderCreaseDisguiseEnabled));
+    (void)store.set(ParamId::RenderEyeCatchlightIntensity, 9.0);
+    REQUIRE(store.get_float(ParamId::RenderEyeCatchlightIntensity) <= 2.0f);
+    (void)store.set(ParamId::RenderLightingFixture, 99.0);
+    REQUIRE(store.get_int(ParamId::RenderLightingFixture) <= 5);
 
     // Out-of-bounds + NaN clamping
     (void)store.set(ParamId::RenderFlatness, 99.0);

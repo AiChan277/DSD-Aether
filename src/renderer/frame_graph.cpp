@@ -514,6 +514,9 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
         return r;
     if (auto r = make_reg(bounce_half_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
         return r;
+    if (auto r = make_reg(bounce_denoised_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false);
+        !r)
+        return r;
     if (auto r = make_reg(crease_mask_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
         return r;
     if (auto r = make_reg(hdr_scene_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att_sampled, true, false, false); !r)
@@ -584,6 +587,8 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
     if (auto r = make_reg(prev_rt_shadow_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, hist_usage, true, false, false); !r)
         return r;
     if (auto r = make_reg(prev_rim_occ_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, hist_usage, true, false, false); !r)
+        return r;
+    if (auto r = make_reg(prev_bounce_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, hist_usage, true, false, false); !r)
         return r;
 
     {
@@ -659,6 +664,7 @@ void FrameGraph::destroy_size_dependent_targets() noexcept {
     drop(rim_occ_raw_);
     drop(rim_occ_denoised_);
     drop(bounce_half_);
+    drop(bounce_denoised_);
     drop(crease_mask_);
     drop(hdr_scene_);
     for (auto& m : bloom_mips_) {
@@ -681,6 +687,7 @@ void FrameGraph::destroy_size_dependent_targets() noexcept {
     drop(prev_normal_);
     drop(prev_rt_shadow_);
     drop(prev_rim_occ_);
+    drop(prev_bounce_);
 }
 
 Expected<void> FrameGraph::create_pipelines(bool reload_only) {
@@ -785,6 +792,12 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         bool premul_blend{false};
         bool dynamic_cull{false};
         VkPolygonMode polygon_mode{VK_POLYGON_MODE_FILL};
+        VkCompareOp depth_compare{VK_COMPARE_OP_LESS_OR_EQUAL};
+        VkCompareOp stencil_compare{VK_COMPARE_OP_ALWAYS};
+        VkStencilOp stencil_pass{VK_STENCIL_OP_REPLACE};
+        uint8_t stencil_read_mask{0xFFu};
+        uint8_t stencil_write_mask{0xFFu};
+        bool color_write_disable{false};
     };
 
     auto build_gfx = [&](const GfxDesc& gd, VkPipeline& out_pso) -> Expected<void> {
@@ -827,16 +840,16 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
         ds.depthTestEnable = gd.depth_test ? VK_TRUE : VK_FALSE;
         ds.depthWriteEnable = gd.depth_write ? VK_TRUE : VK_FALSE;
-        ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        ds.depthCompareOp = gd.depth_compare;
         if (gd.stencil_write) {
             ds.stencilTestEnable = VK_TRUE;
             VkStencilOpState st{};
             st.failOp = VK_STENCIL_OP_KEEP;
-            st.passOp = VK_STENCIL_OP_REPLACE;
+            st.passOp = gd.stencil_pass;
             st.depthFailOp = VK_STENCIL_OP_KEEP;
-            st.compareOp = VK_COMPARE_OP_ALWAYS;
-            st.compareMask = 0xFFu;
-            st.writeMask = 0xFFu;
+            st.compareOp = gd.stencil_compare;
+            st.compareMask = gd.stencil_read_mask;
+            st.writeMask = gd.stencil_write_mask;
             st.reference = 1u;
             ds.front = st;
             ds.back = st;
@@ -844,8 +857,11 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
 
         std::array<VkPipelineColorBlendAttachmentState, 4> blend_atts{};
         for (uint32_t i = 0; i < gd.color_count; ++i) {
-            blend_atts[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            blend_atts[i].colorWriteMask =
+                gd.color_write_disable
+                    ? VkColorComponentFlags{0}
+                    : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                       VK_COLOR_COMPONENT_A_BIT);
             if (gd.premul_blend) {
                 blend_atts[i].blendEnable = VK_TRUE;
                 blend_atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -1122,7 +1138,7 @@ Expected<void> FrameGraph::apply_face_sdf(const SdfBakeOutput& baked) {
     for (size_t i = 0; i < cached_materials_.size(); ++i) {
         if (!any_face_mat || target_mat[i]) {
             cached_materials_[i].tex_slots[2] = baked_face_sdf_slot_;
-            cached_materials_[i].extra_slots[2] |= AETHER_MAT_FLAG_SDF_FACE;
+            cached_materials_[i].extra_slots[2] |= (AETHER_MAT_FLAG_SDF_FACE | kMatExtraAuthoredSdfBit);
         }
     }
 
@@ -1278,6 +1294,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     OutputSlotTargets& os = out_ring_[out_slot];
     last_output_slot_ = out_slot;
     const uint32_t fslot = req.frame_slot % rhi::GpuTimingRing::kFrameSlots;
+    const uint32_t hw = std::max(w / 2u, 1u);
+    const uint32_t hh = std::max(h / 2u, 1u);
     const uint32_t gx = (w + 7u) / 8u;
     const uint32_t gy = (h + 7u) / 8u;
     const LightingRig& rig = *req.rig;
@@ -1315,7 +1333,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     fg.gbuffer_extra_ids[1] = stencil_uint_slot_;
     fg.gbuffer_extra_ids[2] = rt_shadow_denoised_.sampled_slot;
     fg.gbuffer_extra_ids[3] = rim_occ_denoised_.sampled_slot;
-    fg.gbuffer_extra_ids[4] = bounce_half_.sampled_slot;
+    fg.gbuffer_extra_ids[4] = bounce_denoised_.sampled_slot;
     fg.gbuffer_extra_ids[5] = csm_depth_.sampled_slot;
     fg.gbuffer_extra_ids[6] = prev_depth_.sampled_slot;
     fg.gbuffer_extra_ids[7] = prev_normal_.sampled_slot;
@@ -1347,7 +1365,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         // Before overwriting current GBuffer / Denoised targets, snapshot previous frame history if valid
         if (have_prev_view_proj_) {
             auto copy_same = [&](RegisteredImage& src, RegisteredImage& dst, VkPipelineStageFlags2 src_st,
-                                 VkAccessFlags2 src_ac, VkImageAspectFlags asp = VK_IMAGE_ASPECT_COLOR_BIT) {
+                                 VkAccessFlags2 src_ac, uint32_t cw, uint32_t ch,
+                                 VkImageAspectFlags asp = VK_IMAGE_ASPECT_COLOR_BIT) {
                 const VkImageLayout src_prev = src.layout;
                 trans(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, src_st, src_ac, VK_PIPELINE_STAGE_2_COPY_BIT,
                       VK_ACCESS_2_TRANSFER_READ_BIT, asp);
@@ -1356,7 +1375,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 VkImageCopy region{};
                 region.srcSubresource = {asp, 0, 0, 1};
                 region.dstSubresource = {asp, 0, 0, 1};
-                region.extent = {w, h, 1};
+                region.extent = {cw, ch, 1};
                 vkCmdCopyImage(cmd, src.img.handle, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.img.handle,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
                 trans(src, src_prev, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
@@ -1366,13 +1385,16 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                       VK_ACCESS_2_SHADER_READ_BIT, asp);
             };
             copy_same(gb_n_, prev_normal_, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, w, h);
             copy_same(rt_shadow_denoised_, prev_rt_shadow_,
                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_READ_BIT);
+                      VK_ACCESS_2_SHADER_READ_BIT, w, h);
             copy_same(rim_occ_denoised_, prev_rim_occ_,
                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                      VK_ACCESS_2_SHADER_READ_BIT);
+                      VK_ACCESS_2_SHADER_READ_BIT, w, h);
+            copy_same(bounce_denoised_, prev_bounce_,
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                      VK_ACCESS_2_SHADER_READ_BIT, hw, hh);
 
             // Depth history copy (both aspects in region list so D32_SFLOAT_S8_UINT stays valid)
             rhi::RhiDevice::cmd_transition_image(
@@ -1428,11 +1450,16 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
 
         // === PASS 2: BLAS refit (or 300-frame rebuild) + TLAS rebuild ===
         if (use_rt) {
+            const uint32_t pose_slot = static_cast<uint32_t>(req.frame_index % GpuAvatar::kPoseSlotCount);
             bool run_as_update = true;
             if (req.throttle_rt_accel_struct) {
                 uint64_t pose_hash = 14695981039346656037ULL;
                 auto hash_u32 = [&](uint32_t v) noexcept {
                     pose_hash ^= static_cast<uint64_t>(v);
+                    pose_hash *= 1099511628211ULL;
+                };
+                auto hash_u64 = [&](uint64_t v) noexcept {
+                    pose_hash ^= v;
                     pose_hash *= 1099511628211ULL;
                 };
                 auto hash_f32 = [&](float f) noexcept {
@@ -1441,6 +1468,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                     hash_u32(bits);
                 };
                 hash_u32(req.avatar->requirements.vertex_count);
+                hash_u64(req.avatar->slot_applied_pose_seq[pose_slot]);
                 hash_f32(req.avatar_pos[0]);
                 hash_f32(req.avatar_pos[1]);
                 hash_f32(req.avatar_pos[2]);
@@ -1454,16 +1482,14 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                         }
                     }
                 }
-                const uint64_t t_now_us = now_us();
                 const bool must_build =
                     (!accel_.is_ready() || req.avatar != last_rt_avatar_ || last_rt_as_update_us_ == 0ULL);
-                const bool pose_changed_at_60hz =
-                    (pose_hash != last_rt_pose_hash_) && ((t_now_us - last_rt_as_update_us_) >= 16667ULL);
-                run_as_update = must_build || pose_changed_at_60hz;
+                // Always refit immediately whenever pose or morph target hash changed so rasterizer & BLAS have 0.0-px drift.
+                run_as_update = must_build || (pose_hash != last_rt_pose_hash_);
                 if (run_as_update) {
                     last_rt_avatar_ = req.avatar;
                     last_rt_pose_hash_ = pose_hash;
-                    last_rt_as_update_us_ = t_now_us;
+                    last_rt_as_update_us_ = now_us();
                 }
             }
             if (run_as_update) {
@@ -1589,6 +1615,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                                     nullptr);
             GpuPushConstants pc{};
             pc.frame_globals_bda = fg_alloc.device_address;
+            pc.draw_data_bda = accel_.tri_meta_bda();
+            pc.vertex_buf_bda = skinned_vertices_buf_.device_address;
             pc.aux_buf_bda = material_buf_.device_address;
             pc.param0 = rt_shadow_raw_.storage_slot;
             pc.param1 = rim_occ_raw_.storage_slot;
@@ -1668,6 +1696,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
         trans(rim_occ_denoised_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+        trans(bounce_denoised_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
         {
             DenoiserInputView dvi{};
             dvi.width = w;
@@ -1676,16 +1706,22 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 have_prev_view_proj_
                     ? (static_cast<uint32_t>(req.frame_index) == 0u ? 1u : static_cast<uint32_t>(req.frame_index))
                     : 0u;
-            dvi.temporal_alpha = 0.22f;
+            dvi.temporal_alpha = (eff_mode >= 2u) ? 0.10f : 0.20f;
             dvi.frame_globals_bda = fg_alloc.device_address;
             dvi.raw_shadow_sampled_slot = rt_shadow_raw_.sampled_slot;
             dvi.denoised_shadow_storage_slot = rt_shadow_denoised_.storage_slot;
             dvi.raw_rim_sampled_slot = rim_occ_raw_.sampled_slot;
             dvi.denoised_rim_storage_slot = rim_occ_denoised_.storage_slot;
+            dvi.raw_bounce_sampled_slot = bounce_half_.sampled_slot;
+            dvi.denoised_bounce_storage_slot = bounce_denoised_.storage_slot;
+            dvi.bounce_width = hw;
+            dvi.bounce_height = hh;
             dvi.history_shadow_sampled_slot =
                 have_prev_view_proj_ ? prev_rt_shadow_.sampled_slot : rt_shadow_raw_.sampled_slot;
             dvi.history_rim_sampled_slot =
                 have_prev_view_proj_ ? prev_rim_occ_.sampled_slot : rim_occ_raw_.sampled_slot;
+            dvi.history_bounce_sampled_slot =
+                have_prev_view_proj_ ? prev_bounce_.sampled_slot : bounce_half_.sampled_slot;
             dvi.gb_normal_sampled_slot = gb_n_.sampled_slot;
             dvi.gb_mv_sampled_slot = gb_mv_.sampled_slot;
             dvi.depth_sampled_slot = depth_sampled_slot_;
@@ -1698,6 +1734,10 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
               VK_ACCESS_2_SHADER_READ_BIT);
         trans(rim_occ_denoised_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_ACCESS_2_SHADER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_ACCESS_2_SHADER_READ_BIT);
+        trans(bounce_denoised_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
               VK_ACCESS_2_SHADER_WRITE_BIT,
               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
               VK_ACCESS_2_SHADER_READ_BIT);

@@ -61,6 +61,24 @@ constexpr float kRadToDeg = 180.0f / 3.1415926535f;
     return quat_normalize_safe(q);
 }
 
+[[nodiscard]] std::array<float, 3> quat_rotate_vec(const std::array<float, 4>& q,
+                                                   const std::array<float, 3>& v) noexcept {
+    const float ux = q[0], uy = q[1], uz = q[2], s = q[3];
+    const float dot_uv = ux * v[0] + uy * v[1] + uz * v[2];
+    const float dot_uu = ux * ux + uy * uy + uz * uz;
+    const float cx = uy * v[2] - uz * v[1];
+    const float cy = uz * v[0] - ux * v[2];
+    const float cz = ux * v[1] - uy * v[0];
+    const float k1 = 2.0f * dot_uv;
+    const float k2 = s * s - dot_uu;
+    const float k3 = 2.0f * s;
+    return {
+        k1 * ux + k2 * v[0] + k3 * cx,
+        k1 * uy + k2 * v[1] + k3 * cy,
+        k1 * uz + k2 * v[2] + k3 * cz,
+    };
+}
+
 [[nodiscard]] float dist_point_to_segment(const std::array<float, 3>& p, const std::array<float, 3>& a,
                                           const std::array<float, 3>& b, std::array<float, 3>& out_closest) noexcept {
     const float abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
@@ -207,11 +225,60 @@ NpuPostProcessDiagnostics NpuPostProcessor::process(AetherTrackingFrame& frame,
             std::abs(clamped[2] - euler[2]) > 1e-3f) {
             diag.orientation_clamped = true;
         }
-        const auto q_clamped = euler_deg_to_quat(clamped);
+        auto safe_euler = clamped;
+        auto q_clamped = euler_deg_to_quat(safe_euler);
+
+        // Chin-into-Chest / Cardigan Collar predictive capsule clearance (Module 7)
+        const std::array<float, 3> cur_head_p{
+            frame.joint_positions_ws[AETHER_BONE_HEAD][0],
+            frame.joint_positions_ws[AETHER_BONE_HEAD][1],
+            frame.joint_positions_ws[AETHER_BONE_HEAD][2],
+        };
+        const std::array<float, 3> collar_bot{hips_anchor[0], 1.18f, hips_anchor[2] + 0.015f};
+        const std::array<float, 3> collar_top{hips_anchor[0], 1.33f, hips_anchor[2] + 0.025f};
+        const float r_collar = 0.085f + margin * 0.65f;
+        constexpr float kChinSkin = 1e-4f;
+        const std::array<float, 3> local_chin{0.0f, -0.055f, 0.085f};
+        std::array<float, 3> head_adj = cur_head_p;
+        for (int iter = 0; iter < 6; ++iter) {
+            const auto chin_off = quat_rotate_vec(q_clamped, local_chin);
+            std::array<float, 3> chin_ws{head_adj[0] + chin_off[0], head_adj[1] + chin_off[1],
+                                         head_adj[2] + chin_off[2]};
+            std::array<float, 3> closest{};
+            const float d = dist_point_to_segment(chin_ws, collar_bot, collar_top, closest);
+            if (d >= r_collar) {
+                break;
+            }
+            const float pen = (r_collar + kChinSkin) - d;
+            diag.collision_projected = true;
+            diag.max_penetration_m = std::max(diag.max_penetration_m, r_collar - d);
+            // Relax downward pitch slightly toward neutral first, then lift head clear of collar capsule
+            safe_euler[0] *= 0.72f;
+            diag.orientation_clamped = true;
+            q_clamped = euler_deg_to_quat(safe_euler);
+            const auto relaxed_off = quat_rotate_vec(q_clamped, local_chin);
+            std::array<float, 3> relaxed_chin{head_adj[0] + relaxed_off[0], head_adj[1] + relaxed_off[1],
+                                              head_adj[2] + relaxed_off[2]};
+            project_out_of_capsule(relaxed_chin, collar_bot, collar_top, r_collar + kChinSkin, true, diag);
+            head_adj = {relaxed_chin[0] - relaxed_off[0], relaxed_chin[1] - relaxed_off[1],
+                        relaxed_chin[2] - relaxed_off[2]};
+            (void)pen;
+        }
+        {
+            const auto final_off = quat_rotate_vec(q_clamped, local_chin);
+            const std::array<float, 3> final_chin{head_adj[0] + final_off[0], head_adj[1] + final_off[1],
+                                                  head_adj[2] + final_off[2]};
+            std::array<float, 3> scratch_c{};
+            const float chin_res = std::max(0.0f, r_collar - dist_point_to_segment(final_chin, collar_bot, collar_top, scratch_c));
+            diag.residual_penetration_m = std::max(diag.residual_penetration_m, chin_res);
+        }
+        frame.joint_positions_ws[AETHER_BONE_HEAD][0] = head_adj[0];
+        frame.joint_positions_ws[AETHER_BONE_HEAD][1] = head_adj[1];
+        frame.joint_positions_ws[AETHER_BONE_HEAD][2] = head_adj[2];
         for (size_t k = 0; k < 4u; ++k) {
             frame.joint_rotations_quat[AETHER_BONE_HEAD][k] = q_clamped[k];
         }
-        last_safe_head_euler_ = clamped;
+        last_safe_head_euler_ = safe_euler;
         has_prev_ = true;
     }
 

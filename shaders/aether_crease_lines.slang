@@ -42,7 +42,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
 
     float z0 = abs(fg.proj.col3.z / max(abs(d0 + fg.proj.col2.z), 1e-5));
     float3 n0 = oct_decode(aether_load(gb_n_slot, p).xy);
-    uint m0 = aether_uload(gb_mat_slot, p).x;
+    uint raw_m0 = aether_uload(gb_mat_slot, p).x;
+    uint m0 = raw_m0 & 0x3FFu;
+    float crease_w = float((raw_m0 >> 16u) & 0xFFu) / 255.0;
+    float disguise_keep = 1.0 - crease_w * saturate(fg.eye_catchlight_params.z);
     // Mask crease ink cleanly off flat face planes (`gb_misc.y` = sdf_mask) so cheeks/nose stay 2D clean
     float face_mask = saturate(aether_load(gb_misc_slot, p).y);
     float plane_keep = 1.0 - 0.88 * face_mask;
@@ -67,7 +70,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             float d1 = aether_load(depth_slot, np).x;
             float z1 = (d1 >= 0.99998) ? (z0 + 0.5) : abs(fg.proj.col3.z / max(abs(d1 + fg.proj.col2.z), 1e-5));
             float3 n1 = (d1 >= 0.99998) ? n0 : oct_decode(aether_load(gb_n_slot, np).xy);
-            uint m1 = aether_uload(gb_mat_slot, np).x;
+            uint m1 = aether_uload(gb_mat_slot, np).x & 0x3FFu;
 
             float kx = kSx[k];
             float ky = kSy[k];
@@ -97,7 +100,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float dog_boost = filter_pro ? max(fg.filter_pro_params.y, 0.0) : 0.0;
     float dist_taper = clamp(1.4 / max(z0, 0.5), 0.55, 1.35);
 
-    float n_edge = max(smoothstep(0.65, 1.32, n_sobel + dog_n * 0.25 * dog_boost), max_n_ang * 0.80) * plane_keep;
+    float n_edge = max(smoothstep(0.65, 1.32, n_sobel + dog_n * 0.25 * dog_boost), max_n_ang * 0.80) *
+                   plane_keep * disguise_keep;
     float z_edge = smoothstep(0.055, 0.145, z_sobel + dog_z * 0.04 * dog_boost) * plane_keep * dist_taper;
     float max_edge = max(n_edge * 0.85, max(z_edge, max_mat_edge));
 

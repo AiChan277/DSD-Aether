@@ -279,6 +279,7 @@ class FrameGraph {
     RegisteredImage rim_occ_raw_{};
     RegisteredImage rim_occ_denoised_{};
     RegisteredImage bounce_half_{};
+    RegisteredImage bounce_denoised_{};
     RegisteredImage crease_mask_{};
     RegisteredImage hdr_scene_{};
     std::array<RegisteredImage, kBloomMipCount> bloom_mips_{};
@@ -302,6 +303,7 @@ class FrameGraph {
     RegisteredImage prev_normal_{};
     RegisteredImage prev_rt_shadow_{};
     RegisteredImage prev_rim_occ_{};
+    RegisteredImage prev_bounce_{};
 
     // Static targets
     RegisteredImage orbit_orb_out_{};

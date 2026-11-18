@@ -79,7 +79,10 @@ float3 visualize_debug_mode(GpuFrameGlobals fg, uint mode, int2 p, float2 uv) {
     }
     if (mode == 6u) {
         uint st = aether_uload(fg.gbuffer_extra_ids[0].y, p).x;
-        return float3(((st & 2u) != 0u) ? 0.95 : 0.08, ((st & 1u) != 0u) ? 0.65 : 0.08, 0.25);
+        float cut = ((st & 2u) != 0u) ? 0.95 : 0.06;
+        float hair = ((st & 4u) != 0u) ? 0.90 : 0.06;
+        float base = ((st & 1u) != 0u) ? 0.45 : 0.06;
+        return float3(hair, max(base, cut * 0.55), cut);
     }
     if (mode == 7u) {
         return aether_sample_level(fg.gbuffer_ids[1].x, kSamplerLinearClamp, uv, 0).xxx;

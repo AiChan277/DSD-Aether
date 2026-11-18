@@ -1,7 +1,7 @@
 #include "aether_common.slang"
 
-// NVIDIA SIGMA-inspired penumbra-aware compute denoiser (§10.9, ADR-0009).
-// Uses .y normalized ray hit distance to keep contact shadows tight and blur wide penumbras cleanly.
+// NVIDIA SIGMA-inspired penumbra-aware compute denoiser with Material-ID edge-stopping & SVGF stability.
+// Preserves full RGBA (`shadow_vis`, `hit_t_norm`, `back_trans`) for full-res & half-res GI passes.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void cs_main(uint3 tid : SV_DispatchThreadID) {
@@ -23,97 +23,106 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     bool has_fg = (g_Pc.frame_globals_bda != 0ul);
     uint gb_n_slot = 0u;
     uint gb_mv_slot = 0u;
+    uint gb_mat_slot = 0u;
     uint depth_slot = 0u;
     float3 center_n = float3(0.0, 0.0, 1.0);
     float center_d = 0.5;
+    uint center_m = 0u;
     float2 mv = float2(0.0, 0.0);
     bool is_path_trace = false;
+    float2 vp_size = float2(float(w), float(h));
+    int2 max_gp = max_p;
+    float2 gb_scale = float2(1.0, 1.0);
+
     if (has_fg) {
         GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
         gb_n_slot = fg.gbuffer_ids[0].x;
         gb_mv_slot = fg.gbuffer_ids[0].y;
+        gb_mat_slot = fg.gbuffer_ids[0].z;
         depth_slot = fg.gbuffer_extra_ids[0].x;
         is_path_trace = ((fg.state_u32.w & 0xC00u) == 0x800u);
-        center_d = aether_load(depth_slot, p).x;
+        vp_size = max(fg.viewport_size.xy, float2(1.0, 1.0));
+        max_gp = max(int2(vp_size) - 1, int2(0, 0));
+        gb_scale = vp_size / float2(float(w), float(h));
+
+        int2 gp0 = clamp(int2((float2(p) + 0.5) * gb_scale), int2(0, 0), max_gp);
+        center_d = aether_load(depth_slot, gp0).x;
         if (center_d >= 0.99995) {
             aether_store(dst_slot, tid.xy, center);
             return;
         }
-        center_n = oct_decode(aether_load(gb_n_slot, p).xy);
-        mv = aether_load(gb_mv_slot, p).xy;
+        center_n = oct_decode(aether_load(gb_n_slot, gp0).xy);
+        center_m = aether_uload(gb_mat_slot, gp0).x & 0x7FFFu;
+        mv = aether_load(gb_mv_slot, gp0).xy;
     }
 
-    // Contact-hardening kernel: small radius for close hits (y -> 0), wider for soft penumbras (y -> 1).
-    // In Path Tracing mode (.yzw holds 1-bounce GI irradiance), always use wide kernel to stabilize Monte Carlo GI.
     int radius_step = is_path_trace ? 2 : ((center.y < 0.20) ? 1 : 2);
     float4 m1 = float4(0.0, 0.0, 0.0, 0.0);
     float4 m2 = float4(0.0, 0.0, 0.0, 0.0);
-    float4 acc = float4(0.0, 0.0, 0.0, 0.0);
-    float wsum = 0.0;
-
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) {
-                float4 c_val = is_path_trace ? clamp(center, float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 2.5, 2.5, 2.5)) : center;
-                m1 += c_val;
-                m2 += c_val * c_val;
-                acc += c_val;
-                wsum += 1.0;
-                continue;
+            int2 q3 = clamp(p + int2(dx, dy), int2(0, 0), max_p);
+            float4 s3 = aether_load(raw_slot, q3);
+            if (is_path_trace) {
+                s3 = clamp(s3, float4(0.0, 0.0, 0.0, 0.0), float4(2.5, 2.5, 2.5, 1.0));
             }
+            m1 += s3;
+            m2 += s3 * s3;
+        }
+    }
+    float4 mu = m1 / 9.0;
+    float4 std_dev = sqrt(max(m2 / 9.0 - mu * mu, float4(0.0, 0.0, 0.0, 0.0)));
+    float center_l = luminance(center.rgb);
+    float sigma_var = max(luminance(std_dev.rgb) * 1.5, 0.04);
+
+    float4 acc = float4(0.0, 0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
             int2 qp = clamp(p + int2(dx * radius_step, dy * radius_step), int2(0, 0), max_p);
             float4 sv = aether_load(raw_slot, qp);
             if (is_path_trace) {
-                sv = clamp(sv, float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 2.5, 2.5, 2.5));
+                sv = clamp(sv, float4(0.0, 0.0, 0.0, 0.0), float4(2.5, 2.5, 2.5, 1.0));
             }
-            if (radius_step == 1) {
-                m1 += sv;
-                m2 += sv * sv;
-            } else {
-                int2 q3 = clamp(p + int2(dx, dy), int2(0, 0), max_p);
-                float4 s3 = aether_load(raw_slot, q3);
-                if (is_path_trace) {
-                    s3 = clamp(s3, float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 2.5, 2.5, 2.5));
-                }
-                m1 += s3;
-                m2 += s3 * s3;
-            }
-            float dist2 = float(dx * dx + dy * dy);
-            float wk = exp(-0.45 * dist2);
-            if (has_fg) {
-                float3 qn = oct_decode(aether_load(gb_n_slot, qp).xy);
-                float qd = aether_load(depth_slot, qp).x;
-                wk *= pow(saturate(dot(center_n, qn)), 6.0) * exp(-abs(center_d - qd) * 80.0);
+            float wk = exp(-0.45 * float(dx * dx + dy * dy));
+            if (has_fg && !(dx == 0 && dy == 0)) {
+                int2 gp = clamp(int2((float2(qp) + 0.5) * gb_scale), int2(0, 0), max_gp);
+                float3 qn = oct_decode(aether_load(gb_n_slot, gp).xy);
+                float qd = aether_load(depth_slot, gp).x;
+                uint qm = aether_uload(gb_mat_slot, gp).x & 0x7FFFu;
+                float wm = (center_m == qm) ? 1.0 : 0.08;
+                float wl = exp(-abs(center_l - luminance(sv.rgb)) / (2.5 * sigma_var));
+                wk *= pow(saturate(dot(center_n, qn)), 8.0) * exp(-abs(center_d - qd) * 120.0) * wm * wl;
             }
             acc += sv * wk;
             wsum += wk;
         }
     }
 
-    // 4 outer cardinal penumbra taps when filtering soft shadows so 1-2 spp penumbras smooth cleanly
     static const int2 kOuterOffsets[4] = {int2(-2, 0), int2(2, 0), int2(0, -2), int2(0, 2)};
     for (int oi = 0; oi < 4; ++oi) {
         int2 qp = clamp(p + kOuterOffsets[oi] * radius_step, int2(0, 0), max_p);
         float4 sv = aether_load(raw_slot, qp);
         if (is_path_trace) {
-            sv = clamp(sv, float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 2.5, 2.5, 2.5));
+            sv = clamp(sv, float4(0.0, 0.0, 0.0, 0.0), float4(2.5, 2.5, 2.5, 1.0));
         }
         float wk = 0.25;
         if (has_fg) {
-            float3 qn = oct_decode(aether_load(gb_n_slot, qp).xy);
-            float qd = aether_load(depth_slot, qp).x;
-            wk *= pow(saturate(dot(center_n, qn)), 6.0) * exp(-abs(center_d - qd) * 80.0);
+            int2 gp = clamp(int2((float2(qp) + 0.5) * gb_scale), int2(0, 0), max_gp);
+            float3 qn = oct_decode(aether_load(gb_n_slot, gp).xy);
+            float qd = aether_load(depth_slot, gp).x;
+            uint qm = aether_uload(gb_mat_slot, gp).x & 0x7FFFu;
+            float wm = (center_m == qm) ? 1.0 : 0.08;
+            wk *= pow(saturate(dot(center_n, qn)), 8.0) * exp(-abs(center_d - qd) * 120.0) * wm;
         }
         acc += sv * wk;
         wsum += wk;
     }
 
     float4 filtered = (wsum > 1e-5) ? (acc / wsum) : center;
-    float4 mu = m1 / 9.0;
-    float4 std_dev = sqrt(max(m2 / 9.0 - mu * mu, float4(0.0, 0.0, 0.0, 0.0)));
-    float box_scale = is_path_trace ? 2.25 : 1.35;
+    float box_scale = is_path_trace ? 2.15 : 1.35;
     float box_pad = is_path_trace ? 0.015 : 0.0;
-    float4 box_min = mu - box_scale * std_dev - box_pad;
+    float4 box_min = max(mu - box_scale * std_dev - box_pad, float4(0.0, 0.0, 0.0, 0.0));
     float4 box_max = mu + box_scale * std_dev + box_pad;
 
     float4 out_val = filtered;
@@ -123,22 +132,19 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
             float4 hist = aether_sample_level(hist_slot, kSamplerLinearClamp, prev_uv, 0.0);
             float4 clamped_hist = clamp(hist, box_min, box_max);
-            float adapt_alpha = lerp(max(g_Pc.fparam0, 0.30), g_Pc.fparam0, center.y);
-            if (is_path_trace) {
-                float motion_px = length(mv * float2(float(w), float(h)));
-                adapt_alpha = lerp(0.045, 0.22, saturate(motion_px * 0.15));
-                if (motion_px > 0.25) {
-                    int2 prev_p = clamp(int2(prev_uv * float2(float(w), float(h))), int2(0, 0), max_p);
-                    float3 prev_n = oct_decode(aether_load(gb_n_slot, prev_p).xy);
-                    float prev_d = aether_load(depth_slot, prev_p).x;
-                    if (dot(center_n, prev_n) < 0.70 || abs(center_d - prev_d) > 0.02) {
-                        adapt_alpha = max(adapt_alpha, 0.45);
-                    }
+            float motion_px = length(mv * vp_size);
+            float alpha = is_path_trace ? lerp(0.10, max(g_Pc.fparam0, 0.22), saturate(motion_px * 0.15))
+                                        : lerp(max(g_Pc.fparam0, 0.30), g_Pc.fparam0, center.y);
+            if (has_fg && motion_px > 0.25) {
+                int2 prev_gp = clamp(int2(prev_uv * vp_size), int2(0, 0), max_gp);
+                float3 prev_n = oct_decode(aether_load(gb_n_slot, prev_gp).xy);
+                float prev_d = aether_load(depth_slot, prev_gp).x;
+                uint prev_m = aether_uload(gb_mat_slot, prev_gp).x & 0x7FFFu;
+                if (dot(center_n, prev_n) < 0.72 || abs(center_d - prev_d) > 0.025 || center_m != prev_m) {
+                    alpha = max(alpha, 0.45);
                 }
-                out_val = lerp(clamped_hist, filtered, clamp(adapt_alpha, 0.045, 1.0));
-            } else {
-                out_val = lerp(clamped_hist, filtered, clamp(adapt_alpha, 0.05, 1.0));
             }
+            out_val = lerp(clamped_hist, filtered, clamp(alpha, 0.05, 1.0));
         }
     }
 

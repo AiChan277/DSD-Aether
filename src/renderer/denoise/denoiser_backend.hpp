@@ -27,6 +27,11 @@ struct DenoiserInputView {
     uint32_t raw_rim_sampled_slot{0};
     uint32_t denoised_rim_storage_slot{0};
     uint32_t history_rim_sampled_slot{0};
+    uint32_t raw_bounce_sampled_slot{UINT32_MAX};
+    uint32_t denoised_bounce_storage_slot{UINT32_MAX};
+    uint32_t history_bounce_sampled_slot{UINT32_MAX};
+    uint32_t bounce_width{0};
+    uint32_t bounce_height{0};
     uint32_t gb_normal_sampled_slot{0};
     uint32_t gb_mv_sampled_slot{0};
     uint32_t depth_sampled_slot{0};

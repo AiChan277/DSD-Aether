@@ -3,6 +3,7 @@
 #include "core/clock.hpp"
 #include "core/log.hpp"
 #include "generated/phase4_shaders_dxil.hpp"
+#include "renderer/avatar_rt_classifier.hpp"
 #include "renderer/frame_globals_builder.hpp"
 
 #if defined(_WIN32)
@@ -31,7 +32,7 @@ constexpr DXGI_FORMAT kNormalFmt = DXGI_FORMAT_R16G16_FLOAT;
 constexpr DXGI_FORMAT kMvFmt = DXGI_FORMAT_R16G16_FLOAT;
 constexpr DXGI_FORMAT kMatFmt = DXGI_FORMAT_R32_UINT;
 constexpr DXGI_FORMAT kMiscFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
-constexpr DXGI_FORMAT kRtFmt = DXGI_FORMAT_R16G16_FLOAT;
+constexpr DXGI_FORMAT kRtFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DXGI_FORMAT kHdrFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr DXGI_FORMAT kCreaseFmt = DXGI_FORMAT_R16_FLOAT;
 constexpr DXGI_FORMAT kRgba8Fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -177,7 +178,7 @@ Expected<void> Dx12FrameGraph::ensure_upload_capacity(uint32_t vertex_count) {
             sl.fg_buf = r.value();
         }
         if (sl.tlas_inst.resource == nullptr) {
-            auto r = device_->create_buffer(256u, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
+            auto r = device_->create_buffer(512u, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
                                             false, false);
             if (!r) {
                 return make_unexpected(r.error());
@@ -409,6 +410,8 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
     const uint32_t hw = std::max(1u, (w + 1u) / 2u);
     const uint32_t hh = std::max(1u, (h + 1u) / 2u);
     if (auto r = mk(bounce_half_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r) return r;
+    if (auto r = mk(bounce_denoised_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r) return r;
+    if (auto r = mk(prev_bounce_, hw, hh, kHdrFmt, false, false, false, false, nullptr); !r) return r;
 
     if (auto r = mk(hdr_scene_, w, h, kHdrFmt, true, false, false, false, clear_zero); !r) return r;
     if (auto r = mk(crease_mask_, w, h, kCreaseFmt, false, true, false, false, nullptr); !r) return r;
@@ -461,6 +464,8 @@ void Dx12FrameGraph::destroy_size_dependent_targets() noexcept {
     }
     device_->destroy_texture(crease_mask_);
     device_->destroy_texture(hdr_scene_);
+    device_->destroy_texture(prev_bounce_);
+    device_->destroy_texture(bounce_denoised_);
     device_->destroy_texture(bounce_half_);
     device_->destroy_texture(prev_rim_occ_);
     device_->destroy_texture(rim_occ_denoised_);
@@ -480,15 +485,18 @@ void Dx12FrameGraph::destroy_dxr_structures() noexcept {
     if (device_ != nullptr) {
         device_->destroy_buffer(dxr_scratch_buf_);
         device_->destroy_buffer(tlas_buf_);
-        device_->destroy_buffer(blas_hair_buf_);
-        device_->destroy_buffer(blas_opaque_buf_);
+        for (auto& b : blas_buckets_) {
+            device_->destroy_buffer(b.buf);
+        }
+        device_->destroy_buffer(rt_index_buf_);
+        device_->destroy_buffer(rt_tri_meta_buf_);
     }
-    opaque_geom_bytes_.clear();
-    hair_geom_bytes_.clear();
-    opaque_geom_count_ = 0;
-    hair_geom_count_ = 0;
-    blas_opaque_tri_count_ = 0;
-    blas_hair_tri_count_ = 0;
+    for (auto& b : blas_buckets_) {
+        b.geom_bytes.clear();
+        b.geom_count = 0;
+        b.tri_count = 0;
+        b.tri_offset = 0;
+    }
     dxr_ready_ = false;
     dxr_has_built_once_ = false;
 }
@@ -663,7 +671,7 @@ Expected<void> Dx12FrameGraph::apply_face_sdf(const SdfBakeOutput& baked) {
     for (size_t i = 0; i < cached_materials_.size(); ++i) {
         if (!any_face_mat || target_mat[i]) {
             cached_materials_[i].tex_slots[2] = avatar_face_sdf_slot_;
-            cached_materials_[i].extra_slots[2] |= AETHER_MAT_FLAG_SDF_FACE;
+            cached_materials_[i].extra_slots[2] |= (AETHER_MAT_FLAG_SDF_FACE | kMatExtraAuthoredSdfBit);
         }
     }
     if (material_buf_.mapped_ptr != nullptr && !cached_materials_.empty()) {
@@ -679,56 +687,84 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
     return {};
 #else
     destroy_dxr_structures();
-    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> op_descs;
-    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> hr_descs;
+    std::array<std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>, 4> bucket_descs;
 
-    auto push_geom = [&](std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& dst, const GpuSubmeshDraw& sm) {
+    auto push_geom = [&](size_t bi, uint64_t ib_gpu_va, uint32_t idx_offset, uint32_t idx_count) {
+        if (idx_count < 3u || bi >= 4u) {
+            return;
+        }
         D3D12_RAYTRACING_GEOMETRY_DESC gd{};
         gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        gd.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        gd.Flags = (bi == 1u || bi == 3u) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
         gd.Triangles.Transform3x4 = 0;
         gd.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-        gd.Triangles.IndexCount = sm.index_count;
+        gd.Triangles.IndexCount = idx_count;
         gd.Triangles.VertexCount = avatar_vertex_count_;
-        gd.Triangles.IndexBuffer = index_buf_.gpu_va + static_cast<uint64_t>(sm.index_offset) * sizeof(uint32_t);
+        gd.Triangles.IndexBuffer = ib_gpu_va + static_cast<uint64_t>(idx_offset) * sizeof(uint32_t);
         gd.Triangles.VertexBuffer.StartAddress = skinned_vertices_buf_.gpu_va;
         gd.Triangles.VertexBuffer.StrideInBytes = sizeof(GpuSkinnedVertex);
-        dst.push_back(gd);
+        bucket_descs[bi].push_back(gd);
+        blas_buckets_[bi].tri_count += idx_count / 3u;
     };
 
-    for (const uint32_t idx : opaque_draws_) {
-        const auto& sm = cached_submeshes_[idx];
-        const auto& gm = cached_materials_[sm.material_index];
-        const bool is_hair =
-            (gm.extra_slots[2] & AETHER_MAT_FLAG_HAIR_FRONT_STENCIL) != 0u || (sm.flags & AETHER_SUBMESH_FLAG_HAIR_FRONT) != 0u;
-        if (is_hair) {
-            push_geom(hr_descs, sm);
-            blas_hair_tri_count_ += sm.index_count / 3u;
-        } else {
-            push_geom(op_descs, sm);
-            blas_opaque_tri_count_ += sm.index_count / 3u;
+    const RtPartitionedIndices part = build_rt_partitioned_indices(avatar);
+    if (!part.sorted_indices.empty()) {
+        const uint64_t rt_idx_bytes = static_cast<uint64_t>(part.sorted_indices.size()) * sizeof(uint32_t);
+        auto ib_res =
+            device_->create_buffer(rt_idx_bytes, rhi::D3D12BufferUsage::IndexBuffer | rhi::D3D12BufferUsage::CopyDst,
+                                   rhi::D3D12BufferHeap::DefaultGpu, false, false);
+        if (!ib_res) return make_unexpected(ib_res.error());
+        rt_index_buf_ = ib_res.value();
+
+        auto stg = device_->create_buffer(rt_idx_bytes, rhi::D3D12BufferUsage::CopySrc,
+                                          rhi::D3D12BufferHeap::UploadCpu, false, false);
+        if (!stg) return make_unexpected(stg.error());
+        std::memcpy(stg.value().mapped_ptr, part.sorted_indices.data(), static_cast<size_t>(rt_idx_bytes));
+        auto copy_rc = device_->execute_immediate([&](ID3D12GraphicsCommandList4* cmd) {
+            device_->cmd_transition_buffer(cmd, rt_index_buf_, D3D12_RESOURCE_STATE_COPY_DEST);
+            cmd->CopyBufferRegion(rt_index_buf_.resource, 0, stg.value().resource, 0, rt_idx_bytes);
+            device_->cmd_transition_buffer(cmd, rt_index_buf_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        });
+        device_->destroy_buffer(stg.value());
+        if (!copy_rc) return copy_rc;
+
+        if (!part.tri_meta.empty()) {
+            const uint64_t tm_bytes = static_cast<uint64_t>(part.tri_meta.size()) * sizeof(RtTriMeta);
+            auto tm_res = device_->create_buffer(tm_bytes, rhi::D3D12BufferUsage::ShaderResource,
+                                                 rhi::D3D12BufferHeap::UploadCpu, true, false);
+            if (!tm_res) return make_unexpected(tm_res.error());
+            rt_tri_meta_buf_ = tm_res.value();
+            std::memcpy(rt_tri_meta_buf_.mapped_ptr, part.tri_meta.data(), static_cast<size_t>(tm_bytes));
+        }
+
+        for (size_t b = 0; b < 4u; ++b) {
+            if (part.bucket_index_count[b] >= 3u) {
+                blas_buckets_[b].tri_offset = part.bucket_index_offset[b] / 3u;
+                push_geom(b, rt_index_buf_.gpu_va, part.bucket_index_offset[b], part.bucket_index_count[b]);
+            }
+        }
+    } else {
+        auto push_list = [&](const std::vector<uint32_t>& draws) {
+            for (const uint32_t idx : draws) {
+                const auto& sm = cached_submeshes_[idx];
+                const auto& gm = cached_materials_[sm.material_index];
+                const uint32_t rtb = (gm.extra_slots[2] & kMatExtraRtClassMask) >> kMatExtraRtClassShift;
+                push_geom(std::min<size_t>(rtb, 3u), index_buf_.gpu_va, sm.index_offset, sm.index_count);
+            }
+        };
+        push_list(opaque_draws_);
+        push_list(cutout_draws_);
+    }
+
+    UINT active_inst_count = 0u;
+    for (size_t b = 0; b < 4u; ++b) {
+        if (!bucket_descs[b].empty()) {
+            ++active_inst_count;
         }
     }
-    for (const uint32_t idx : cutout_draws_) {
-        const auto& sm = cached_submeshes_[idx];
-        push_geom(op_descs, sm);
-        blas_opaque_tri_count_ += sm.index_count / 3u;
-    }
-
-    if (op_descs.empty() && hr_descs.empty()) {
+    if (active_inst_count == 0u) {
         return make_unexpected(Error::make(ErrorCode::InvalidArg, "No RT triangles for DX12 BLAS"));
-    }
-
-    opaque_geom_count_ = static_cast<uint32_t>(op_descs.size());
-    hair_geom_count_ = static_cast<uint32_t>(hr_descs.size());
-    if (!op_descs.empty()) {
-        opaque_geom_bytes_.resize(op_descs.size() * sizeof(D3D12_RAYTRACING_GEOMETRY_DESC));
-        std::memcpy(opaque_geom_bytes_.data(), op_descs.data(), opaque_geom_bytes_.size());
-    }
-    if (!hr_descs.empty()) {
-        hair_geom_bytes_.resize(hr_descs.size() * sizeof(D3D12_RAYTRACING_GEOMETRY_DESC));
-        std::memcpy(hair_geom_bytes_.data(), hr_descs.data(), hair_geom_bytes_.size());
     }
 
     const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS build_flags =
@@ -736,46 +772,37 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 
     uint64_t scratch_max = 4096u;
-    if (!op_descs.empty()) {
+    for (size_t b = 0; b < 4u; ++b) {
+        auto& bk = blas_buckets_[b];
+        const auto& descs = bucket_descs[b];
+        if (descs.empty()) {
+            continue;
+        }
+        bk.geom_count = static_cast<uint32_t>(descs.size());
+        bk.geom_bytes.resize(descs.size() * sizeof(D3D12_RAYTRACING_GEOMETRY_DESC));
+        std::memcpy(bk.geom_bytes.data(), descs.data(), bk.geom_bytes.size());
+
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
         in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         in.Flags = build_flags;
-        in.NumDescs = opaque_geom_count_;
+        in.NumDescs = bk.geom_count;
         in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        in.pGeometryDescs = op_descs.data();
+        in.pGeometryDescs = descs.data();
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
         device_->device()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
         const uint64_t bytes = align_up_u64(info.ResultDataMaxSizeInBytes, 256u);
-        auto b = device_->create_buffer(bytes, rhi::D3D12BufferUsage::AccelStructStorage,
-                                        rhi::D3D12BufferHeap::DefaultGpu, false, false);
-        if (!b) return make_unexpected(b.error());
-        blas_opaque_buf_ = b.value();
-        scratch_max = std::max({scratch_max, info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes});
-    }
-    if (!hr_descs.empty()) {
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-        in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        in.Flags = build_flags;
-        in.NumDescs = hair_geom_count_;
-        in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        in.pGeometryDescs = hr_descs.data();
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
-        device_->device()->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
-        const uint64_t bytes = align_up_u64(info.ResultDataMaxSizeInBytes, 256u);
-        auto b = device_->create_buffer(bytes, rhi::D3D12BufferUsage::AccelStructStorage,
-                                        rhi::D3D12BufferHeap::DefaultGpu, false, false);
-        if (!b) return make_unexpected(b.error());
-        blas_hair_buf_ = b.value();
+        auto res = device_->create_buffer(bytes, rhi::D3D12BufferUsage::AccelStructStorage,
+                                          rhi::D3D12BufferHeap::DefaultGpu, false, false);
+        if (!res) return make_unexpected(res.error());
+        bk.buf = res.value();
         scratch_max = std::max({scratch_max, info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes});
     }
 
-    // TLAS prebuild (1 or 2 instances)
-    const UINT num_inst = (!op_descs.empty() && !hr_descs.empty()) ? 2u : 1u;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS tlas_in{};
     tlas_in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     tlas_in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
                     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    tlas_in.NumDescs = num_inst;
+    tlas_in.NumDescs = active_inst_count;
     tlas_in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO tlas_info{};
     device_->device()->GetRaytracingAccelerationStructurePrebuildInfo(&tlas_in, &tlas_info);
@@ -807,55 +834,43 @@ void Dx12FrameGraph::record_dxr_build_or_refit(ID3D12GraphicsCommandList4* cmd, 
     const D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags =
         refit_only ? (base_flags | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE) : base_flags;
 
-    if (opaque_geom_count_ > 0 && blas_opaque_buf_.resource != nullptr) {
+    for (size_t b = 0; b < 4u; ++b) {
+        const auto& bk = blas_buckets_[b];
+        if (bk.geom_count == 0u || bk.buf.resource == nullptr) {
+            continue;
+        }
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-        bd.DestAccelerationStructureData = blas_opaque_buf_.gpu_va;
-        bd.SourceAccelerationStructureData = refit_only ? blas_opaque_buf_.gpu_va : 0ULL;
+        bd.DestAccelerationStructureData = bk.buf.gpu_va;
+        bd.SourceAccelerationStructureData = refit_only ? bk.buf.gpu_va : 0ULL;
         bd.ScratchAccelerationStructureData = dxr_scratch_buf_.gpu_va;
         bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         bd.Inputs.Flags = flags;
-        bd.Inputs.NumDescs = opaque_geom_count_;
+        bd.Inputs.NumDescs = bk.geom_count;
         bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        bd.Inputs.pGeometryDescs = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC*>(opaque_geom_bytes_.data());
+        bd.Inputs.pGeometryDescs = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC*>(bk.geom_bytes.data());
         cmd->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-        device_->cmd_uav_barrier(cmd, blas_opaque_buf_.resource);
+        device_->cmd_uav_barrier(cmd, bk.buf.resource);
     }
 
-    if (hair_geom_count_ > 0 && blas_hair_buf_.resource != nullptr) {
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-        bd.DestAccelerationStructureData = blas_hair_buf_.gpu_va;
-        bd.SourceAccelerationStructureData = refit_only ? blas_hair_buf_.gpu_va : 0ULL;
-        bd.ScratchAccelerationStructureData = dxr_scratch_buf_.gpu_va;
-        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        bd.Inputs.Flags = flags;
-        bd.Inputs.NumDescs = hair_geom_count_;
-        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        bd.Inputs.pGeometryDescs = reinterpret_cast<const D3D12_RAYTRACING_GEOMETRY_DESC*>(hair_geom_bytes_.data());
-        cmd->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-        device_->cmd_uav_barrier(cmd, blas_hair_buf_.resource);
-    }
-
-    // Write TLAS instances into current upload slice (allocation-free)
+    // Write TLAS instances into current upload slice (`0x01` FaceSkin, `0x02` Hair, `0x04` HandsProps, `0x08` BodyCloth)
     const uint32_t fslot = static_cast<uint32_t>(rendered_frames_ % rhi::kD3D12FrameCount);
     FrameUploadSlice& sl = upload_slices_[fslot];
     auto* insts = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(sl.tlas_inst.mapped_ptr);
     UINT inst_count = 0;
-    auto fill_inst = [&](uint64_t blas_va, uint32_t inst_id, uint32_t mask) {
+    for (size_t b = 0; b < 4u; ++b) {
+        const auto& bk = blas_buckets_[b];
+        if (bk.geom_count == 0u || bk.buf.resource == nullptr) {
+            continue;
+        }
         D3D12_RAYTRACING_INSTANCE_DESC& d = insts[inst_count++];
         std::memset(&d, 0, sizeof(d));
         d.Transform[0][0] = 1.0f;
         d.Transform[1][1] = 1.0f;
         d.Transform[2][2] = 1.0f;
-        d.InstanceID = inst_id;
-        d.InstanceMask = mask;
+        d.InstanceID = bk.tri_offset;
+        d.InstanceMask = bucket_to_instance_mask(static_cast<RtMaskBucket>(b));
         d.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
-        d.AccelerationStructure = blas_va;
-    };
-    if (opaque_geom_count_ > 0 && blas_opaque_buf_.resource != nullptr) {
-        fill_inst(blas_opaque_buf_.gpu_va, 0u, 0xFFu);
-    }
-    if (hair_geom_count_ > 0 && blas_hair_buf_.resource != nullptr) {
-        fill_inst(blas_hair_buf_.gpu_va, 1u, 0x04u);
+        d.AccelerationStructure = bk.buf.gpu_va;
     }
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC td{};
@@ -926,7 +941,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.gbuffer_extra_ids[1] = depth_stencil_.stencil_srv_index;
     fg.gbuffer_extra_ids[2] = rt_shadow_denoised_.srv_index;
     fg.gbuffer_extra_ids[3] = rim_occ_denoised_.srv_index;
-    fg.gbuffer_extra_ids[4] = bounce_half_.srv_index;
+    fg.gbuffer_extra_ids[4] = bounce_denoised_.srv_index;
     fg.gbuffer_extra_ids[5] = csm_depth_.srv_index;
     fg.gbuffer_extra_ids[6] = depth_stencil_.srv_index;
     fg.gbuffer_extra_ids[7] = prev_normal_.srv_index;
@@ -967,6 +982,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             copy_tex(gb_n_, prev_normal_);
             copy_tex(rt_shadow_denoised_, prev_rt_shadow_);
             copy_tex(rim_occ_denoised_, prev_rim_occ_);
+            copy_tex(bounce_denoised_, prev_bounce_);
         }
 
         // Pass 1: Compute Skin/Pack -> GpuSkinnedVertex
@@ -987,7 +1003,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
 
         // Pass 2: DXR Tier 1.1 BLAS/TLAS build or refit
         if (use_rt) {
-            record_dxr_build_or_refit(cmd, dxr_has_built_once_ && !req.throttle_rt_accel_struct);
+            const bool refit_only = dxr_has_built_once_ && ((rendered_frames_ % 300ull) != 0ull);
+            record_dxr_build_or_refit(cmd, refit_only);
         }
 
         // Pass 3: Depth + Stencil + G-Buffer Prepass (Strict positive D3D12 viewport + CCW front-face)
@@ -1063,6 +1080,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->SetPipelineState(pso_ray_effects_);
             GpuPushConstants p{};
             p.frame_globals_bda = fg_handle;
+            p.draw_data_bda = rt_tri_meta_buf_.srv_handle();
+            p.vertex_buf_bda = skinned_vertices_buf_.srv_handle();
             p.aux_buf_bda = material_buf_.srv_handle();
             p.param0 = rt_shadow_raw_.uav_index;
             p.param1 = rim_occ_raw_.uav_index;
@@ -1116,6 +1135,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         // Pass 5: SVGF Spatio-Temporal Denoise
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, rim_occ_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        device_->cmd_transition_texture(cmd, bounce_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
         cmd->SetPipelineState(pso_denoise_svgf_);
         {
@@ -1126,7 +1146,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.param1 = (rt_shadow_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
             p.param2 = w;
             p.param3 = h;
-            p.fparam0 = (eff_mode == 2u) ? 0.08f : 0.20f;
+            p.fparam0 = (eff_mode >= 2u) ? 0.10f : 0.20f;
             p.fparam1 = 1.0f;
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
@@ -1136,9 +1156,22 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.param1 = (rim_occ_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
+
+            const uint32_t hw = std::max(1u, (w + 1u) / 2u);
+            const uint32_t hh = std::max(1u, (h + 1u) / 2u);
+            const uint32_t bgx = (hw + 7u) / 8u;
+            const uint32_t bgy = (hh + 7u) / 8u;
+            p.param0 = (bounce_half_.srv_index & 0xFFFFu) |
+                       (((have_prev_view_proj_ ? prev_bounce_.srv_index : bounce_half_.srv_index) & 0xFFFFu) << 16u);
+            p.param1 = (bounce_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
+            p.param2 = hw;
+            p.param3 = hh;
+            cmd_set_root_pc(cmd, true, p);
+            cmd->Dispatch(bgx, bgy, 1u);
         }
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, rim_occ_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        device_->cmd_transition_texture(cmd, bounce_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 6 & 7: Live2D NPR Shading + Inverted-Hull Outlines (depth read-only so SRVs work in PS)
         device_->cmd_transition_texture(cmd, hdr_scene_, D3D12_RESOURCE_STATE_RENDER_TARGET);

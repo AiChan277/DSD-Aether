@@ -293,6 +293,12 @@ struct DevShellViewportActions {
     float filter_dog_ink_boost{0.60f};
     bool filter_paper_warmth{true};
     float filter_paper_warmth_strength{0.25f};
+    int lighting_fixture{0};
+    float photometric_beam_angle_deg{32.0f};
+    float eye_catchlight_intensity{0.85f};
+    float eye_catchlight_size{1.00f};
+    bool crease_disguise_enabled{false};
+    float crease_disguise_strength{0.70f};
     bool circadian_enabled{false};
     int32_t circadian_timezone_idx{0};
     int32_t circadian_time_override_min{-1};

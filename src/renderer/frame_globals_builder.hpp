@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer/asset_upload/gpu_avatar.hpp"
+#include "renderer/avatar_rt_classifier.hpp"
 #include "renderer/frame_graph.hpp"
 #include "renderer/gpu_structs.hpp"
 #include "renderer/lighting_rig.hpp"
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace aether::renderer::detail {
@@ -277,6 +279,99 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     fg.filter_pro_params[2] = std::clamp(rig.paper_warmth_strength, 0.0f, 1.0f);
     fg.filter_pro_params[3] = std::clamp(rig.rim_depth_offset_px, 1.0f, 6.0f);
 
+    // Photometric lighting fixture shaping + auto-normalized exposure at anchor pivot
+    const uint32_t fix_id = static_cast<uint32_t>(rig.fixture_preset);
+    const float beam_deg = std::clamp(rig.photometric_beam_angle_deg, 8.0f, 55.0f);
+    const float half_beam_rad = 0.5f * beam_deg * kDegToRad;
+    float cos_inner = -1.0f;
+    float cos_outer = -1.0f;
+    float emitter_aspect = 2.15f; // SkyPanel S60-C: 64.5 cm / 30.0 cm
+    float barndoor_soft = 0.0f;
+    float cie_sky_w = 0.0f;
+    float ground_bounce_w = 0.15f;
+    float flux_norm = 1.0f;
+    switch (rig.fixture_preset) {
+    case LightingFixturePreset::ArriSkyPanelS60C:
+        emitter_aspect = 2.15f;
+        flux_norm = 1.00f;
+        break;
+    case LightingFixturePreset::ArriFresnelT2Orbiter: {
+        const float b_deg = std::clamp(beam_deg, 12.0f, 55.0f);
+        const float hr = 0.5f * b_deg * kDegToRad;
+        cos_inner = std::cos(hr * 0.62f);
+        cos_outer = std::cos(hr * 1.15f);
+        emitter_aspect = 1.00f;
+        barndoor_soft = 0.42f;
+        flux_norm = 1.03f;
+        (void)half_beam_rad;
+        break;
+    }
+    case LightingFixturePreset::DedolightDled7: {
+        const float b_deg = std::clamp(beam_deg, 8.0f, 25.0f);
+        const float hr = 0.5f * b_deg * kDegToRad;
+        cos_inner = std::cos(hr * 0.55f);
+        cos_outer = std::cos(hr * 1.10f);
+        emitter_aspect = 1.00f;
+        barndoor_soft = 0.28f;
+        ground_bounce_w = 0.08f;
+        flux_norm = 1.06f;
+        break;
+    }
+    case LightingFixturePreset::BroadcastRingLight:
+        emitter_aspect = 0.52f; // inner/outer ring ratio
+        ground_bounce_w = 0.22f;
+        flux_norm = 0.94f;
+        break;
+    case LightingFixturePreset::NaturalSunlightCieSky:
+        emitter_aspect = 1.00f;
+        cie_sky_w = 1.00f;
+        ground_bounce_w = 0.45f;
+        flux_norm = 0.98f;
+        break;
+    case LightingFixturePreset::NaturalWindowPortal:
+        emitter_aspect = 0.667f; // 1.2m x 1.8m portrait window
+        cie_sky_w = 0.35f;
+        ground_bounce_w = 0.24f;
+        flux_norm = 1.02f;
+        break;
+    }
+    fg.photometric_params0[0] = static_cast<float>(fix_id);
+    fg.photometric_params0[1] = cos_inner;
+    fg.photometric_params0[2] = cos_outer;
+    fg.photometric_params0[3] = emitter_aspect;
+    fg.photometric_params1[0] = barndoor_soft;
+    fg.photometric_params1[1] = cie_sky_w;
+    fg.photometric_params1[2] = ground_bounce_w;
+    fg.photometric_params1[3] = flux_norm;
+
+    fg.eye_catchlight_params[0] = std::clamp(rig.eye_catchlight_intensity, 0.0f, 2.0f);
+    fg.eye_catchlight_params[1] = std::clamp(rig.eye_catchlight_size, 0.25f, 2.0f);
+    fg.eye_catchlight_params[2] =
+        rig.crease_disguise_enabled ? std::clamp(rig.crease_disguise_strength, 0.0f, 1.0f) : 0.0f;
+    fg.eye_catchlight_params[3] = (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) ? 1.0f : 0.0f;
+
+    // Eye sphere centers for curved optical cornea catchlight reflections (from humanoid bones when present)
+    auto resolve_eye_world = [&](uint32_t hbone, float side_sign, float out_c[4]) {
+        const float r = 0.015f * av_scale;
+        out_c[0] = pivot_ws.x + fg.head_right_world[0] * (side_sign * 0.032f * av_scale) +
+                   fg.head_fwd_world[0] * (0.045f * av_scale);
+        out_c[1] = pivot_ws.y + 0.035f * av_scale;
+        out_c[2] = pivot_ws.z + fg.head_right_world[2] * (side_sign * 0.032f * av_scale) +
+                   fg.head_fwd_world[2] * (0.045f * av_scale);
+        out_c[3] = r;
+        if (has_avatar && hbone < 55u) {
+            const uint16_t ji = req.avatar->desc.humanoid_to_joint[hbone];
+            if (ji != 0xFFFFu && ji < req.avatar->joint_anim_world_pos.size()) {
+                const auto& ep = req.avatar->joint_anim_world_pos[ji];
+                out_c[0] = (av_cos * ep[0] + av_sin * ep[2]) * av_scale + req.avatar_pos[0];
+                out_c[1] = ep[1] * av_scale + req.avatar_pos[1];
+                out_c[2] = (-av_sin * ep[0] + av_cos * ep[2]) * av_scale + req.avatar_pos[2];
+            }
+        }
+    };
+    resolve_eye_world(AETHER_BONE_LEFT_EYE, 1.0f, fg.eye_left_center_r);
+    resolve_eye_world(AETHER_BONE_RIGHT_EYE, -1.0f, fg.eye_right_center_r);
+
     const uint8_t req_mode =
         (req.lighting_mode <= 2u) ? req.lighting_mode : static_cast<uint8_t>(req.rt_enabled ? 1 : 0);
     const uint8_t eff_mode = (req_mode == 0u || !req.rt_enabled || !rt_hardware_ready) ? uint8_t{0} : req_mode;
@@ -288,10 +383,14 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
                       (rig.enable_paper_warmth ? 8u : 0u) | ((static_cast<uint32_t>(req.aa_mode) & 3u) << 8u) |
                       ((static_cast<uint32_t>(eff_mode) & 3u) << 10u);
 
+    const Mat4Vec3 coaxial_dir = normalize3({eye.x - pivot_ws.x, eye.y - pivot_ws.y + 0.06f, eye.z - pivot_ws.z});
     for (uint32_t li = 0; li < LightingRig::kMaxLights; ++li) {
         const auto& sl = rig.lights[li];
         auto& gl = fg.lights[li];
-        const Mat4Vec3 ldir = scene_light_dir_to_light(sl);
+        Mat4Vec3 ldir = scene_light_dir_to_light(sl);
+        if (li == 0u && rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) {
+            ldir = coaxial_dir;
+        }
         gl.pos_or_dir[0] = (sl.type == LightType::Directional) ? ldir.x : sl.direction_or_pos[0];
         gl.pos_or_dir[1] = (sl.type == LightType::Directional) ? ldir.y : sl.direction_or_pos[1];
         gl.pos_or_dir[2] = (sl.type == LightType::Directional) ? ldir.z : sl.direction_or_pos[2];
@@ -308,7 +407,9 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
         gl.role_and_flags[1] = (sl.enabled ? 1u : 0u) | (sl.cast_rt_shadow ? 2u : 0u);
         gl.role_and_flags[2] = 0xFFu;
     }
-    fg.shadow_view_proj[0] = build_csm_ortho_matrix(pivot_ws, scene_light_dir_to_light(rig.lights[0]));
+    const Mat4Vec3 key_for_csm =
+        (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) ? coaxial_dir : scene_light_dir_to_light(rig.lights[0]);
+    fg.shadow_view_proj[0] = build_csm_ortho_matrix(pivot_ws, key_for_csm);
     return eff_mode;
 }
 
@@ -321,7 +422,8 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
                                              std::vector<GpuMaterial>& out_materials,
                                              std::vector<GpuSubmeshDraw>& out_submeshes,
                                              std::vector<uint32_t>& out_opaque, std::vector<uint32_t>& out_cutout,
-                                             std::vector<uint32_t>& out_transparent) {
+                                             std::vector<uint32_t>& out_transparent,
+                                             std::vector<uint32_t>* out_cutthrough = nullptr) {
     auto resolve_tex = [&](uint32_t idx, uint32_t fallback) -> uint32_t {
         if (idx == AETHER_INVALID_INDEX || idx >= tex_slots.size()) {
             return fallback;
@@ -330,6 +432,17 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
     };
 
     const size_t mat_count = std::max<size_t>(avatar.materials.size(), 1U);
+    std::vector<uint32_t> mat_sm_flags(mat_count, 0u);
+    std::vector<std::string> mat_sm_names(mat_count);
+    for (const auto& sm : avatar.submeshes) {
+        if (sm.material_index < mat_count) {
+            mat_sm_flags[sm.material_index] |= sm.flags;
+            if (mat_sm_names[sm.material_index].empty() && sm.name_len > 0u) {
+                mat_sm_names[sm.material_index] = avatar.string_slice(sm.name_offset, sm.name_len);
+            }
+        }
+    }
+
     out_materials.assign(mat_count, GpuMaterial{});
     for (size_t i = 0; i < mat_count; ++i) {
         GpuMaterial& gm = out_materials[i];
@@ -367,7 +480,21 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             gm.tex_slots[3] = resolve_tex(m.tex_matcap, UINT32_MAX);
             gm.extra_slots[0] = resolve_tex(m.tex_normal, UINT32_MAX);
             gm.extra_slots[1] = resolve_tex(m.tex_emissive, UINT32_MAX);
-            gm.extra_slots[2] = m.flags;
+
+            const std::string mat_name = read_material_cstr(avatar, m.name_offset);
+            const RtMaskBucket rtb = classify_rt_bucket(mat_name, mat_sm_names[i], m.flags, mat_sm_flags[i]);
+            uint32_t packed_flags = (m.flags & 0xFFu);
+            packed_flags |= (static_cast<uint32_t>(rtb) & 3u) << kMatExtraRtClassShift;
+            if (is_genuine_eye_iris_name(mat_name, mat_sm_names[i])) {
+                packed_flags |= kMatExtraEyeIrisBit;
+            }
+            if (is_body_skin_atlas_name(mat_name, mat_sm_names[i])) {
+                packed_flags |= kMatExtraBodySkinAtlasBit;
+            }
+            if ((m.flags & AETHER_MAT_FLAG_SDF_FACE) != 0u) {
+                packed_flags |= kMatExtraAuthoredSdfBit;
+            }
+            gm.extra_slots[2] = packed_flags;
             gm.extra_slots[3] = m.alpha_mode;
             gm.bounce_tint_zflat[0] = m.base_color[0];
             gm.bounce_tint_zflat[1] = m.base_color[1];
@@ -380,6 +507,7 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             gm.tex_slots[3] = UINT32_MAX;
             gm.extra_slots[0] = UINT32_MAX;
             gm.extra_slots[1] = UINT32_MAX;
+            gm.extra_slots[2] = (static_cast<uint32_t>(RtMaskBucket::BodyCloth) << kMatExtraRtClassShift);
         }
     }
 
@@ -387,6 +515,9 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
     out_opaque.clear();
     out_cutout.clear();
     out_transparent.clear();
+    if (out_cutthrough != nullptr) {
+        out_cutthrough->clear();
+    }
     if (avatar.submeshes.empty()) {
         GpuSubmeshDraw d{};
         d.index_offset = 0;
@@ -405,14 +536,21 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             d.vertex_offset = sm.vertex_offset;
             d.material_index = std::min<uint32_t>(sm.material_index, static_cast<uint32_t>(out_materials.size() - 1));
             const auto& gm = out_materials[d.material_index];
+            const uint32_t rtb = (gm.extra_slots[2] & kMatExtraRtClassMask) >> kMatExtraRtClassShift;
+            const bool is_hair_mesh =
+                (gm.extra_slots[2] & AETHER_MAT_FLAG_HAIR_FRONT_STENCIL) != 0u ||
+                (sm.flags & (AETHER_SUBMESH_FLAG_HAIR_FRONT | AETHER_SUBMESH_FLAG_HAIR_BACK)) != 0u ||
+                (rtb == static_cast<uint32_t>(RtMaskBucket::Hair));
+
+            // Stencil layout: 0x01 = avatar pixels (Crease pass),
+            // 0x04 = hair bang casters (depth-gated forehead drop shadow fallback), 0x08 = face receiver.
             uint32_t st = 0x01u;
-            if ((gm.extra_slots[2] & AETHER_MAT_FLAG_HAIR_FRONT_STENCIL) != 0u ||
-                (sm.flags & AETHER_SUBMESH_FLAG_HAIR_FRONT) != 0u) {
-                st |= 0x02u;
+            if (is_hair_mesh) {
+                st |= 0x04u;
             }
             if ((gm.extra_slots[2] & AETHER_MAT_FLAG_RECEIVES_HAIR_SHADOW) != 0u ||
                 (sm.flags & AETHER_SUBMESH_FLAG_FACE) != 0u) {
-                st |= 0x04u;
+                st |= 0x08u;
             }
             d.stencil_ref = st;
             d.cull_mode = ((gm.extra_slots[2] & AETHER_MAT_FLAG_DOUBLE_SIDED) != 0u) ? 1u : 0u;

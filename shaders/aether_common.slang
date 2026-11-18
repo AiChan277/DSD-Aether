@@ -102,7 +102,12 @@ struct GpuFrameGlobals {
     float4 npr_style_params;  // x=face_norm_flatten, y=cel_band_sharpness, z=shadow_warm_cool_shift, w=iro_tsuke_strength
     float4 npr_style_params2; // x=crease_strength, y=hair_highlight_intensity, z=rim_step_strength, w=reserved
     float4 hair_velocity_ws;  // xyz=smoothed SpringBone hair velocity (m/s), w=indirect_bleed_strength k_gi
-    float4 filter_pro_params; // x=kuwahara_flatten, y=dog_ink_boost, z=paper_warmth, w=rim_depth_offset_px
+    float4 filter_pro_params;     // x=kuwahara_flatten, y=dog_ink_boost, z=paper_warmth, w=rim_depth_offset_px
+    float4 photometric_params0;   // x=fixture_id, y=cos_inner, z=cos_outer, w=emitter_aspect_or_ring_r
+    float4 photometric_params1;   // x=barndoor_softness, y=cie_sky_strength, z=ground_bounce_strength, w=exposure_flux_norm
+    float4 eye_catchlight_params; // x=intensity, y=size, z=crease_disguise_eff, w=coaxial_flag
+    float4 eye_left_center_r;     // xyz=left eye world pos, w=cornea_radius
+    float4 eye_right_center_r;    // xyz=right eye world pos, w=cornea_radius
     GpuLight lights[8];
 };
 
@@ -278,6 +283,15 @@ float3 agx_tonemap_soft(float3 x) {
     float mapped_luma = luma / (1.0 + 0.55 * luma);
     float3 scaled = (luma > 1e-5) ? (x * (mapped_luma / luma)) : x;
     return lerp(scaled, saturate(scaled / (1.0 + 0.15 * scaled)), 0.35);
+}
+
+// Microfacet Charlie velvet/knitwear sheen NDF (Production 2.5D Hybrid Micro-PBR).
+float d_charlie(float roughness, float ndoth) {
+    float r = clamp(roughness, 0.12, 1.0);
+    float inv_r = 1.0 / r;
+    float cos2h = ndoth * ndoth;
+    float sin2h = max(1.0 - cos2h, 0.0078125);
+    return (2.0 + inv_r) * pow(sin2h, inv_r * 0.5) / 6.2831853;
 }
 
 float linear_to_srgb_channel(float c) {

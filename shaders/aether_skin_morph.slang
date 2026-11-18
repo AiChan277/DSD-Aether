@@ -61,12 +61,17 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         surf_flags = surf.flags;
     }
 
+    float3 n_true_ws = normalize_safe(nrm_rot, float3(0.0, 0.0, 1.0));
+    float3 n_proxy_ws = normalize_safe(prx_rot, n_true_ws);
+    // For non-face vertices, proxy_normal holds Rule-B safely welded N_healed; compute per-vertex crease weight.
+    float crease_w = ((surf_flags & 1u) == 0u) ? saturate((1.0 - dot(n_true_ws, n_proxy_ws)) * 4.0) : 0.0;
+
     GpuSkinnedVertex dst = {};
     dst.pos_zflat = float4(world_pos, clamp(src.norm_zflat.w, 0.0, 0.85));
     dst.prev_pos_sdf = float4(prev_pos, src.proxy_sdf.w);
-    dst.true_norm_hair = float4(normalize_safe(nrm_rot, float3(0.0, 0.0, 1.0)), 0.0);
-    dst.proxy_norm_out = float4(normalize_safe(prx_rot, float3(0.0, 0.0, 1.0)), src.pos_out.w);
-    dst.tangent_crease = float4(normalize_safe(tan_rot, float3(0.0, 0.0, 1.0)), 0.0);
+    dst.true_norm_hair = float4(n_true_ws, 0.0);
+    dst.proxy_norm_out = float4(n_proxy_ws, src.pos_out.w);
+    dst.tangent_crease = float4(normalize_safe(tan_rot, float3(0.0, 0.0, 1.0)), crease_w);
     dst.uv = uv0;
     dst.material_id = (surf_flags >> 8u) & 0xFFu;
     dst.flags = surf_flags;

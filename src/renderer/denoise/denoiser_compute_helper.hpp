@@ -95,37 +95,46 @@ inline void destroy_compute_denoiser_pipeline(const rhi::RhiDevice* device, VkPi
     }
     const uint32_t w = std::max(inputs.width != 0 ? inputs.width : width, 1u);
     const uint32_t h = std::max(inputs.height != 0 ? inputs.height : height, 1u);
-    const uint32_t gx = (w + 7u) / 8u;
-    const uint32_t gy = (h + 7u) / 8u;
     const uint32_t has_hist_flag = (inputs.frame_index > 0) ? (1u << 16u) : 0u;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &bindless_set, 0, nullptr);
 
-    auto record_channel = [&](uint32_t raw_slot, uint32_t hist_slot, uint32_t dst_slot, float alpha_scale) noexcept {
+    auto record_channel = [&](uint32_t raw_slot, uint32_t hist_slot, uint32_t dst_slot, float alpha_scale,
+                              uint32_t cw, uint32_t ch) noexcept {
+        const uint32_t cgx = (cw + 7u) / 8u;
+        const uint32_t cgy = (ch + 7u) / 8u;
         GpuPushConstants pc{};
         pc.frame_globals_bda = inputs.frame_globals_bda;
         pc.param0 = (raw_slot & 0xFFFFu) | ((hist_slot & 0xFFFFu) << 16u);
         pc.param1 = (dst_slot & 0xFFFFu) | has_hist_flag;
-        pc.param2 = w;
-        pc.param3 = h;
+        pc.param2 = cw;
+        pc.param3 = ch;
         pc.fparam0 = std::clamp(inputs.temporal_alpha * alpha_scale, 0.05f, 1.0f);
         pc.fparam1 = 1.0f;
         vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, gx, gy, 1);
+        vkCmdDispatch(cmd, cgx, cgy, 1);
     };
 
     if (inputs.raw_shadow_sampled_slot != UINT32_MAX && inputs.denoised_shadow_storage_slot != UINT32_MAX) {
         const uint32_t hist = (inputs.history_shadow_sampled_slot != UINT32_MAX) ? inputs.history_shadow_sampled_slot
                                                                                  : inputs.raw_shadow_sampled_slot;
-        record_channel(inputs.raw_shadow_sampled_slot, hist, inputs.denoised_shadow_storage_slot, 1.0f);
+        record_channel(inputs.raw_shadow_sampled_slot, hist, inputs.denoised_shadow_storage_slot, 1.0f, w, h);
     }
 
     if (inputs.raw_rim_sampled_slot != UINT32_MAX && inputs.denoised_rim_storage_slot != UINT32_MAX &&
         inputs.denoised_rim_storage_slot != inputs.denoised_shadow_storage_slot) {
         const uint32_t hist = (inputs.history_rim_sampled_slot != UINT32_MAX) ? inputs.history_rim_sampled_slot
                                                                               : inputs.raw_rim_sampled_slot;
-        record_channel(inputs.raw_rim_sampled_slot, hist, inputs.denoised_rim_storage_slot, 1.15f);
+        record_channel(inputs.raw_rim_sampled_slot, hist, inputs.denoised_rim_storage_slot, 1.15f, w, h);
+    }
+
+    if (inputs.raw_bounce_sampled_slot != UINT32_MAX && inputs.denoised_bounce_storage_slot != UINT32_MAX) {
+        const uint32_t bw = std::max(inputs.bounce_width != 0u ? inputs.bounce_width : (w / 2u), 1u);
+        const uint32_t bh = std::max(inputs.bounce_height != 0u ? inputs.bounce_height : (h / 2u), 1u);
+        const uint32_t hist = (inputs.history_bounce_sampled_slot != UINT32_MAX) ? inputs.history_bounce_sampled_slot
+                                                                                 : inputs.raw_bounce_sampled_slot;
+        record_channel(inputs.raw_bounce_sampled_slot, hist, inputs.denoised_bounce_storage_slot, 1.0f, bw, bh);
     }
     return {};
 }

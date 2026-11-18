@@ -1323,8 +1323,13 @@ Expected<ID3D12PipelineState*> D3D12Device::create_graphics_pso(const D3D12Graph
     p.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
     p.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
     p.DepthStencilState.FrontFace.StencilPassOp = static_cast<D3D12_STENCIL_OP>(desc.stencil_pass_op);
-    p.DepthStencilState.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    p.DepthStencilState.FrontFace.StencilFunc = static_cast<D3D12_COMPARISON_FUNC>(desc.stencil_func);
     p.DepthStencilState.BackFace = p.DepthStencilState.FrontFace;
+    if (desc.color_write_disable) {
+        for (UINT i = 0; i < 4u; ++i) {
+            p.BlendState.RenderTarget[i].RenderTargetWriteMask = 0u;
+        }
+    }
     p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
     uint32_t rt_count = desc.num_render_targets;

@@ -147,7 +147,9 @@ struct D3D12GraphicsPipelineDesc {
     bool stencil_enable{false};
     uint8_t stencil_read_mask{0xFFu};
     uint8_t stencil_write_mask{0xFFu};
-    int stencil_pass_op{3}; // D3D12_STENCIL_OP_REPLACE (3)
+    int stencil_pass_op{3}; // D3D12_STENCIL_OP_REPLACE (3), KEEP (1)
+    int stencil_func{8};    // D3D12_COMPARISON_FUNC_ALWAYS (8), EQUAL (3), NOT_EQUAL (6)
+    bool color_write_disable{false};
     int cull_mode{3};  // D3D12_CULL_MODE_BACK (3), FRONT (2), NONE (1)
     bool front_counter_clockwise{true};
     bool wireframe{false};

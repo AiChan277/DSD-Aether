@@ -602,6 +602,13 @@ TEST_CASE("Tasks 3-6: 3-tier lighting, Path Tracing SVGF lock, pre-cel GI bleed,
     std::printf("[FILTER_PRO] roi_diff=%.4f\n", f2d_diff);
     CHECK(f2d_diff > 1.0);
 
+    // Circadian Golden Hour DX12 parity check (2.5D Path Tracing at golden-hour sun)
+    const auto cres = aether::renderer::evaluate_circadian_lighting(17.58f);
+    aether::renderer::apply_circadian_to_rig(cres, rig);
+    const auto shinkai_dx = render_one(18, 2u, cam, {0.0f, 0.0f, 0.0f});
+    CHECK(analyze_rgba8(shinkai_dx, kW, kH).opaque_count > (kW * kH) / 25u);
+    CHECK(aether::test::save_rgba8_png(snap_dir / "dx12_shinkai_golden_hour.png", kW, kH, shinkai_dx.data()));
+
     CHECK(d3d12->poll_debug_errors() == 0u);
     fg.destroy();
     avatar->destroy();
@@ -801,4 +808,30 @@ TEST_CASE("Task 8: NPU Safe-Zone Box C^1 tanh compression, pitch glitch clamping
     }
     CHECK(max_step <= 0.005f + 1e-6f); // never moves faster than the input (no jumps)
     CHECK(prev_x > 0.95f * cfg.bounds_max[0]);
+
+    // 5) Chin-into-Chest / Collar anti-clipping verification under downward pitch + dip
+    {
+        AetherTrackingFrame chin_tf{};
+        chin_tf.valid_flags = 0x0Fu;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            chin_tf.joint_rotations_quat[b][3] = 1.0f;
+        }
+        chin_tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.38f;
+        chin_tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+        const float dip_rad = 0.5f * 38.0f * (3.14159265f / 180.0f);
+        chin_tf.joint_rotations_quat[AETHER_BONE_HEAD][0] = std::sin(dip_rad);
+        chin_tf.joint_rotations_quat[AETHER_BONE_HEAD][3] = std::cos(dip_rad);
+
+        NpuPostProcessor p_chin;
+        NpuMovementBoundsConfig c_chin = cfg;
+        c_chin.enable_bounds = false;
+        const auto d1 = p_chin.process(chin_tf, c_chin);
+        CHECK(d1.collision_projected);
+        CHECK(d1.residual_penetration_m == 0.0f);
+
+        AetherTrackingFrame chin_again = chin_tf;
+        const auto d2 = p_chin.process(chin_again, c_chin);
+        CHECK_FALSE(d2.collision_projected);
+        CHECK(d2.residual_penetration_m == 0.0f);
+    }
 }

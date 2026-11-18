@@ -48,6 +48,12 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.filter_dog_ink` | Render | DoG Ink AA | `float` | T3 | `0.60` | `[0.0, 1.5]` | — | — | persist, project, undoable |
 | `render.filter_paper_warmth` | Render | Anime Paper Warmth | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.filter_paper_warmth_amt` | Render | Warmth Strength | `float` | T3 | `0.25` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.lighting_fixture` | Render | Lighting Fixture | `enum` | T3 | `0.0` | `[0.0, 5.0]` | — | — | persist, project, undoable |
+| `render.photometric_beam_angle` | Render | Beam Angle | `float` | T3 | `32.0` | `[8.0, 55.0]` | deg | — | persist, project, undoable |
+| `render.eye_catchlight_intensity` | Render | Catchlight Int. | `float` | T3 | `0.85` | `[0.0, 2.0]` | — | — | persist, project, undoable |
+| `render.eye_catchlight_size` | Render | Catchlight Size | `float` | T3 | `1.00` | `[0.25, 2.0]` | — | — | persist, project, undoable |
+| `render.crease_disguise_enabled` | Render | [TESTING] Creases | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `render.crease_disguise_strength` | Render | Crease Strength | `float` | T3 | `0.70` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.circadian_enabled` | Render | Circadian Lighting | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.circadian_time_min` | Render | Time Override | `int` | T3 | `-1.0` | `[-1.0, 1439.0]` | min | — | persist, project, undoable |
 | `rnd.debug.force_device_lost` | Diagnostics | Force Device Lost | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | runtime |

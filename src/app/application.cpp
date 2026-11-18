@@ -1301,6 +1301,12 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.crease_strength = npr_renderer.lighting().crease_strength;
         vp_actions.hair_highlight_intensity = npr_renderer.lighting().hair_highlight_intensity;
         vp_actions.rim_step_strength = npr_renderer.lighting().rim_step_strength;
+        vp_actions.lighting_fixture = static_cast<int>(npr_renderer.lighting().fixture_preset);
+        vp_actions.photometric_beam_angle_deg = npr_renderer.lighting().photometric_beam_angle_deg;
+        vp_actions.eye_catchlight_intensity = npr_renderer.lighting().eye_catchlight_intensity;
+        vp_actions.eye_catchlight_size = npr_renderer.lighting().eye_catchlight_size;
+        vp_actions.crease_disguise_enabled = npr_renderer.lighting().crease_disguise_enabled;
+        vp_actions.crease_disguise_strength = npr_renderer.lighting().crease_disguise_strength;
         if (opts.smoke_frames == 0) {
             if (rhi->is_intel_igpu() || !rhi->rt_supported()) {
                 (void)shell.workspace().params().set(ui::ParamId::RenderLightingMode, 0.0);
@@ -1963,6 +1969,9 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.circadian_timezone = vp_actions.circadian_timezone_idx;
                 rig.circadian_time_minutes = vp_actions.circadian_time_override_min;
                 if (!vp_actions.circadian_enabled) {
+                    const auto preset = static_cast<renderer::LightingFixturePreset>(
+                        std::clamp(vp_actions.lighting_fixture, 0, 5));
+                    renderer::apply_lighting_fixture_preset(rig, preset, vp_actions.photometric_beam_angle_deg);
                     rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
                     rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
                     rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
@@ -1972,15 +1981,6 @@ int run_application(const AppLaunchOptions& opts) {
                     rig.lights[0].intensity = vp_actions.key_intensity;
                     rig.lights[1].intensity = vp_actions.fill_intensity;
                     rig.lights[2].intensity = vp_actions.rim_intensity;
-                    rig.lights[0].color[0] = 1.0f;
-                    rig.lights[0].color[1] = 0.98f;
-                    rig.lights[0].color[2] = 0.95f;
-                    rig.lights[1].color[0] = 0.62f;
-                    rig.lights[1].color[1] = 0.76f;
-                    rig.lights[1].color[2] = 1.0f;
-                    rig.lights[2].color[0] = 0.78f;
-                    rig.lights[2].color[1] = 0.89f;
-                    rig.lights[2].color[2] = 1.0f;
                     rig.shadow_warm_cool_shift = vp_actions.shadow_warm_cool_shift;
                 }
                 rig.global_live2d_flatness = vp_actions.live2d_flatness;
@@ -1992,6 +1992,10 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.crease_strength = vp_actions.crease_strength;
                 rig.hair_highlight_intensity = vp_actions.hair_highlight_intensity;
                 rig.rim_step_strength = vp_actions.rim_step_strength;
+                rig.eye_catchlight_intensity = vp_actions.eye_catchlight_intensity;
+                rig.eye_catchlight_size = vp_actions.eye_catchlight_size;
+                rig.crease_disguise_enabled = vp_actions.crease_disguise_enabled;
+                rig.crease_disguise_strength = vp_actions.crease_disguise_strength;
                 vp_actions.lighting_dirty = false;
             }
             if (vp_actions.npu_bounds_dirty) {

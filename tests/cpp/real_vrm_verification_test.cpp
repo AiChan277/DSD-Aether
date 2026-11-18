@@ -5,6 +5,9 @@
 #include "core/clock.hpp"
 #include "core/hot_path_guard.hpp"
 #include "renderer/asset_upload/asset_job.hpp"
+#include "renderer/avatar_rt_classifier.hpp"
+#include "renderer/circadian_lighting.hpp"
+#include "renderer/frame_globals_builder.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "renderer/preview_pass.hpp"
 #include "rhi/rhi_device.hpp"
@@ -394,8 +397,76 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     capture_shot("neck_closeup_rt_on", neck, true);
     capture_shot("neck_closeup_rt_off", neck, false);
 
-    // Face close-ups: neutral, then both eyes fully blinked + mouth "A". With per-primitive morph duplication the
-    // blink only moved the eyelid skin (lashes / eye whites / irises stayed open), so this shot is the visual check.
+    // Verify 4-mask RT geometry partitioning on real VRM (FaceSkin 0x01, Hair 0x02, HandsProps 0x04, BodyCloth 0x08)
+    {
+        const auto part = aether::renderer::build_rt_partitioned_indices(*avatar);
+        std::printf("[RT_4MASK] face=%u hair=%u hands=%u body=%u tris\n", part.bucket_index_count[0] / 3u,
+                    part.bucket_index_count[1] / 3u, part.bucket_index_count[2] / 3u, part.bucket_index_count[3] / 3u);
+        CHECK(part.bucket_index_count[0] > 0u);
+        CHECK(part.bucket_index_count[1] > 0u);
+        CHECK(part.bucket_index_count[2] > 0u);
+        CHECK(part.bucket_index_count[3] > 0u);
+    }
+
+    // Visual Benchmark Modes on 8590256991748008892.vrm: Mode 0 Traditional, Mode 1 WuWa Hybrid RT,
+    // Mode 2 2.5D Path Tracing, and Makoto Shinkai Cinema Golden Hour (Circadian 17:35 sun).
+    {
+        const auto base_rig = rig;
+        auto capture_mode = [&](const char* suffix, uint8_t lm, bool shinkai_golden, bool wuwa_nextgen) {
+            rig = base_rig;
+            rig.lighting_mode = lm;
+            if (wuwa_nextgen) {
+                rig.cel_band_sharpness = 0.018f;
+                rig.rim_step_strength = 0.65f;
+                rig.lights[0].orbit_azimuth_deg = 36.0f;
+                rig.lights[0].orbit_elevation_deg = 26.0f;
+                rig.lights[0].intensity = 1.08f;
+            } else if (shinkai_golden) {
+                rig.indirect_bleed_strength = 1.05f;
+                rig.bloom_intensity = 0.14f;
+                rig.enable_paper_warmth = true;
+                rig.paper_warmth_strength = 0.35f;
+                const auto cres = aether::renderer::evaluate_circadian_lighting(17.58f);
+                aether::renderer::apply_circadian_to_rig(cres, rig);
+            }
+            const int warmup = (lm >= 2u) ? 8 : 4;
+            for (int w = 0; w < warmup; ++w) {
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = avatar.get();
+                req.rig = &rig;
+                req.camera = tq;
+                req.frame_index = fidx;
+                req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
+                req.lighting_mode = lm;
+                req.rt_enabled = (lm > 0u) && rhi->rt_supported();
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.render_csm_shadow = true;
+                REQUIRE(renderer.render_headless_frame(req).has_value());
+                ++fidx;
+            }
+            const auto outs = renderer.graph().outputs();
+            auto px = renderer.graph().readback_image_rgba8(outs.viewport_image,
+                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+            REQUIRE(px.has_value());
+            const auto& snap = renderer.graph().timing().latest_snapshot();
+            std::printf("[BENCH %s] mode=%u total=%.2fms rt=%.2fms denoise=%.2fms npr=%.2fms post=%.2fms\n", suffix,
+                        static_cast<unsigned>(lm), static_cast<double>(snap.gpu_total_ms),
+                        static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::RayTrace)]),
+                        static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Denoise)]),
+                        static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Live2dNpr)]),
+                        static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::ToneMap)]));
+            REQUIRE(aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH,
+                                                  px.value().data()));
+        };
+        capture_mode("mode0_traditional", 0u, false, false);
+        capture_mode("preset_wuthering_waves", 1u, false, true);
+        capture_mode("mode2_path_tracing", 2u, false, false);
+        capture_mode("preset_shinkai_golden_hour", 2u, true, false);
+        rig = base_rig;
+    }
+
+    // Face close-ups: neutral (both RT ON and OFF), then both eyes fully blinked + mouth "A".
     aether::renderer::PreviewCamera face = fit_cam;
     face.target_y = fit_cam.target_y + 0.53f;
     face.yaw_rad = 0.0f;
@@ -403,6 +474,55 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
     face.distance = 0.36f;
     face.fovy_rad = 0.50f;
     capture_shot("face_neutral", face, false);
+    capture_shot("face_neutral_rt_on", face, true);
+
+    // Side key light (65 deg azimuth, 30 deg elevation): exercises the face SDF terminator, hair-bang cast
+    // shadows on the face, the SSS terminator band and shadow-side ambient, which a frontal key hides.
+    {
+        const auto base_rig = rig;
+        auto capture_side = [&](const char* suffix, const aether::renderer::PreviewCamera& cam, uint8_t lm,
+                                float az_deg = 65.0f) {
+            rig = base_rig;
+            rig.lighting_mode = lm;
+            rig.lights[0].orbit_azimuth_deg = az_deg;
+            rig.lights[0].orbit_elevation_deg = 30.0f;
+            const int warmup = (lm >= 2u) ? 8 : 4;
+            for (int w = 0; w < warmup; ++w) {
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = avatar.get();
+                req.rig = &rig;
+                req.camera = cam;
+                req.frame_index = fidx;
+                req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
+                req.lighting_mode = lm;
+                req.rt_enabled = (lm > 0u) && rhi->rt_supported();
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.render_csm_shadow = true;
+                REQUIRE(renderer.render_headless_frame(req).has_value());
+                ++fidx;
+            }
+            const auto outs = renderer.graph().outputs();
+            auto px = renderer.graph().readback_image_rgba8(outs.viewport_image,
+                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+            REQUIRE(px.has_value());
+            const auto st = analyze_rgba8(px.value(), kW, kH);
+            std::printf("[SIDE %s] mode=%u fg=%u mean_luma=%.1f p95_luma=%.1f\n", suffix, static_cast<unsigned>(lm),
+                        st.fg_pixels, st.mean_luma, st.p95_luma);
+            REQUIRE(aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH,
+                                                  px.value().data()));
+        };
+        capture_side("side_face_mode0_traditional", face, 0u);
+        capture_side("side_face_mode1_hybrid_rt", face, 1u);
+        capture_side("side_face_mode2_path_tracing", face, 2u);
+        capture_side("side_three_quarter_mode1_hybrid_rt", tq, 1u);
+        capture_side("side_three_quarter_mode2_path_tracing", tq, 2u);
+        capture_side("side_left_face_mode1_hybrid_rt", face, 1u, -65.0f);
+        capture_side("side_back_face_mode1_hybrid_rt", face, 1u, 110.0f);
+        capture_side("side_front_face_mode1_hybrid_rt", face, 1u, 20.0f);
+        rig = base_rig;
+    }
+
     std::array<float, aether::animation::kMaxMorphs> expr{};
     std::copy_n(skin.morph_weights, std::min<size_t>(expr.size(), skin.morph_count), expr.begin());
     expr[0] = 1.0f;  // eyeBlinkLeft  -> VRM Blink_L
@@ -1945,4 +2065,684 @@ TEST_CASE("Real VRM 8590256991748008892.vrm Camera SmoothDamp transition & Self-
     }
     const float settled_y = engine.bone_pos_ws()[AETHER_BONE_LEFT_HAND].y;
     CHECK(settled_y < raised_y - 0.10f);
+}
+
+TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.vrm", "[vrm][probe]") {
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
+    }
+
+    aether::HotPathGuard::install();
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.enable_validation = false;
+    cfg.require_validation = false;
+    cfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    REQUIRE(dev_res.has_value());
+    aether::rhi::RhiDevice* rhi = dev_res.value();
+
+    aether::renderer::AssetJob job;
+    aether::HighResTimer timer;
+    const uint32_t load_flags =
+        aether::renderer::AssetJob::kDefaultLoadFlags & ~static_cast<uint32_t>(AETHER_LOAD_FLAG_TEXTURE_CACHE);
+    job.start_load(*rhi, vrm_path.string(), load_flags);
+    const uint64_t deadline_us = aether::now_us() + 30000000ULL;
+    while (job.state() == aether::renderer::AssetJobState::Loading && aether::now_us() < deadline_us) {
+        timer.sleep_us(500);
+    }
+    REQUIRE(job.state() == aether::renderer::AssetJobState::ReadyForGpu);
+    auto avatar_res = job.finalize_gpu_upload(*rhi);
+    REQUIRE(avatar_res.has_value());
+    auto avatar = std::move(avatar_res.value());
+
+    constexpr uint32_t kW = 1280;
+    constexpr uint32_t kH = 720;
+    aether::renderer::RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = rhi->rt_supported();
+    aether::renderer::NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    // Pose avatar into neutral upright A-pose matching real_vrm_verification_test
+    const aether::animation::RestSkeletonMetrics rm = build_vrm_rest_metrics(*avatar);
+    aether::animation::SimEngine engine;
+    engine.reset(rm);
+    aether::animation::SimEngineConfig sim_cfg{};
+    sim_cfg.visibility.enable_idle_breathing = false;
+    AetherDspSyncPacket dsp{};
+    aether::animation::SkinningFrame skin{};
+    uint64_t sim_t_us = 1000000ULL;
+    AetherHostConfig hcfg{};
+    hcfg.struct_size = static_cast<uint32_t>(sizeof(hcfg));
+    hcfg.worker_threads = 2;
+    AetherHostHandle graph_host = nullptr;
+    REQUIRE(aether_host_create(&hcfg, &graph_host) == AETHER_OK);
+    for (int f = 0; f < 60; ++f) {
+        AetherTrackingFrame tf{};
+        tf.frame_sequence = static_cast<uint32_t>(f + 1);
+        tf.capture_timestamp_us = sim_t_us;
+        tf.inference_complete_us = sim_t_us;
+        tf.valid_flags = 0x01U | 0x08U;
+        tf.upper_body_confidence = 0.95f;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+            tf.joint_rotations_quat[b][3] = 1.0f;
+        }
+        tf.joint_positions_ws[AETHER_BONE_HIPS][0] = rm.rest_local_positions[AETHER_BONE_HIPS].x;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][1] = rm.rest_local_positions[AETHER_BONE_HIPS].y;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][2] = rm.rest_local_positions[AETHER_BONE_HIPS].z;
+        tf.joint_positions_ws[AETHER_BONE_HIPS][3] = 0.95f;
+        tf.joint_positions_ws[AETHER_BONE_SPINE][3] = 0.95f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.48f;
+        tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.98f;
+        AetherGraphInputs gin{};
+        gin.tracking = &tf;
+        gin.now_us = sim_t_us;
+        gin.dt_s = 1.0f / 60.0f;
+        gin.tick_index = static_cast<uint32_t>(f);
+        AetherGraphOutputs graph_out{};
+        aether_set_thread_role(AETHER_THREAD_ROLE_T2);
+        REQUIRE(aether_host_evaluate_active(graph_host, &gin, &graph_out) == AETHER_OK);
+        aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+        engine.tick(tf, dsp, graph_out, sim_t_us, 0.0f, sim_cfg, skin);
+        sim_t_us += 16667ULL;
+    }
+    aether_host_destroy(graph_host);
+    avatar->update_pose(0, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
+    avatar->update_pose(1, 1, skin.bone_matrices, skin.bone_count, skin.morph_weights, skin.morph_count, true);
+
+    // Camera framing face + neck + cardigan + inner shirt + ribbon + hair simultaneously
+    const auto fit_cam = aether::renderer::fit_camera_to_avatar(*avatar);
+    aether::renderer::PreviewCamera cam = fit_cam;
+    cam.target_y = fit_cam.target_y + 0.36f;
+    cam.yaw_rad = 0.22f;
+    cam.pitch_rad = 0.04f;
+    cam.distance = 0.72f;
+    cam.fovy_rad = 0.56f;
+
+    auto rig = aether::renderer::LightingRig::default_three_point();
+    rig.lighting_mode = 2u; // 2.5D Path Tracing
+    rig.bg_rgba[0] = 0.067f;
+    rig.bg_rgba[1] = 0.075f;
+    rig.bg_rgba[2] = 0.094f;
+    rig.bg_rgba[3] = 1.0f;
+
+    const float aspect = static_cast<float>(kW) / static_cast<float>(kH);
+    aether::renderer::GpuMat4 m_view{}, m_inv_view{}, m_proj{}, m_inv_proj{}, m_vp{};
+    aether::renderer::detail::Mat4Vec3 m_eye{};
+    aether::renderer::detail::build_camera_matrices(cam, aspect, m_view, m_inv_view, m_proj, m_inv_proj, m_vp, m_eye);
+
+    float pivot_ws[3] = {cam.target_x, cam.target_y, cam.target_z};
+    if (avatar->desc.head_joint < avatar->joint_anim_world_pos.size()) {
+        const auto& hp = avatar->joint_anim_world_pos[avatar->desc.head_joint];
+        pivot_ws[0] = hp[0];
+        pivot_ws[1] = hp[1];
+        pivot_ws[2] = hp[2];
+    }
+    const float pivot_vz = m_view.col0[2] * pivot_ws[0] + m_view.col1[2] * pivot_ws[1] +
+                           m_view.col2[2] * pivot_ws[2] + m_view.col3[2];
+
+    auto project_point = [&](const float p[3], float z_flat_w, int& out_px, int& out_py, float& out_ndc_z) -> bool {
+        const float vx = m_view.col0[0] * p[0] + m_view.col1[0] * p[1] + m_view.col2[0] * p[2] + m_view.col3[0];
+        const float vy = m_view.col0[1] * p[0] + m_view.col1[1] * p[1] + m_view.col2[1] * p[2] + m_view.col3[1];
+        const float vz = m_view.col0[2] * p[0] + m_view.col1[2] * p[1] + m_view.col2[2] * p[2] + m_view.col3[2];
+        const float k = std::clamp(z_flat_w, 0.0f, 0.85f) * rig.global_live2d_flatness;
+        const float fz = vz + (pivot_vz - vz) * k;
+        const float cx = m_proj.col0[0] * vx + m_proj.col1[0] * vy + m_proj.col2[0] * fz + m_proj.col3[0];
+        const float cy = m_proj.col0[1] * vx + m_proj.col1[1] * vy + m_proj.col2[1] * fz + m_proj.col3[1];
+        const float cw = m_proj.col0[3] * vx + m_proj.col1[3] * vy + m_proj.col2[3] * fz + m_proj.col3[3];
+        if (cw <= 0.05f) {
+            return false;
+        }
+        const float cz_true = m_proj.col2[2] * vz + m_proj.col3[2];
+        const float cw_true = m_proj.col2[3] * vz + m_proj.col3[3];
+        out_ndc_z = cz_true / std::max(std::abs(cw_true), 1e-5f);
+        const float ndc_x = cx / cw;
+        const float ndc_y = cy / cw;
+        const float u = ndc_x * 0.5f + 0.5f;
+        const float v = 0.5f - ndc_y * 0.5f;
+        out_px = static_cast<int>(u * static_cast<float>(kW));
+        out_py = static_cast<int>(v * static_cast<float>(kH));
+        return out_px >= 2 && out_px < static_cast<int>(kW) - 2 && out_py >= 2 && out_py < static_cast<int>(kH) - 2;
+    };
+
+    auto srgb_to_lin = [](float c) -> float {
+        return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+
+    auto sample_raw_tex = [&](uint32_t tex_idx, float u, float v, uint8_t out_srgb[4], float out_lin[3]) {
+        std::fill_n(out_srgb, 4, 255);
+        std::fill_n(out_lin, 3, 1.0f);
+        if (tex_idx >= avatar->texture_descs.size() || avatar->cpu_texture_pixels.empty()) {
+            return;
+        }
+        const auto& td = avatar->texture_descs[tex_idx];
+        if (td.format != AETHER_TEX_FORMAT_RGBA8_SRGB && td.format != AETHER_TEX_FORMAT_RGBA8_UNORM) {
+            return;
+        }
+        const uint32_t w = std::max(1u, td.width);
+        const uint32_t h = std::max(1u, td.height);
+        const uint32_t x = static_cast<uint32_t>(std::clamp(u, 0.0f, 1.0f) * static_cast<float>(w - 1));
+        const uint32_t y = static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * static_cast<float>(h - 1));
+        const uint64_t off = td.pixel_offset + (static_cast<uint64_t>(y) * w + x) * 4ULL;
+        if (off + 4ULL <= avatar->cpu_texture_pixels.size()) {
+            for (int c = 0; c < 4; ++c) {
+                out_srgb[c] = avatar->cpu_texture_pixels[static_cast<size_t>(off + c)];
+            }
+            for (int c = 0; c < 3; ++c) {
+                const float f = static_cast<float>(out_srgb[c]) / 255.0f;
+                out_lin[c] = (td.format == AETHER_TEX_FORMAT_RGBA8_SRGB) ? srgb_to_lin(f) : f;
+            }
+        }
+    };
+
+    // Build exact CPU z-buffer across all non-transparent triangles so we pick genuinely visible pixels
+    std::vector<float> zbuf(static_cast<size_t>(kW) * kH, 1e9f);
+    std::vector<int32_t> tri_submesh(static_cast<size_t>(kW) * kH, -1);
+    std::vector<uint32_t> tri_idx_buf(static_cast<size_t>(kW) * kH, 0u);
+    std::vector<float> tri_u_buf(static_cast<size_t>(kW) * kH, 0.0f);
+    std::vector<float> tri_v_buf(static_cast<size_t>(kW) * kH, 0.0f);
+    std::vector<float> tri_w0_buf(static_cast<size_t>(kW) * kH, 1.0f);
+    std::vector<float> tri_w1_buf(static_cast<size_t>(kW) * kH, 0.0f);
+    for (size_t si = 0; si < avatar->submeshes.size(); ++si) {
+        const auto& sm = avatar->submeshes[si];
+        if ((sm.flags & AETHER_SUBMESH_FLAG_TRANSPARENT) != 0u) {
+            continue;
+        }
+        for (uint32_t ii = 0; ii + 2u < sm.index_count; ii += 3u) {
+            const uint32_t i0 = avatar->rest_indices[sm.index_offset + ii + 0u];
+            const uint32_t i1 = avatar->rest_indices[sm.index_offset + ii + 1u];
+            const uint32_t i2 = avatar->rest_indices[sm.index_offset + ii + 2u];
+            int x0, y0, x1, y1, x2, y2;
+            float z0, z1, z2;
+            if (!project_point(avatar->skinned_vertices_scratch[i0].position,
+                               avatar->skinned_vertices_scratch[i0].z_flatten_weight, x0, y0, z0) ||
+                !project_point(avatar->skinned_vertices_scratch[i1].position,
+                               avatar->skinned_vertices_scratch[i1].z_flatten_weight, x1, y1, z1) ||
+                !project_point(avatar->skinned_vertices_scratch[i2].position,
+                               avatar->skinned_vertices_scratch[i2].z_flatten_weight, x2, y2, z2)) {
+                continue;
+            }
+            const int minx = std::max(0, std::min({x0, x1, x2}));
+            const int maxx = std::min(static_cast<int>(kW) - 1, std::max({x0, x1, x2}));
+            const int miny = std::max(0, std::min({y0, y1, y2}));
+            const int maxy = std::min(static_cast<int>(kH) - 1, std::max({y0, y1, y2}));
+            const float area = static_cast<float>((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+            if (std::abs(area) < 0.5f) {
+                continue;
+            }
+            const float inv_area = 1.0f / area;
+            for (int py = miny; py <= maxy; ++py) {
+                for (int px = minx; px <= maxx; ++px) {
+                    const float w0 = static_cast<float>((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * inv_area;
+                    const float w1 = static_cast<float>((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * inv_area;
+                    const float w2 = 1.0f - w0 - w1;
+                    if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+                        const float z = w0 * z0 + w1 * z1 + w2 * z2;
+                        const size_t pidx = static_cast<size_t>(py) * kW + px;
+                        if (z < zbuf[pidx]) {
+                            zbuf[pidx] = z;
+                            tri_submesh[pidx] = static_cast<int32_t>(si);
+                            tri_idx_buf[pidx] = sm.index_offset + ii;
+                            tri_w0_buf[pidx] = w0;
+                            tri_w1_buf[pidx] = w1;
+                            tri_u_buf[pidx] = w0 * avatar->rest_surfaces[i0].uv0[0] +
+                                              w1 * avatar->rest_surfaces[i1].uv0[0] +
+                                              w2 * avatar->rest_surfaces[i2].uv0[0];
+                            tri_v_buf[pidx] = w0 * avatar->rest_surfaces[i0].uv0[1] +
+                                              w1 * avatar->rest_surfaces[i1].uv0[1] +
+                                              w2 * avatar->rest_surfaces[i2].uv0[1];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct ProbePoint {
+        const char* name;
+        int px{-1};
+        int py{-1};
+        uint32_t mat_id{0};
+        std::string mat_name;
+        uint8_t tex_srgb[4]{};
+        float tex_lin[3]{};
+        float world_n[3]{};
+        float proxy_n[3]{};
+    };
+
+    // Scan visible pixels to find exact representatives for each requested anatomical/garment landmark
+    const auto key_dir_s = aether::renderer::detail::scene_light_dir_to_light(rig.lights[0]);
+    std::vector<ProbePoint> probes;
+    auto find_best = [&](const char* label, auto pred, auto score_fn) {
+        ProbePoint best{};
+        best.name = label;
+        float best_score = -1e9f;
+        for (int py = 4; py < static_cast<int>(kH) - 4; ++py) {
+            for (int px = 4; px < static_cast<int>(kW) - 4; ++px) {
+                const size_t pidx = static_cast<size_t>(py) * kW + px;
+                const int32_t si = tri_submesh[pidx];
+                if (si < 0) continue;
+                // Require 5x5 neighborhood to belong to the same submesh so we avoid silhouette edges
+                bool interior = true;
+                for (int dy = -2; dy <= 2 && interior; ++dy) {
+                    for (int dx = -2; dx <= 2; ++dx) {
+                        if (tri_submesh[static_cast<size_t>(py + dy) * kW + (px + dx)] != si) {
+                            interior = false;
+                            break;
+                        }
+                    }
+                }
+                if (!interior) continue;
+                const auto& sm = avatar->submeshes[static_cast<size_t>(si)];
+                const uint32_t tri_base = tri_idx_buf[pidx];
+                const uint32_t v0 = avatar->rest_indices[tri_base + 0u];
+                const uint32_t v1 = avatar->rest_indices[tri_base + 1u];
+                const uint32_t v2 = avatar->rest_indices[tri_base + 2u];
+                const float w0 = tri_w0_buf[pidx];
+                const float w1 = tri_w1_buf[pidx];
+                const float w2 = 1.0f - w0 - w1;
+                const auto& sv0 = avatar->skinned_vertices_scratch[v0];
+                const auto& sv1 = avatar->skinned_vertices_scratch[v1];
+                const auto& sv2 = avatar->skinned_vertices_scratch[v2];
+                AetherVertex25D sv = sv0;
+                for (int k = 0; k < 3; ++k) {
+                    sv.position[k] = w0 * sv0.position[k] + w1 * sv1.position[k] + w2 * sv2.position[k];
+                    sv.true_normal[k] = w0 * sv0.true_normal[k] + w1 * sv1.true_normal[k] + w2 * sv2.true_normal[k];
+                    sv.proxy_normal[k] = w0 * sv0.proxy_normal[k] + w1 * sv1.proxy_normal[k] + w2 * sv2.proxy_normal[k];
+                }
+                auto norm3 = [](float v[3]) {
+                    const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+                    if (l > 1e-6f) {
+                        v[0] /= l;
+                        v[1] /= l;
+                        v[2] /= l;
+                    }
+                };
+                norm3(sv.true_normal);
+                norm3(sv.proxy_normal);
+                const uint32_t mat_id = sm.material_index;
+                const auto& mat = avatar->materials[mat_id];
+                uint8_t tsrgb[4]{};
+                float tlin[3]{};
+                sample_raw_tex(mat.tex_base, tri_u_buf[pidx], tri_v_buf[pidx], tsrgb, tlin);
+                if (tsrgb[3] < 200) continue;
+                const std::string mname = aether::renderer::read_material_cstr(*avatar, mat.name_offset);
+                if (!pred(mname, sv, tsrgb)) continue;
+                const float sc = score_fn(sv, tsrgb, px, py);
+                if (sc > best_score) {
+                    best_score = sc;
+                    best.px = px;
+                    best.py = py;
+                    best.mat_id = mat_id;
+                    best.mat_name = mname;
+                    std::copy_n(tsrgb, 4, best.tex_srgb);
+                    std::copy_n(tlin, 3, best.tex_lin);
+                    std::copy_n(sv.true_normal, 3, best.world_n);
+                    std::copy_n(sv.proxy_normal, 3, best.proxy_n);
+                }
+            }
+        }
+        probes.push_back(best);
+    };
+
+    find_best(
+        "1a_Face_Cheek",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Face_00_SKIN") != std::string::npos && v.position[1] > 1.35f && v.position[1] < 1.40f &&
+                   v.position[0] > 0.025f && v.position[0] < 0.055f && c[0] > 235 && c[1] > 210;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2]; });
+    find_best(
+        "1b_Face_Forehead",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Face_00_SKIN") != std::string::npos && v.position[1] > 1.43f && std::abs(v.position[0]) < 0.025f &&
+                   c[0] > 235 && c[1] > 195;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2] - std::abs(v.position[0]); });
+    find_best(
+        "2a_Neck_UnderChin",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Body_00_SKIN") != std::string::npos && v.position[1] > 1.29f && v.position[1] < 1.33f &&
+                   std::abs(v.position[0]) < 0.04f && c[0] > 230 && c[1] > 180 && (c[0] - c[2]) > 25;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2] - std::abs(v.position[0]); });
+    find_best(
+        "2b_Collarbone_Skin",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Body_00_SKIN") != std::string::npos && v.position[1] > 1.23f && v.position[1] < 1.275f &&
+                   std::abs(v.position[0]) < 0.05f && c[0] > 235 && c[1] > 200;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2] - std::abs(v.position[0]); });
+    find_best(
+        "2c_Lit_Neck_Side",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Body_00_SKIN") != std::string::npos && v.position[1] > 1.245f && v.position[1] < 1.28f &&
+                   std::abs(v.position[0]) < 0.045f && v.true_normal[2] > 0.65f &&
+                   c[0] >= 246 && c[1] >= 230 && c[2] >= 210;
+        },
+        [](const AetherVertex25D& v, const uint8_t c[4], int, int) -> float {
+            return v.position[2] * 5.0f + static_cast<float>(c[1]) * 0.01f;
+        });
+    find_best(
+        "3a_Cardigan_Lit_Front",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Bottoms_01_CLOTH") != std::string::npos && v.position[1] > 1.00f && v.position[1] < 1.22f &&
+                   c[0] > 230 && c[1] > 220 && c[2] > 205;
+        },
+        [&](const AetherVertex25D& v, const uint8_t[4], int, int) -> float {
+            return v.true_normal[0] * key_dir_s.x + v.true_normal[1] * key_dir_s.y + v.true_normal[2] * key_dir_s.z;
+        });
+    find_best(
+        "3b_Cardigan_Shaded_Fold",
+        [&](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            const float ndl =
+                v.true_normal[0] * key_dir_s.x + v.true_normal[1] * key_dir_s.y + v.true_normal[2] * key_dir_s.z;
+            return m.find("Bottoms_01_CLOTH") != std::string::npos && v.position[1] > 0.96f && v.position[1] < 1.24f &&
+                   v.position[0] < -0.05f && v.true_normal[2] > 0.12f && ndl < 0.05f &&
+                   c[0] > 225 && c[1] > 210 && c[2] > 195;
+        },
+        [&](const AetherVertex25D& v, const uint8_t[4], int, int) -> float {
+            const float ndl =
+                v.true_normal[0] * key_dir_s.x + v.true_normal[1] * key_dir_s.y + v.true_normal[2] * key_dir_s.z;
+            return -ndl + v.true_normal[2] * 0.15f;
+        });
+    find_best(
+        "4_Inner_Black_Shirt",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Body_00_SKIN") != std::string::npos && v.position[1] > 1.04f && v.position[1] < 1.18f &&
+                   std::abs(v.position[0]) < 0.055f && c[0] < 75 && c[1] < 75 && c[2] < 75;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2] - std::abs(v.position[0]); });
+    find_best(
+        "5a_Blue_Ribbon",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Bottoms_01_CLOTH") != std::string::npos && v.position[1] > 0.96f && v.position[1] < 1.28f &&
+                   static_cast<int>(c[2]) > static_cast<int>(c[0]) + 15;
+        },
+        [](const AetherVertex25D& v, const uint8_t c[4], int, int) {
+            return static_cast<float>(static_cast<int>(c[2]) - static_cast<int>(c[0])) + v.position[2] * 10.0f;
+        });
+    find_best(
+        "5b_Hair",
+        [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
+            return m.find("Hair_00_HAIR") != std::string::npos && v.position[1] > 1.38f && v.position[1] < 1.52f &&
+                   c[0] < 120 && c[0] > c[2] + 5;
+        },
+        [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2]; });
+
+    uint64_t fidx = 0;
+    auto render_probe_pass = [&](const aether::renderer::LightingRig& test_rig, aether::renderer::ShadingDebugView dv,
+                                 int warmup_frames, std::vector<float>& out_f16, std::vector<uint8_t>* out_u8 = nullptr) {
+        for (int w = 0; w < warmup_frames; ++w) {
+            aether::renderer::FrameRenderRequest req{};
+            req.avatar = avatar.get();
+            req.rig = &test_rig;
+            req.camera = cam;
+            req.frame_index = fidx;
+            req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
+            req.debug_view = dv;
+            req.lighting_mode = test_rig.lighting_mode;
+            req.rt_enabled = (test_rig.lighting_mode > 0u) && rhi->rt_supported();
+            req.show_checkerboard = false;
+            req.show_orbit_orb = false;
+            req.render_csm_shadow = true;
+            REQUIRE(renderer.render_headless_frame(req).has_value());
+            ++fidx;
+        }
+        auto f16_res = renderer.graph().readback_rgba16f(kW, kH);
+        REQUIRE(f16_res.has_value());
+        out_f16 = std::move(f16_res.value());
+        if (out_u8 != nullptr) {
+            const auto outs = renderer.graph().outputs();
+            auto u8_res = renderer.graph().readback_image_rgba8(outs.viewport_image,
+                                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+            REQUIRE(u8_res.has_value());
+            *out_u8 = std::move(u8_res.value());
+        }
+    };
+
+    std::vector<float> buf_albedo, buf_normals, buf_rt_shadow, buf_bounce, buf_direct, buf_hdr_full, buf_final_lin;
+    std::vector<uint8_t> buf_final_srgb;
+
+    render_probe_pass(rig, aether::renderer::ShadingDebugView::Albedo, 4, buf_albedo);
+    render_probe_pass(rig, aether::renderer::ShadingDebugView::TrueNormals, 2, buf_normals);
+    render_probe_pass(rig, aether::renderer::ShadingDebugView::RtShadowDenoised, 10, buf_rt_shadow);
+    render_probe_pass(rig, aether::renderer::ShadingDebugView::Bounce, 12, buf_bounce);
+
+    auto direct_rig = rig;
+    direct_rig.tone_mode = 0u;
+    direct_rig.bloom_intensity = 0.0f;
+    direct_rig.enable_2d_filter_pro = false;
+    direct_rig.enable_paper_warmth = false;
+    direct_rig.crease_strength = 0.0f;
+    direct_rig.rim_step_strength = 0.0f;
+    direct_rig.hair_highlight_intensity = 0.0f;
+    render_probe_pass(direct_rig, aether::renderer::ShadingDebugView::Final, 4, buf_direct);
+
+    auto hdr_full_rig = rig;
+    hdr_full_rig.tone_mode = 0u;
+    hdr_full_rig.bloom_intensity = 0.0f;
+    hdr_full_rig.enable_2d_filter_pro = false;
+    hdr_full_rig.enable_paper_warmth = false;
+    hdr_full_rig.crease_strength = 0.0f;
+    render_probe_pass(hdr_full_rig, aether::renderer::ShadingDebugView::Final, 4, buf_hdr_full);
+
+    render_probe_pass(rig, aether::renderer::ShadingDebugView::Final, 12, buf_final_lin, &buf_final_srgb);
+
+    const std::filesystem::path snap_dir(AETHER_VRM_SNAPSHOT_DIR);
+    std::filesystem::create_directories(snap_dir);
+    REQUIRE(aether::test::save_rgba8_png(snap_dir / "probe_view.png", kW, kH, buf_final_srgb.data()));
+
+    auto lin_to_oklab = [](float r, float g, float b) -> std::array<float, 4> {
+        const float l = std::cbrt(std::max(0.0f, 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b));
+        const float m = std::cbrt(std::max(0.0f, 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b));
+        const float s = std::cbrt(std::max(0.0f, 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b));
+        const float L = 0.2104542553f * l + 0.7936177850f * m - 0.0040720468f * s;
+        const float A = 1.9779984951f * l - 2.4285922050f * m + 0.4505937099f * s;
+        const float B = 0.0259040371f * l + 0.7827717662f * m - 0.8086757660f * s;
+        return {L, A, B, std::sqrt(A * A + B * B)};
+    };
+
+    std::printf("\n=== QUANTITATIVE PIXEL & G-BUFFER PROBE (mode=2 PT, 1280x720) ===\n");
+    std::array<float, 4> face_lab{}, collar_lab{}, neck_lit_lab{}, card_lit_lab{}, card_sh_lab{};
+    float face_rel_luma = 0.0f, neck_lit_rel_luma = 0.0f;
+    for (const auto& pr : probes) {
+        if (pr.px < 0) {
+            std::printf("PROBE %-24s : NOT FOUND ON SCREEN\n", pr.name);
+            continue;
+        }
+        const size_t i4 = (static_cast<size_t>(pr.py) * kW + static_cast<size_t>(pr.px)) * 4ULL;
+        const auto& mat = avatar->materials[pr.mat_id];
+        const float gn[3] = {buf_normals[i4 + 0] * 2.0f - 1.0f, buf_normals[i4 + 1] * 2.0f - 1.0f,
+                             buf_normals[i4 + 2] * 2.0f - 1.0f};
+        const float spec_rim[3] = {buf_hdr_full[i4 + 0] - buf_direct[i4 + 0],
+                                   buf_hdr_full[i4 + 1] - buf_direct[i4 + 1],
+                                   buf_hdr_full[i4 + 2] - buf_direct[i4 + 2]};
+        const auto lab = lin_to_oklab(buf_final_lin[i4 + 0], buf_final_lin[i4 + 1], buf_final_lin[i4 + 2]);
+        const float fin_luma =
+            0.2126f * buf_final_lin[i4 + 0] + 0.7152f * buf_final_lin[i4 + 1] + 0.0722f * buf_final_lin[i4 + 2];
+        if (std::string_view(pr.name) == "1a_Face_Cheek") {
+            face_lab = lab;
+            face_rel_luma = fin_luma;
+        } else if (std::string_view(pr.name) == "2b_Collarbone_Skin") {
+            collar_lab = lab;
+        } else if (std::string_view(pr.name) == "2c_Lit_Neck_Side") {
+            neck_lit_lab = lab;
+            neck_lit_rel_luma = fin_luma;
+        } else if (std::string_view(pr.name) == "3a_Cardigan_Lit_Front") {
+            card_lit_lab = lab;
+        } else if (std::string_view(pr.name) == "3b_Cardigan_Shaded_Fold") {
+            card_sh_lab = lab;
+        }
+        std::printf(
+            "\n[%s] px=(%d,%d) mat=%u (%s)\n"
+            "  RawTex sRGB=(%u,%u,%u) lin=(%.3f,%.3f,%.3f) | GPU_Albedo=(%.3f,%.3f,%.3f)\n"
+            "  MToon _Color=(%.2f,%.2f,%.2f) _ShadeColor=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f\n"
+            "  WorldN=(%.3f,%.3f,%.3f) ProxyN=(%.3f,%.3f,%.3f) | GB_ViewN=(%.3f,%.3f,%.3f)\n"
+            "  RT_Shadow=%.3f | DirectLin=(%.3f,%.3f,%.3f) | PT_Bounce=(%.3f,%.3f,%.3f)\n"
+            "  Spec+Rim=(%.3f,%.3f,%.3f) | Final_HDR=(%.3f,%.3f,%.3f) | Final_sRGB=(%u,%u,%u) | OKLab=(L=%.3f,C=%.4f)\n",
+            pr.name, pr.px, pr.py, pr.mat_id, pr.mat_name.c_str(), pr.tex_srgb[0], pr.tex_srgb[1], pr.tex_srgb[2],
+            static_cast<double>(pr.tex_lin[0]), static_cast<double>(pr.tex_lin[1]), static_cast<double>(pr.tex_lin[2]),
+            static_cast<double>(buf_albedo[i4 + 0]), static_cast<double>(buf_albedo[i4 + 1]),
+            static_cast<double>(buf_albedo[i4 + 2]), static_cast<double>(mat.base_color[0]),
+            static_cast<double>(mat.base_color[1]), static_cast<double>(mat.base_color[2]),
+            static_cast<double>(mat.shade_color_gi[0]), static_cast<double>(mat.shade_color_gi[1]),
+            static_cast<double>(mat.shade_color_gi[2]), static_cast<double>(mat.toon_params[0]),
+            static_cast<double>(mat.toon_params[1]), static_cast<double>(pr.world_n[0]),
+            static_cast<double>(pr.world_n[1]), static_cast<double>(pr.world_n[2]), static_cast<double>(pr.proxy_n[0]),
+            static_cast<double>(pr.proxy_n[1]), static_cast<double>(pr.proxy_n[2]), static_cast<double>(gn[0]),
+            static_cast<double>(gn[1]), static_cast<double>(gn[2]), static_cast<double>(buf_rt_shadow[i4 + 0]),
+            static_cast<double>(buf_direct[i4 + 0]), static_cast<double>(buf_direct[i4 + 1]),
+            static_cast<double>(buf_direct[i4 + 2]), static_cast<double>(buf_bounce[i4 + 0]),
+            static_cast<double>(buf_bounce[i4 + 1]), static_cast<double>(buf_bounce[i4 + 2]),
+            static_cast<double>(spec_rim[0]), static_cast<double>(spec_rim[1]), static_cast<double>(spec_rim[2]),
+            static_cast<double>(buf_final_lin[i4 + 0]), static_cast<double>(buf_final_lin[i4 + 1]),
+            static_cast<double>(buf_final_lin[i4 + 2]), buf_final_srgb[i4 + 0], buf_final_srgb[i4 + 1],
+            buf_final_srgb[i4 + 2], static_cast<double>(lab[0]), static_cast<double>(lab[3]));
+        CHECK(pr.px >= 0);
+    }
+
+    const float de_face_collar =
+        std::sqrt((face_lab[0] - collar_lab[0]) * (face_lab[0] - collar_lab[0]) +
+                  (face_lab[1] - collar_lab[1]) * (face_lab[1] - collar_lab[1]) +
+                  (face_lab[2] - collar_lab[2]) * (face_lab[2] - collar_lab[2]));
+    const float de_face_neck = std::sqrt((face_lab[0] - neck_lit_lab[0]) * (face_lab[0] - neck_lit_lab[0]) +
+                                         (face_lab[1] - neck_lit_lab[1]) * (face_lab[1] - neck_lit_lab[1]) +
+                                         (face_lab[2] - neck_lit_lab[2]) * (face_lab[2] - neck_lit_lab[2]));
+    const float luma_diff_pct = 100.0f * std::abs(face_rel_luma - neck_lit_rel_luma) / std::max(face_rel_luma, 1e-4f);
+    std::printf(
+        "\n[SKIN_PARITY] Face vs LitNeck OKLab DeltaE=%.4f (%.2f%%), RelLumaDiff=%.2f%% | Face vs Collarbone DeltaE=%.4f (%.2f%%) L_diff=%.2f%%\n",
+        static_cast<double>(de_face_neck), static_cast<double>(de_face_neck * 100.0f),
+        static_cast<double>(luma_diff_pct), static_cast<double>(de_face_collar),
+        static_cast<double>(de_face_collar * 100.0f),
+        static_cast<double>(100.0f * std::abs(face_lab[0] - collar_lab[0]) / std::max(face_lab[0], 1e-4f)));
+    std::printf("[CARDIGAN_CONTRAST] Lit OKLab L=%.3f C=%.4f vs Shaded OKLab L=%.3f C=%.4f\n",
+                static_cast<double>(card_lit_lab[0]), static_cast<double>(card_lit_lab[3]),
+                static_cast<double>(card_sh_lab[0]), static_cast<double>(card_sh_lab[3]));
+    CHECK(card_lit_lab[0] > card_sh_lab[0] + 0.08f);
+
+    // Phase 2 Photometric Fixtures Exposure & Catchlight Verification (all 6 fixtures @ 1.0 EV)
+    {
+        static constexpr const char* kFixNames[6] = {
+            "0_ARRI_SkyPanel_S60C", "1_ARRI_Fresnel_T2", "2_Dedolight_DLED7",
+            "3_Broadcast_RingLight", "4_Natural_Sunlight_CIE", "5_Natural_Window_Portal",
+        };
+        std::printf("\n=== PHASE 2 PHOTOMETRIC FIXTURES (6 profiles @ 1.0 EV) ===\n");
+        std::vector<float> fix_lin;
+        std::vector<uint8_t> fix_u8;
+        for (int fi = 0; fi < 6; ++fi) {
+            auto frig = rig;
+            aether::renderer::apply_lighting_fixture_preset(
+                frig, static_cast<aether::renderer::LightingFixturePreset>(fi));
+            render_probe_pass(frig, aether::renderer::ShadingDebugView::Final, 6, fix_lin, &fix_u8);
+            const auto st = analyze_rgba8(fix_u8, kW, kH);
+            const size_t c_idx = (static_cast<size_t>(probes[0].py) * kW + static_cast<size_t>(probes[0].px)) * 4ULL;
+            const size_t k_idx = (static_cast<size_t>(probes[5].py) * kW + static_cast<size_t>(probes[5].px)) * 4ULL;
+            std::printf("  Fixture %-26s : fg=%u mean_luma=%.1f p95_luma=%.1f cheek_sRGB=(%u,%u,%u) card_lit_sRGB=(%u,%u,%u)\n",
+                        kFixNames[fi], st.fg_pixels, st.mean_luma, st.p95_luma, fix_u8[c_idx + 0],
+                        fix_u8[c_idx + 1], fix_u8[c_idx + 2], fix_u8[k_idx + 0], fix_u8[k_idx + 1], fix_u8[k_idx + 2]);
+            CHECK(st.mean_luma > 95.0);
+            CHECK(st.p95_luma < 248.0);
+            REQUIRE(aether::test::save_rgba8_png(snap_dir / (std::string("probe_fixture_") + kFixNames[fi] + ".png"),
+                                                  kW, kH, fix_u8.data()));
+        }
+
+        // Catchlight intensity mute vs ON verification
+        auto c_off = rig;
+        c_off.eye_catchlight_intensity = 0.0f;
+        std::vector<float> l_off, l_on;
+        std::vector<uint8_t> u_off, u_on;
+        render_probe_pass(c_off, aether::renderer::ShadingDebugView::Final, 4, l_off, &u_off);
+        auto c_on = rig;
+        c_on.eye_catchlight_intensity = 1.25f;
+        c_on.eye_catchlight_size = 1.20f;
+        render_probe_pass(c_on, aether::renderer::ShadingDebugView::Final, 4, l_on, &u_on);
+        double eye_diff = 0.0;
+        for (size_t i = 0; i + 3 < u_off.size(); i += 4) {
+            eye_diff += std::abs(static_cast<int>(u_on[i + 0]) - static_cast<int>(u_off[i + 0])) +
+                        std::abs(static_cast<int>(u_on[i + 1]) - static_cast<int>(u_off[i + 1])) +
+                        std::abs(static_cast<int>(u_on[i + 2]) - static_cast<int>(u_off[i + 2]));
+        }
+        std::printf("[CATCHLIGHT_DELTA] total_rgb_diff(ON=1.25 vs OFF=0.0) = %.0f\n", eye_diff);
+        CHECK(eye_diff > 100.0);
+    }
+
+    // Phase 3 [TESTING] Disguise Low-Poly Creases: Rule A bit-exact OFF vs ON @ 1.0
+    {
+        auto render_det = [&](const aether::renderer::LightingRig& r, std::vector<uint8_t>& out_u8) {
+            for (int w = 0; w < 64; ++w) {
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = avatar.get();
+                req.rig = &r;
+                req.camera = cam;
+                req.frame_index = 714ULL + static_cast<uint64_t>(w);
+                req.frame_slot = static_cast<uint32_t>(w & 1);
+                req.debug_view = aether::renderer::ShadingDebugView::Final;
+                req.lighting_mode = r.lighting_mode;
+                req.rt_enabled = (r.lighting_mode > 0u) && rhi->rt_supported();
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.render_csm_shadow = true;
+                REQUIRE(renderer.render_headless_frame(req).has_value());
+            }
+            const auto outs = renderer.graph().outputs();
+            auto u8_res = renderer.graph().readback_image_rgba8(outs.viewport_image,
+                                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+            REQUIRE(u8_res.has_value());
+            out_u8 = std::move(u8_res.value());
+        };
+
+        auto det_off = rig;
+        det_off.lighting_mode = 0u;
+        det_off.crease_disguise_enabled = false;
+        det_off.crease_disguise_strength = 0.85f;
+        auto det_zero = det_off;
+        det_zero.crease_disguise_enabled = true;
+        det_zero.crease_disguise_strength = 0.0f;
+        std::vector<uint8_t> d_off, d_zero;
+        // Converge temporal buffers (auto-exposure / post) completely to mode=0 steady state before comparing.
+        render_det(det_off, d_off);
+        render_det(det_off, d_off);
+        render_det(det_zero, d_zero);
+
+        auto cd_off = rig;
+        cd_off.crease_disguise_enabled = false;
+        cd_off.crease_disguise_strength = 0.85f;
+        auto cd_on = rig;
+        cd_on.crease_disguise_enabled = true;
+        cd_on.crease_disguise_strength = 1.0f;
+        std::vector<float> fl;
+        std::vector<uint8_t> u_off, u_on;
+        render_probe_pass(cd_off, aether::renderer::ShadingDebugView::Final, 6, fl, &u_off);
+        render_probe_pass(cd_on, aether::renderer::ShadingDebugView::Final, 6, fl, &u_on);
+        int max_off_vs_zero = 0;
+        double sum_on_vs_off = 0.0;
+        for (size_t i = 0; i + 3 < u_off.size(); i += 4) {
+            for (int c = 0; c < 3; ++c) {
+                max_off_vs_zero = std::max(max_off_vs_zero,
+                                           std::abs(static_cast<int>(d_off[i + c]) - static_cast<int>(d_zero[i + c])));
+                sum_on_vs_off += std::abs(static_cast<int>(u_on[i + c]) - static_cast<int>(u_off[i + c]));
+            }
+        }
+        std::printf("[CREASE_DISGUISE] RuleA max_diff(OFF vs str=0)=%d | diff(ON=1.0 vs OFF)=%.0f\n",
+                    max_off_vs_zero, sum_on_vs_off);
+        CHECK(max_off_vs_zero == 0);
+        CHECK(sum_on_vs_off > 100.0);
+        REQUIRE(aether::test::save_rgba8_png(snap_dir / "probe_crease_off.png", kW, kH, u_off.data()));
+        REQUIRE(aether::test::save_rgba8_png(snap_dir / "probe_crease_on.png", kW, kH, u_on.data()));
+    }
+
+    CHECK(rhi->validation_error_count() == 0);
+    renderer.destroy();
+    avatar.reset();
+    rhi->destroy();
+    aether_runtime_shutdown();
 }
