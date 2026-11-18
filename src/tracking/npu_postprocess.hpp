@@ -23,7 +23,7 @@ struct alignas(64) NpuMovementBoundsConfig {
     float max_head_pitch_deg{42.0f};                         // Extreme downward/upward pitch clamp
     float max_head_yaw_deg{62.0f};
     float max_head_roll_deg{40.0f};
-    float anti_clip_margin_m{0.035f};                        // Extra SDF capsule clearance around head/torso/hair
+    float anti_clip_margin_m{0.035f}; // Extra SDF capsule clearance around head/torso/hair
     bool enable_bounds{true};
     bool enable_anti_clip{true};
     bool show_safe_box_preview{false};
@@ -36,8 +36,9 @@ struct NpuPostProcessDiagnostics {
     bool translation_compressed{false};
     bool collision_projected{false};
     bool orientation_clamped{false};
-    float max_penetration_m{0.0f};
-    float bound_saturation{0.0f}; // [0..1+] normalized excursion before tanh compression
+    float max_penetration_m{0.0f};      // Deepest incoming limb penetration BEFORE projection
+    float residual_penetration_m{0.0f}; // Deepest penetration AFTER projection (must be 0 for a clean pose)
+    float bound_saturation{0.0f};       // [0..1+] normalized excursion before tanh compression
 };
 
 /**
@@ -62,7 +63,7 @@ class alignas(64) NpuPostProcessor {
      * compression, and signed-distance capsule anti-clipping (head/torso/hair) directly to `frame`.
      */
     [[nodiscard]] NpuPostProcessDiagnostics process(AetherTrackingFrame& frame,
-                                                      const NpuMovementBoundsConfig& cfg) noexcept;
+                                                    const NpuMovementBoundsConfig& cfg) noexcept;
 
   private:
     std::array<float, 3> last_safe_head_euler_{};

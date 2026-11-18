@@ -217,8 +217,7 @@ NpuPostProcessDiagnostics NpuPostProcessor::process(AetherTrackingFrame& frame,
 
     // 3. Predictive signed-distance capsule anti-clipping for limbs/hands/arms vs head/torso/hair
     if (cfg.enable_anti_clip) {
-        const bool has_head =
-            frame.joint_positions_ws[AETHER_BONE_HEAD][3] > 0.0f || (frame.valid_flags & 0x01u) != 0u;
+        const bool has_head = frame.joint_positions_ws[AETHER_BONE_HEAD][3] > 0.0f || (frame.valid_flags & 0x01u) != 0u;
         const std::array<float, 3> cur_head{
             has_head ? frame.joint_positions_ws[AETHER_BONE_HEAD][0] : head_anchor[0],
             has_head ? frame.joint_positions_ws[AETHER_BONE_HEAD][1] : head_anchor[1],
@@ -245,11 +244,6 @@ NpuPostProcessDiagnostics NpuPostProcessor::process(AetherTrackingFrame& frame,
             std::array<float, 3> p{frame.joint_positions_ws[j][0], frame.joint_positions_ws[j][1],
                                    frame.joint_positions_ws[j][2]};
 
-            // Keep hands/forearms out of torso capsule, head sphere, and posterior hair curtain capsule
-            project_out_of_capsule(p, torso_bot, torso_top, 0.145f + margin, true, diag);
-            project_out_of_capsule(p, cur_head, cur_head, 0.120f + margin, true, diag);
-            project_out_of_capsule(p, hair_back_a, hair_back_b, 0.105f + margin, true, diag);
-
             if (cfg.enable_bounds) {
                 // Constrain extremity excursion safely within expanded bounding envelope
                 const std::array<float, 3> arm_min{cfg.bounds_min[0] - 0.35f, cfg.bounds_min[1] - 0.45f,
@@ -263,6 +257,33 @@ NpuPostProcessDiagnostics NpuPostProcessor::process(AetherTrackingFrame& frame,
                 p[1] = hand_anchor[1] + comp[1];
                 p[2] = hand_anchor[2] + comp[2];
             }
+
+            // Keep hands/forearms out of torso capsule, head sphere, and posterior hair curtain capsule.
+            // Runs AFTER the soft-bounds envelope so compression can never pull a limb back into the body,
+            // and iterates (Gauss-Seidel) because the capsules overlap: escaping one may enter another.
+            const float r_torso = 0.145f + margin;
+            const float r_head = 0.120f + margin;
+            const float r_hair = 0.105f + margin;
+            constexpr float kSkin = 1e-4f; // Land strictly outside so the residual check reads exactly zero
+            for (int iter = 0; iter < 8; ++iter) {
+                const bool before = diag.collision_projected;
+                diag.collision_projected = false;
+                project_out_of_capsule(p, torso_bot, torso_top, r_torso + kSkin, true, diag);
+                project_out_of_capsule(p, cur_head, cur_head, r_head + kSkin, true, diag);
+                project_out_of_capsule(p, hair_back_a, hair_back_b, r_hair + kSkin, true, diag);
+                const bool moved = diag.collision_projected;
+                diag.collision_projected = before || moved;
+                if (!moved) {
+                    break;
+                }
+            }
+
+            std::array<float, 3> scratch{};
+            const float residual =
+                std::max({r_torso - dist_point_to_segment(p, torso_bot, torso_top, scratch),
+                          r_head - dist_point_to_segment(p, cur_head, cur_head, scratch),
+                          r_hair - dist_point_to_segment(p, hair_back_a, hair_back_b, scratch), 0.0f});
+            diag.residual_penetration_m = std::max(diag.residual_penetration_m, residual);
 
             frame.joint_positions_ws[j][0] = p[0];
             frame.joint_positions_ws[j][1] = p[1];

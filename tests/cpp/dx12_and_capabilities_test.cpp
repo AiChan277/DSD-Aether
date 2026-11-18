@@ -1,9 +1,12 @@
 // Tasks 1-8 Comprehensive Verification Suite:
-// - Task 1: DirectX 12 SM 6.6 + DXR 1.1 parity vs Vulkan, strict anti-upside-down & anti-mirror checksums/IoU on 8590256991748008892.vrm, DX12 Spout2 & VCam SHM.
+// - Task 1: DirectX 12 SM 6.6 + DXR 1.1 parity vs Vulkan, strict anti-upside-down & anti-mirror checksums/IoU on
+// 8590256991748008892.vrm, DX12 Spout2 & VCam SHM.
 // - Task 2: Intel iGPU / UMA detection, zero-copy heaps, capability matrix & safe Mode 0 Traditional auto-selection.
-// - Tasks 3-6: 3-tier lighting modes, SVGF temporal lock in Path Tracing, pre-quantized color bleeding, dynamic Angel Ring hair specular, and 2D Filter Pro.
+// - Tasks 3-6: 3-tier lighting modes, SVGF temporal lock in Path Tracing, pre-quantized color bleeding, dynamic Angel
+// Ring hair specular, and 2D Filter Pro.
 // - Task 7: Circadian / Solar-Time 24h lighting curve, timezones, and non-dark Night Studio mode.
-// - Task 8: NPU Safe-Zone bounding box C^1 tanh compression, pitch glitch clamping, and predictive capsule anti-clipping.
+// - Task 8: NPU Safe-Zone bounding box C^1 tanh compression, pitch glitch clamping, and predictive capsule
+// anti-clipping.
 
 #include "aether_ffi_contract.h"
 #include "animation/math_quat.hpp"
@@ -257,8 +260,8 @@ TEST_CASE("Task 1: DirectX 12 parity vs Vulkan & strict anti-flip orientation on
         req.completed_frame_index = (fidx >= 2u) ? fidx - 2u : 0u;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
         REQUIRE(vk_npr.render_headless_frame(req));
-        auto rb = vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image, VK_IMAGE_LAYOUT_GENERAL, kW,
-                                                      kH);
+        auto rb =
+            vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image, VK_IMAGE_LAYOUT_GENERAL, kW, kH);
         REQUIRE(rb.has_value());
         return rb.value();
     };
@@ -728,4 +731,74 @@ TEST_CASE("Task 8: NPU Safe-Zone Box C^1 tanh compression, pitch glitch clamping
     CHECK(diag.max_penetration_m > 0.05f);
     CHECK(tf.joint_positions_ws[AETHER_BONE_HEAD][0] <= cfg.bounds_max[0] + 1e-4f);
     CHECK(tf.joint_positions_ws[AETHER_BONE_HEAD][0] >= cfg.bounds_min[0] - 1e-4f);
+    // Zero residual capsule penetration after projection, and re-running anti-clip on the output is a no-op.
+    // (Bounds are disabled for the re-run: tanh compression maps RAW input and is intentionally not idempotent.)
+    CHECK(diag.residual_penetration_m == 0.0f);
+    {
+        AetherTrackingFrame again = tf;
+        NpuMovementBoundsConfig clip_only = cfg;
+        clip_only.enable_bounds = false;
+        const auto diag2 = proc.process(again, clip_only);
+        CHECK_FALSE(diag2.collision_projected);
+        CHECK(diag2.residual_penetration_m == 0.0f);
+        CHECK(std::abs(again.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0] -
+                       tf.joint_positions_ws[AETHER_BONE_RIGHT_HAND][0]) < 1e-5f);
+    }
+
+    // 3) Adversarial sweep: hands/forearms placed on a dense grid through head, torso and hair volumes
+    //    must always land outside every capsule (overlapping capsules need the iterative projection).
+    float worst_residual = 0.0f;
+    uint32_t projected_count = 0u;
+    for (int ix = -6; ix <= 6; ++ix) {
+        for (int iy = 0; iy <= 14; ++iy) {
+            for (int iz = -5; iz <= 5; ++iz) {
+                AetherTrackingFrame g{};
+                g.valid_flags = 0x0Fu;
+                for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
+                    g.joint_rotations_quat[b][3] = 1.0f;
+                }
+                g.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
+                g.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
+                const float px = 0.03f * static_cast<float>(ix);
+                const float py = 0.95f + 0.045f * static_cast<float>(iy);
+                const float pz = 0.03f * static_cast<float>(iz);
+                for (uint32_t j : {static_cast<uint32_t>(AETHER_BONE_LEFT_HAND),
+                                   static_cast<uint32_t>(AETHER_BONE_RIGHT_LOWER_ARM)}) {
+                    g.joint_positions_ws[j][0] = px;
+                    g.joint_positions_ws[j][1] = py;
+                    g.joint_positions_ws[j][2] = pz;
+                    g.joint_positions_ws[j][3] = 0.9f;
+                }
+                NpuPostProcessor p2;
+                const auto d = p2.process(g, cfg);
+                projected_count += d.collision_projected ? 1u : 0u;
+                worst_residual = std::max(worst_residual, d.residual_penetration_m);
+            }
+        }
+    }
+    std::printf("[NPU_ANTICLIP] sweep projected=%u worst_residual=%.6f m\n", projected_count, worst_residual);
+    CHECK(projected_count > 100u);
+    CHECK(worst_residual == 0.0f);
+
+    // 4) Soft wall: leaning the head steadily past +X never leaves the box, decelerates monotonically,
+    //    and never jumps (C^1 tanh knee instead of a robotic hard clamp).
+    float prev_x = -1.0f;
+    float prev_step = 1.0f;
+    float max_step = 0.0f;
+    for (int i = 0; i <= 200; ++i) {
+        const float in_x = 0.005f * static_cast<float>(i); // 0 .. 1.0 m (box half-width is 0.35 m)
+        const auto o = NpuPostProcessor::compress_translation_tanh({in_x, 0.0f, 0.0f}, cfg.bounds_min, cfg.bounds_max,
+                                                                   cfg.soft_wall_elasticity);
+        CHECK(o[0] <= cfg.bounds_max[0]);
+        if (i > 0) {
+            const float step = o[0] - prev_x;
+            CHECK(step >= 0.0f);              // monotonic
+            CHECK(step <= prev_step + 1e-6f); // velocity never increases => smooth deceleration
+            max_step = std::max(max_step, step);
+            prev_step = step;
+        }
+        prev_x = o[0];
+    }
+    CHECK(max_step <= 0.005f + 1e-6f); // never moves faster than the input (no jumps)
+    CHECK(prev_x > 0.95f * cfg.bounds_max[0]);
 }

@@ -380,8 +380,6 @@ TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
     aether_host_destroy(host);
 
-    char err_buf[256]{};
-
     aether_set_thread_role(AETHER_THREAD_ROLE_LOADER);
     AetherLoadRequest req{};
     req.path_utf8 = "avatar.vrm";
@@ -390,6 +388,7 @@ TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "
     REQUIRE(loader == nullptr);
 
 #if !defined(NDEBUG)
+    char err_buf[256]{};
     aether_set_thread_role(AETHER_THREAD_ROLE_UI);
     REQUIRE(aether_loader_open(&req, &loader) == AETHER_E_INTERNAL);
 #endif
