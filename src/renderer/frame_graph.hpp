@@ -383,6 +383,8 @@ class FrameGraph {
     uint32_t quad_right_active_h_{0};
     uint32_t stage_pip_w_{0};
     uint32_t stage_pip_h_{0};
+    const GpuAvatar* last_skinned_avatar_{nullptr};
+    uint64_t last_skinned_frame_index_{UINT64_MAX};
     uint32_t prev_stage_scene_w_{0};
     uint32_t prev_stage_scene_h_{0};
 

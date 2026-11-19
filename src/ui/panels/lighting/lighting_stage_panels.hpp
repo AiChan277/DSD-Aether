@@ -51,6 +51,15 @@ class LightingStagePanels {
     [[nodiscard]] const renderer::PreviewCamera& quad_top_camera() const noexcept { return quad_top_camera_; }
     [[nodiscard]] const renderer::PreviewCamera& quad_right_camera() const noexcept { return quad_right_camera_; }
     [[nodiscard]] std::array<float, 4> last_pip_inner_rect() const noexcept { return last_pip_inner_rect_; }
+    [[nodiscard]] float last_toolbar_height() const noexcept { return last_toolbar_height_; }
+    /** Right edge of the last toolbar widget vs the toolbar's available right edge (screen px). */
+    [[nodiscard]] float last_toolbar_right() const noexcept { return last_toolbar_right_; }
+    [[nodiscard]] float last_toolbar_limit() const noexcept { return last_toolbar_limit_; }
+    [[nodiscard]] std::array<float, 4> last_canvas_rect() const noexcept { return last_canvas_rect_; }
+    [[nodiscard]] std::array<float, 4> last_viewcube_rect() const noexcept { return last_viewcube_rect_; }
+    [[nodiscard]] std::array<float, 4> last_pip_outer_rect() const noexcept { return last_pip_outer_rect_; }
+    [[nodiscard]] std::array<float, 4> last_pip_uv() const noexcept { return last_pip_uv_; }
+    [[nodiscard]] bool pip_monitor_open() const noexcept { return pip_monitor_open_; }
     [[nodiscard]] std::array<float, 4> last_quad_rect(int idx) const noexcept {
         return (idx >= 0 && idx < 4) ? last_quad_rects_[static_cast<size_t>(idx)] : std::array<float, 4>{};
     }
@@ -115,6 +124,14 @@ class LightingStagePanels {
     float last_stage_draw_w_{960.0f};
     float last_stage_draw_h_{640.0f};
     std::array<float, 4> last_pip_inner_rect_{};
+    std::array<float, 4> last_pip_outer_rect_{};
+    std::array<float, 4> last_pip_uv_{0.0f, 0.0f, 1.0f, 1.0f};
+    std::array<float, 4> last_canvas_rect_{};
+    std::array<float, 4> last_viewcube_rect_{};
+    float last_toolbar_height_{0.0f};
+    float last_toolbar_right_{0.0f};
+    float last_toolbar_limit_{0.0f};
+    bool mouse_over_overlay_{false};
     std::array<std::array<float, 4>, 4> last_quad_rects_{};
 };
 

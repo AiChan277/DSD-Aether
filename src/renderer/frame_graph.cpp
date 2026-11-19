@@ -1820,7 +1820,14 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     };
 
     if (has_avatar) {
-        const bool reuse_skin_and_tlas = req.skip_skin_and_blas && (!use_rt || accel_.is_ready());
+        // Only reuse the skinned vertex buffer if THIS graph skinned THIS avatar for THIS frame. With an external
+        // (DirectX 12 / 11) Broadcast frame the Vulkan graph never runs Pass 1, so the LightingStage pass must skin.
+        const bool skinned_this_frame =
+            (last_skinned_avatar_ == req.avatar) && (last_skinned_frame_index_ == req.frame_index);
+        const bool reuse_skin_and_tlas =
+            req.skip_skin_and_blas && skinned_this_frame && (!use_rt || accel_.is_ready());
+        last_skinned_avatar_ = req.avatar;
+        last_skinned_frame_index_ = req.frame_index;
         if (!reuse_skin_and_tlas) {
             // === PASS 1: Compute Skin/Pack -> GpuSkinnedVertex ===
             t_begin(rhi::GpuPassId::SkinMorph);
@@ -2990,8 +2997,10 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                 if (auto sb = rebar_.allocate(static_cast<VkDeviceSize>(elem_cnt) * sizeof(GpuStageOverlayElem), 16u)) {
                     std::memcpy(sb.value().mapped, stage_overlay_scratch_.data(),
                                 static_cast<size_t>(elem_cnt) * sizeof(GpuStageOverlayElem));
-                    const VkViewport svp{0.0f, static_cast<float>(w), static_cast<float>(w),
-                                         -static_cast<float>(w > 0u ? h : 1u), 0.0f, 1.0f};
+                    // Negative-height viewport anchored at y = h (NOT y = w): any w != h previously shifted the
+                    // grid / schematic / frustum overlay by (w - h) px, pushing it out of wide stage canvases.
+                    const VkViewport svp{0.0f, static_cast<float>(std::max(h, 1u)), static_cast<float>(w),
+                                         -static_cast<float>(std::max(h, 1u)), 0.0f, 1.0f};
                     const VkRect2D ssc{{0, 0}, {w, h}};
                     vkCmdSetViewport(cmd, 0, 1, &svp);
                     vkCmdSetScissor(cmd, 0, 1, &ssc);

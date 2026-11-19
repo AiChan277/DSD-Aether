@@ -998,6 +998,30 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
             --dock_resize_check_frames_;
         }
     }
+    // Minimum-size guard (checked when no splitter drag is in progress): Viewport >= 320x200, Outliner >= 200 px,
+    // Inspector >= 260 px. A collapsed zone rebuilds the mode layout instead of producing a zero / NaN canvas.
+    if (!dock_layout_dirty_ && !layout_maximized_ && !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        dock_sz.x >= 1000.0f && dock_sz.y >= 360.0f) {
+        auto node_of = [](const char* win) -> const ImGuiDockNode* {
+            const ImGuiWindow* w = ImGui::FindWindowByName(win);
+            return (w != nullptr && w->DockIsActive) ? w->DockNode : nullptr;
+        };
+        const ImGuiDockNode* n_out = node_of(kPanelOutliner);
+        const ImGuiDockNode* n_ins = node_of(kPanelInspector);
+        const ImGuiDockNode* n_vp = node_of(kPanelViewport);
+        const bool out_small = n_out != nullptr && n_out->Size.x > 0.0f && n_out->Size.x < 200.0f * 0.75f;
+        const bool ins_small = n_ins != nullptr && n_ins->Size.x > 0.0f && n_ins->Size.x < 260.0f * 0.75f;
+        const bool vp_small = n_vp != nullptr && n_vp->Size.x > 0.0f &&
+                              (n_vp->Size.x < 320.0f || n_vp->Size.y < 200.0f);
+        // One rebuild per host size: never loop if the default layout itself cannot satisfy the minimums.
+        const bool already_tried = std::fabs(min_guard_rebuild_w_ - dock_sz.x) < 1.0f &&
+                                   std::fabs(min_guard_rebuild_h_ - dock_sz.y) < 1.0f;
+        if ((out_small || ins_small || vp_small) && !already_tried) {
+            min_guard_rebuild_w_ = dock_sz.x;
+            min_guard_rebuild_h_ = dock_sz.y;
+            dock_layout_dirty_ = true;
+        }
+    }
     if (dock_layout_dirty_) {
         build_dock_layout(dockspace_id, mode_);
         dock_resize_check_frames_ = 0u;
@@ -1030,7 +1054,9 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
 
     // Z2 Viewport (Broadcast Viewport vs Isolated Lighting Stage Viewport)
     if (mode_ == StudioMode::Lighting) {
-        if (ImGui::Begin(kPanelViewport)) {
+        // NoScrollbar | NoScrollWithMouse: the stage canvas fills the remaining content region exactly, so the
+        // window must never scroll (a wheel-zoom used to scroll the panel and push the canvas out of view).
+        if (ImGui::Begin(kPanelViewport, nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
             track_hovered_zone(kPanelViewport);
             lighting_stage_.draw_stage_viewport(avatar, fonts_, scale, selection_, actions);
         }

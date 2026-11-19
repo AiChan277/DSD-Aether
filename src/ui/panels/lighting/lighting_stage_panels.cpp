@@ -19,6 +19,8 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
+constexpr std::array<float, 3> kStageFramingTarget{0.0f, 1.15f, 0.0f};
+constexpr float kStageFramingDistanceM = 2.8f;
 
 [[nodiscard]] float point_to_segment_dist(ImVec2 p, ImVec2 a, ImVec2 b) noexcept {
     const float abx = b.x - a.x;
@@ -204,9 +206,8 @@ renderer::LightingRig& LightingStagePanels::active_rig(DevShellViewportActions& 
 void LightingStagePanels::ensure_initialized(DevShellViewportActions& vp_actions) noexcept {
     ensure_rigs_loaded();
     if (!stage_cam_ready_) {
+        set_stage_view(renderer::StageCameraView::FreePerspective, kStageFramingTarget);
         stage_cam_ready_ = true;
-        stage_camera_ =
-            renderer::make_stage_camera_preset(renderer::StageCameraView::FreePerspective, {0.0f, 1.32f, 0.0f});
         quad_top_camera_ =
             renderer::make_stage_camera_preset(renderer::StageCameraView::OrthoTop, {0.0f, 1.32f, 0.0f}, 3.60f);
         quad_right_camera_ =
@@ -228,8 +229,14 @@ void LightingStagePanels::sync_key_fill_rim_mirror(const renderer::LightingRig& 
 }
 
 void LightingStagePanels::set_stage_view(renderer::StageCameraView view, const std::array<float, 3>& pivot_ws) noexcept {
+    // `pivot_ws` is the camera target. The panel passes kStageFramingTarget (body centre) so the whole avatar, the
+    // floor grid and the rig fit; the light-aim pivot (head) would crop the feet and the grid.
     stage_view_ = view;
-    stage_camera_ = renderer::make_stage_camera_preset(view, pivot_ws, stage_camera_.ortho_height);
+    const float ortho_h = stage_cam_ready_ && stage_camera_.ortho_height > 0.35f ? stage_camera_.ortho_height : 2.6f;
+    stage_camera_ = renderer::make_stage_camera_preset(view, pivot_ws, ortho_h);
+    if (view == renderer::StageCameraView::FreePerspective) {
+        stage_camera_.distance = kStageFramingDistanceM;
+    }
 }
 
 void LightingStagePanels::toggle_quad_view() noexcept {
@@ -375,7 +382,12 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
             selection.item_index = 0;
             std::snprintf(selection.name.data(), selection.name.size(), "%s", tr("Studio Camera"));
         }
-        ImGui::TextDisabled("  2.5D Z-Flatten: ON · Live Broadcast Feed");
+        ImGui::Indent(8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, t.text_tertiary);
+        ImGui::TextWrapped("%s", tr("2.5D Z-Flatten: ON"));
+        ImGui::TextWrapped("%s", tr("Live Broadcast Feed"));
+        ImGui::PopStyleColor();
+        ImGui::Unindent(8.0f);
     }
 
     ImGui::Spacing();
@@ -443,130 +455,194 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         return;
     }
 
-    // 1. Floating Top Stage Control Bar (wraps cleanly when window/panel is squeezed narrow)
+    // 1. Single-row Stage toolbar. Never wraps: the 8 camera views and the 3 shading diagnostics live in compact
+    //    combos, and the low-priority actions fold into a "..." popup when the panel is too narrow for them.
+    const ImVec2 toolbar_p0 = ImGui::GetCursorScreenPos();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * scale, ImGui::GetStyle().ItemSpacing.y));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(5.0f * scale, 2.0f * scale));
     {
-        const float bar_max_x = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
-        const float pad_x = 3.0f * scale;
-        bool need_same_line = false;
-        auto place_item = [&](float est_w, float extra_gap = 0.0f) {
-            if (need_same_line) {
-                ImGui::SameLine(0.0f, pad_x + extra_gap);
-                if (ImGui::GetCursorScreenPos().x + est_w > bar_max_x) {
-                    ImGui::NewLine();
-                }
-            }
-            need_same_line = true;
-        };
-        auto view_btn = [&](renderer::StageCameraView v, const char* lbl) {
-            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale);
-            const bool active = !quad_view_ && (stage_view_ == v);
-            if (active) {
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const float gap = st.ItemSpacing.x;
+        auto btn_w = [&](const char* lbl) { return ImGui::CalcTextSize(lbl).x + st.FramePadding.x * 2.0f; };
+        auto toggle_btn = [&](const char* lbl, bool on) -> bool {
+            if (on) {
                 ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
             }
-            if (ImGui::SmallButton(lbl)) {
-                quad_view_ = false;
-                if (pilot_light_) {
-                    pilot_light_ = false;
-                }
-                set_stage_view(v, pivot);
-            }
-            if (active) {
+            const bool pressed = ImGui::Button(lbl);
+            if (on) {
                 ImGui::PopStyleColor();
             }
+            return pressed;
         };
-        view_btn(renderer::StageCameraView::FreePerspective, "Persp");
-        view_btn(renderer::StageCameraView::OrthoFront, "Front");
-        view_btn(renderer::StageCameraView::OrthoBack, "Back");
-        view_btn(renderer::StageCameraView::OrthoRight, "Right");
-        view_btn(renderer::StageCameraView::OrthoLeft, "Left");
-        view_btn(renderer::StageCameraView::OrthoTop, "Top");
-        view_btn(renderer::StageCameraView::OrthoBottom, "Bot");
 
-        place_item(ImGui::CalcTextSize("Quad").x + 14.0f * scale);
-        if (quad_view_) {
-            ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
+        static constexpr renderer::StageCameraView kViews[7]{
+            renderer::StageCameraView::FreePerspective, renderer::StageCameraView::OrthoFront,
+            renderer::StageCameraView::OrthoBack,       renderer::StageCameraView::OrthoRight,
+            renderer::StageCameraView::OrthoLeft,       renderer::StageCameraView::OrthoTop,
+            renderer::StageCameraView::OrthoBottom,
+        };
+        static constexpr const char* kViewLabels[7]{"Persp", "Front", "Back", "Right", "Left", "Top", "Bottom"};
+        static constexpr const char* kDiagLabels[3]{"Lit", "Clay 18%", "EL-Zone"};
+
+        const float view_combo_w = ImGui::CalcTextSize("Bottom").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2.0f;
+        const float diag_combo_w = ImGui::CalcTextSize("Clay 18%").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2.0f;
+        const float core_w = view_combo_w + btn_w("Quad") + diag_combo_w + btn_w("Schem") + btn_w("Grid") +
+                             btn_w("PiP") + btn_w("Q") + btn_w("W") + btn_w("E") + btn_w("R") + gap * 12.0f;
+        const float extra_w = btn_w("2.5D") + btn_w("Pilot") + btn_w("Aim") + gap * 3.0f;
+        const float bar_w = ImGui::GetContentRegionAvail().x;
+        const bool inline_extras = (core_w + extra_w) <= bar_w;
+
+        int view_idx = 0;
+        for (int i = 0; i < 7; ++i) {
+            if (kViews[i] == stage_view_) {
+                view_idx = i;
+            }
         }
-        if (ImGui::SmallButton("Quad")) {
+        ImGui::SetNextItemWidth(view_combo_w);
+        if (ImGui::BeginCombo("##StageView", kViewLabels[view_idx], ImGuiComboFlags_HeightLarge)) {
+            for (int i = 0; i < 7; ++i) {
+                if (ImGui::Selectable(kViewLabels[i], !quad_view_ && i == view_idx)) {
+                    quad_view_ = false;
+                    pilot_light_ = false;
+                    set_stage_view(kViews[i], kStageFramingTarget);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Stage camera: Free Perspective or one of 6 orthographic views");
+        }
+        ImGui::SameLine();
+        if (toggle_btn("Quad", quad_view_)) {
             toggle_quad_view();
-        }
-        if (quad_view_) {
-            ImGui::PopStyleColor();
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Quad View (Ctrl+Alt+Q): Top / Right / Stage / Clean Broadcast Monitor");
         }
 
-        auto diag_btn = [&](renderer::StageDiagnosticMode dm, const char* lbl, float gap) {
-            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
-            const bool active = (diag_mode_ == dm);
-            if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
+        ImGui::SameLine(0.0f, gap * 2.0f);
+        const int diag_idx = std::clamp(static_cast<int>(diag_mode_), 0, 2);
+        ImGui::SetNextItemWidth(diag_combo_w);
+        if (ImGui::BeginCombo("##StageDiag", kDiagLabels[diag_idx])) {
+            for (int i = 0; i < 3; ++i) {
+                if (ImGui::Selectable(kDiagLabels[i], i == diag_idx)) {
+                    diag_mode_ = static_cast<renderer::StageDiagnosticMode>(i);
+                }
             }
-            if (ImGui::SmallButton(lbl)) {
-                diag_mode_ = dm;
-            }
-            if (active) {
-                ImGui::PopStyleColor();
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Shading diagnostic: Lit / Clay 18%% gray / False-color EL-Zone");
+        }
+
+        // Tier 1: everything inline. Tier 2: 2.5D / Pilot / Aim fold into "...". Tier 3 (very narrow panel):
+        // Schem / Grid / PiP and the Q W E R gizmo tools fold in as well, so the row never wraps.
+        const float more_w = btn_w("...") + gap;
+        const bool inline_core = (core_w + more_w) <= bar_w;
+        auto aim_head = [&]() {
+            if (selected_light_idx_ >= 0 && static_cast<uint32_t>(selected_light_idx_) < rig.studio_light_count) {
+                auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
+                sl.target_ws = pivot;
+                sl.aim_lock = true;
+                sync_key_fill_rim_mirror(rig, actions.viewport);
             }
         };
-        diag_btn(renderer::StageDiagnosticMode::Lit, "Lit", 5.0f * scale);
-        diag_btn(renderer::StageDiagnosticMode::Clay, "Clay 18%", 0.0f);
-        diag_btn(renderer::StageDiagnosticMode::FalseColor, "EL-Zone", 0.0f);
-
-        auto tgl = [&](bool& b, const char* lbl, float gap) {
-            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
-            if (b) {
-                ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
-            }
-            if (ImGui::SmallButton(lbl)) {
-                b = !b;
-            }
-            if (b) {
-                ImGui::PopStyleColor();
-            }
-        };
-        tgl(show_schematic_, "Schem", 5.0f * scale);
-        tgl(show_grid_, "Grid", 0.0f);
-        tgl(preview_25d_flatten_, "2.5D Flat", 0.0f);
-        place_item(ImGui::CalcTextSize("Pilot").x + 14.0f * scale);
-        if (pilot_light_) {
-            ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
-        }
-        if (ImGui::SmallButton("Pilot")) {
-            toggle_pilot_light(actions.viewport, pivot, avatar.camera_eye);
-        }
-        if (pilot_light_) {
-            ImGui::PopStyleColor();
-        }
-        place_item(ImGui::CalcTextSize("Aim Head").x + 14.0f * scale);
-        if (ImGui::SmallButton("Aim Head") && selected_light_idx_ >= 0 &&
-            static_cast<uint32_t>(selected_light_idx_) < rig.studio_light_count) {
-            auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
-            sl.target_ws = pivot;
-            sl.aim_lock = true;
-            sync_key_fill_rim_mirror(rig, actions.viewport);
-        }
-        tgl(pip_monitor_open_, "PiP Cam", 0.0f);
-
-        auto giz_btn = [&](GizmoTool gt, const char* lbl, float gap) {
-            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
-            const bool active = (gizmo_tool_ == gt);
-            if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
-            }
-            if (ImGui::SmallButton(lbl)) {
+        auto giz_btn = [&](GizmoTool gt, const char* lbl) {
+            if (toggle_btn(lbl, gizmo_tool_ == gt)) {
                 gizmo_tool_ = gt;
             }
-            if (active) {
-                ImGui::PopStyleColor();
-            }
         };
-        giz_btn(GizmoTool::Select, "Q", 5.0f * scale);
-        giz_btn(GizmoTool::Move, "W", 0.0f);
-        giz_btn(GizmoTool::Rotate, "E", 0.0f);
-        giz_btn(GizmoTool::Scale, "R", 0.0f);
-    }
 
+        if (inline_core) {
+            ImGui::SameLine(0.0f, gap * 2.0f);
+            if (toggle_btn("Schem", show_schematic_)) {
+                show_schematic_ = !show_schematic_;
+            }
+            ImGui::SameLine();
+            if (toggle_btn("Grid", show_grid_)) {
+                show_grid_ = !show_grid_;
+            }
+            ImGui::SameLine();
+            if (toggle_btn("PiP", pip_monitor_open_)) {
+                pip_monitor_open_ = !pip_monitor_open_;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("LIVE CAM picture-in-picture (clean 16:9 Broadcast feed)");
+            }
+        }
+        if (inline_extras) {
+            ImGui::SameLine();
+            if (toggle_btn("2.5D", preview_25d_flatten_)) {
+                preview_25d_flatten_ = !preview_25d_flatten_;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Preview the 2.5D Z-Flatten in the Stage (Broadcast output is unaffected)");
+            }
+            ImGui::SameLine();
+            if (toggle_btn("Pilot", pilot_light_)) {
+                toggle_pilot_light(actions.viewport, pivot, avatar.camera_eye);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Aim")) {
+                aim_head();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Aim the selected light at the avatar head");
+            }
+        } else {
+            ImGui::SameLine();
+            if (ImGui::Button("...")) {
+                ImGui::OpenPopup("##StageMore");
+            }
+            if (ImGui::BeginPopup("##StageMore")) {
+                if (!inline_core) {
+                    ImGui::MenuItem("Schematics", nullptr, &show_schematic_);
+                    ImGui::MenuItem("Floor Grid", nullptr, &show_grid_);
+                    ImGui::MenuItem("LIVE CAM PiP", nullptr, &pip_monitor_open_);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Select (Q)", nullptr, gizmo_tool_ == GizmoTool::Select)) {
+                        gizmo_tool_ = GizmoTool::Select;
+                    }
+                    if (ImGui::MenuItem("Move (W)", nullptr, gizmo_tool_ == GizmoTool::Move)) {
+                        gizmo_tool_ = GizmoTool::Move;
+                    }
+                    if (ImGui::MenuItem("Rotate (E)", nullptr, gizmo_tool_ == GizmoTool::Rotate)) {
+                        gizmo_tool_ = GizmoTool::Rotate;
+                    }
+                    if (ImGui::MenuItem("Scale (R)", nullptr, gizmo_tool_ == GizmoTool::Scale)) {
+                        gizmo_tool_ = GizmoTool::Scale;
+                    }
+                    ImGui::Separator();
+                }
+                ImGui::MenuItem("2.5D Flatten Preview", nullptr, &preview_25d_flatten_);
+                if (ImGui::MenuItem("Pilot Light", nullptr, pilot_light_)) {
+                    toggle_pilot_light(actions.viewport, pivot, avatar.camera_eye);
+                }
+                if (ImGui::MenuItem("Aim Selected at Head")) {
+                    aim_head();
+                }
+                ImGui::EndPopup();
+            }
+        }
+
+        if (inline_core) {
+            ImGui::SameLine(0.0f, gap * 2.0f);
+            giz_btn(GizmoTool::Select, "Q");
+            ImGui::SameLine();
+            giz_btn(GizmoTool::Move, "W");
+            ImGui::SameLine();
+            giz_btn(GizmoTool::Rotate, "E");
+            ImGui::SameLine();
+            giz_btn(GizmoTool::Scale, "R");
+        }
+        last_toolbar_right_ = ImGui::GetItemRectMax().x;
+        last_toolbar_limit_ = toolbar_p0.x + bar_w;
+    }
+    ImGui::PopStyleVar(2);
+    last_toolbar_height_ = ImGui::GetCursorScreenPos().y - toolbar_p0.y;
+
+    // 2. Canvas rect = exactly what remains below the toolbar. The host window is NoScrollbar | NoScrollWithMouse,
+    //    and the canvas is reserved by one InvisibleButton so the cursor never advances past the window bottom.
     const ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();
     const ImVec2 raw_avail = ImGui::GetContentRegionAvail();
     if (raw_avail.x < 32.0f || raw_avail.y < 32.0f) {
@@ -576,9 +652,44 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
     const ImVec2 canvas_p1(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
     last_stage_draw_w_ = canvas_sz.x;
     last_stage_draw_h_ = canvas_sz.y;
+    last_canvas_rect_ = {canvas_p0.x, canvas_p0.y, canvas_p1.x, canvas_p1.y};
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(canvas_p0, canvas_p1, true);
     dl->AddRectFilled(canvas_p0, canvas_p1, t.col32_bg_canvas);
+
+    // Overlay hit rects (ViewCube top-right, PiP bottom-right) computed up-front so the canvas never steals their
+    // clicks / drags / wheel.
+    const float vc_w = 104.0f * scale;
+    const float vc_h = 72.0f * scale;
+    const ImVec2 vc_pos(canvas_p1.x - vc_w - 12.0f * scale, canvas_p0.y + 10.0f * scale);
+    const ImVec4 vc_rect(vc_pos.x, vc_pos.y, vc_pos.x + vc_w, vc_pos.y + vc_h);
+    const float pip_title_h = 20.0f * scale;
+    float pip_box_w = 0.0f;
+    float pip_box_h = 0.0f;
+    if (!quad_view_ && pip_monitor_open_) {
+        // Keep the PiP clear of the ViewCube: max height = canvas below the cube minus margins and title strip.
+        const float max_pip_w = std::max(80.0f, canvas_sz.x * 0.36f);
+        const float max_pip_h =
+            std::max(45.0f, (canvas_p1.y - vc_rect.w) - pip_title_h - 28.0f * scale);
+        pip_box_w = std::min(300.0f * scale, max_pip_w);
+        pip_box_h = pip_box_w * (9.0f / 16.0f);
+        if (pip_box_h > max_pip_h) {
+            pip_box_h = max_pip_h;
+            pip_box_w = pip_box_h * (16.0f / 9.0f);
+        }
+    }
+    const ImVec2 pip_p0(canvas_p1.x - pip_box_w - 14.0f * scale, canvas_p1.y - pip_box_h - 14.0f * scale);
+    const ImVec2 pip_p1(pip_p0.x + pip_box_w, pip_p0.y + pip_box_h);
+    const ImVec4 pip_rect(pip_p0.x - 2.0f, pip_p0.y - pip_title_h, pip_p1.x + 2.0f, pip_p1.y + 2.0f);
+    const bool pip_visible = !quad_view_ && pip_monitor_open_ && pip_box_w > 1.0f;
+    {
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        auto in_rect = [&](const ImVec4& r) { return mp.x >= r.x && mp.x <= r.z && mp.y >= r.y && mp.y <= r.w; };
+        mouse_over_overlay_ = in_rect(vc_rect) || (pip_visible && in_rect(pip_rect));
+    }
+    last_viewcube_rect_ = {vc_rect.x, vc_rect.y, vc_rect.z, vc_rect.w};
+    last_pip_outer_rect_ = pip_visible ? std::array<float, 4>{pip_rect.x, pip_rect.y, pip_rect.z, pip_rect.w}
+                                       : std::array<float, 4>{};
 
     auto draw_stage_tex = [&](VkDescriptorSet tex, ImVec2 p0, ImVec2 sz, uint32_t ren_w, uint32_t ren_h, uint32_t rt_w,
                               uint32_t rt_h) {
@@ -620,22 +731,18 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         const ImVec2 ip0(box_p0.x + cr.x0, box_p0.y + cr.y0);
         const ImVec2 ip1(box_p0.x + cr.x1, box_p0.y + cr.y1);
         last_pip_inner_rect_ = {ip0.x, ip0.y, ip1.x, ip1.y};
-        const VkDescriptorSet pip_tex = (avatar.stage_broadcast_pip_texture != VK_NULL_HANDLE)
-                                            ? avatar.stage_broadcast_pip_texture
-                                            : avatar.viewport_texture;
-        if (pip_tex != VK_NULL_HANDLE) {
-            if (avatar.stage_broadcast_pip_texture == VK_NULL_HANDLE && avatar.viewport_w > 0u &&
-                avatar.viewport_h > 0u) {
-                const auto src_lay = core::compute_viewport_aspect_layout(
-                    cr.width(), cr.height(), static_cast<float>(avatar.viewport_w),
-                    static_cast<float>(avatar.viewport_h), core::ViewportAspectMode::FitAuto);
-                const float su0 = 0.5f - src_lay.uv_du * 0.5f;
-                const float sv0 = 0.5f - src_lay.uv_dv * 0.5f;
-                dl->AddImage(reinterpret_cast<ImTextureID>(pip_tex), ip0, ip1, ImVec2(su0, sv0),
-                             ImVec2(su0 + src_lay.uv_du, sv0 + src_lay.uv_dv));
-            } else {
-                dl->AddImage(reinterpret_cast<ImTextureID>(pip_tex), ip0, ip1);
-            }
+        // Full, uncropped StudioBroadcastView frame: the dedicated PiP target holds exactly one 16:9 Broadcast frame,
+        // so uv0 = (0,0) / uv1 = (1,1). There is deliberately NO fallback to the Live Studio viewport texture: that
+        // target holds a FitAuto-cropped frame in a padded top-left sub-rect, and centre-cropping it cut the head off.
+        last_pip_uv_ = {0.0f, 0.0f, 1.0f, 1.0f};
+        if (avatar.stage_broadcast_pip_texture != VK_NULL_HANDLE) {
+            dl->AddImage(reinterpret_cast<ImTextureID>(avatar.stage_broadcast_pip_texture), ip0, ip1,
+                         ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f));
+        } else {
+            const char* msg = "NO SIGNAL";
+            const ImVec2 ts = ImGui::CalcTextSize(msg);
+            dl->AddText(ImVec2((ip0.x + ip1.x - ts.x) * 0.5f, (ip0.y + ip1.y - ts.y) * 0.5f), t.col32_text_secondary,
+                        msg);
         }
     };
 
@@ -647,7 +754,11 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         ImGui::InvisibleButton(btn_id, sz,
                                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
                                    ImGuiButtonFlags_MouseButtonMiddle);
-        const bool hov = ImGui::IsItemHovered();
+        // Canvas owns the wheel while hovered (zoom), so no parent window can ever scroll the canvas away.
+        ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+        // Hover priority: ViewCube / PiP / open popups always win over orbit, gizmo and ray-pick.
+        const bool hov = ImGui::IsItemHovered() && !mouse_over_overlay_ &&
+                         !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
         const bool act = ImGui::IsItemActive();
 
         bool cam_moving = false;
@@ -848,35 +959,40 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                        avatar.stage_viewport_h, avatar.stage_viewport_rt_w, avatar.stage_viewport_rt_h);
         draw_stage_interaction(canvas_p0, canvas_sz, "##StageCanvas", stage_camera_, true);
 
-        // Docked / Floating PiP Live Broadcast Monitor in bottom-right corner (strict 16:9 with #0B0D12 matte)
-        if (pip_monitor_open_) {
-            const float max_pip_w = std::max(80.0f, canvas_sz.x * 0.36f);
-            const float max_pip_h = std::max(45.0f, canvas_sz.y * 0.36f);
-            const float pip_box_w = std::min(260.0f * scale, max_pip_w);
-            const float pip_box_h = std::min(pip_box_w * (9.0f / 16.0f), max_pip_h);
-            const ImVec2 pip_p0(canvas_p1.x - pip_box_w - 14.0f * scale, canvas_p1.y - pip_box_h - 14.0f * scale);
-            const ImVec2 pip_p1(pip_p0.x + pip_box_w, pip_p0.y + pip_box_h);
-            dl->AddRectFilled(ImVec2(pip_p0.x - 2.0f, pip_p0.y - 20.0f * scale),
-                              ImVec2(pip_p1.x + 2.0f, pip_p1.y + 2.0f), t.col32_stage_badge_bg, 4.0f);
+        // Docked PiP Live Broadcast Monitor in the bottom-right corner (strict 16:9 with #0B0D12 matte), sized so it
+        // never reaches the ViewCube and never leaves [canvas_min, canvas_max].
+        if (pip_visible) {
+            dl->AddRectFilled(ImVec2(pip_rect.x, pip_rect.y), ImVec2(pip_rect.z, pip_rect.w), t.col32_stage_badge_bg,
+                              4.0f);
             draw_broadcast_pip_box(pip_p0, ImVec2(pip_box_w, pip_box_h));
             dl->AddRect(pip_p0, pip_p1, t.col32_stage_pip_border, 2.0f);
-            dl->AddText(ImVec2(pip_p0.x + 6.0f, pip_p0.y - 17.0f * scale), t.col32_stage_cyan,
-                        "LIVE CAM · Broadcast (16:9)");
+            const char* pip_title = (pip_box_w > 190.0f * scale) ? "LIVE CAM · Broadcast (16:9)" : "LIVE CAM";
+            dl->AddText(ImVec2(pip_p0.x + 6.0f, pip_p0.y - 17.0f * scale), t.col32_stage_cyan, pip_title);
+            const float xb = pip_title_h - 4.0f * scale;
+            ImGui::SetCursorScreenPos(ImVec2(pip_p1.x - xb, pip_p0.y - pip_title_h + 2.0f * scale));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 0.0f));
+            if (ImGui::Button("x##PipClose", ImVec2(xb, xb - 2.0f * scale))) {
+                pip_monitor_open_ = false;
+            }
+            ImGui::PopStyleVar();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Hide LIVE CAM (toolbar PiP brings it back)");
+            }
+        } else {
+            last_pip_inner_rect_ = {};
         }
     }
 
     // Interactive ViewCube badge in Top-Right corner
     {
-        const float vc_w = 104.0f * scale;
-        const ImVec2 vc_pos(canvas_p1.x - vc_w - 12.0f * scale, canvas_p0.y + 10.0f * scale);
-        dl->AddRectFilled(vc_pos, ImVec2(vc_pos.x + vc_w, vc_pos.y + 72.0f * scale), t.col32_stage_viewcube_bg, 6.0f);
-        dl->AddRect(vc_pos, ImVec2(vc_pos.x + vc_w, vc_pos.y + 72.0f * scale), t.col32_node_border, 6.0f);
+        dl->AddRectFilled(vc_pos, ImVec2(vc_pos.x + vc_w, vc_pos.y + vc_h), t.col32_stage_viewcube_bg, 6.0f);
+        dl->AddRect(vc_pos, ImVec2(vc_pos.x + vc_w, vc_pos.y + vc_h), t.col32_node_border, 6.0f);
         ImGui::SetCursorScreenPos(ImVec2(vc_pos.x + 6.0f * scale, vc_pos.y + 4.0f * scale));
         ImGui::BeginGroup();
         auto vc_btn = [&](const char* lbl, renderer::StageCameraView sv) {
             if (ImGui::SmallButton(lbl)) {
                 quad_view_ = false;
-                set_stage_view(sv, pivot);
+                set_stage_view(sv, kStageFramingTarget);
             }
         };
         vc_btn("  T  ", renderer::StageCameraView::OrthoTop);
@@ -1101,6 +1217,8 @@ void LightingStagePanels::draw_inspector(const DevShellAvatarView& avatar, const
     }
 
     ImGui::PopItemWidth();
+    // Scroll padding so the last control never sits clipped against the bottom fold.
+    ImGui::Dummy(ImVec2(0.0f, 16.0f));
 
     if (dirty) {
         sync_key_fill_rim_mirror(rig, actions.viewport);
@@ -1116,28 +1234,42 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
     const std::array<float, 3> pivot = compute_pivot_ws(avatar);
     const float fs = std::max(10.0f, ImGui::GetFontSize());
 
-    // Preset Bar & `config/lighting_rigs.json` Persistence (wraps gracefully when narrow at 150%+ DPI)
-    for (int p = 0; p < 5; ++p) {
-        const auto pid = static_cast<renderer::StudioRigPresetId>(p);
-        if (p == active_preset_idx_) {
-            ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
+    // Preset row: one dropdown + name field + Save/Load. Nothing is laid out as a strip, so no label can clip.
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(tr("Preset"));
+    ImGui::SameLine();
+    {
+        float longest = 0.0f;
+        for (int p = 0; p < 5; ++p) {
+            longest = std::max(
+                longest, ImGui::CalcTextSize(renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(p))).x);
         }
-        if (ImGui::SmallButton(renderer::studio_rig_preset_name(pid))) {
-            active_preset_idx_ = p;
-            renderer::apply_studio_rig_preset(rig, pid, pivot);
-            selected_light_idx_ = 0;
-            sync_key_fill_rim_mirror(rig, actions.viewport);
+        const float combo_w = longest + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetNextItemWidth(std::min(combo_w, std::max(fs * 8.0f, ImGui::GetContentRegionAvail().x * 0.45f)));
+        const int cur = std::clamp(active_preset_idx_, 0, 4);
+        if (ImGui::BeginCombo("##RigPreset",
+                              renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(cur)))) {
+            for (int p = 0; p < 5; ++p) {
+                const auto pid = static_cast<renderer::StudioRigPresetId>(p);
+                if (ImGui::Selectable(renderer::studio_rig_preset_name(pid), p == cur)) {
+                    active_preset_idx_ = p;
+                    renderer::apply_studio_rig_preset(rig, pid, pivot);
+                    selected_light_idx_ = 0;
+                    sync_key_fill_rim_mirror(rig, actions.viewport);
+                }
+            }
+            ImGui::EndCombo();
         }
-        if (p == active_preset_idx_) {
-            ImGui::PopStyleColor();
-        }
-        ImGui::SameLine();
     }
-
-    if (ImGui::GetContentRegionAvail().x < fs * 15.0f) {
+    ImGui::SameLine();
+    const float save_w = ImGui::CalcTextSize(tr("Save Rig")).x + ImGui::CalcTextSize(tr("Load...")).x +
+                         ImGui::GetStyle().FramePadding.x * 4.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+    const float name_w = std::min(ImGui::CalcTextSize("Custom Studio Rig").x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f,
+                                  ImGui::GetContentRegionAvail().x - save_w);
+    if (name_w < fs * 5.0f) {
         ImGui::NewLine();
     }
-    ImGui::SetNextItemWidth(std::min(145.0f, std::max(fs * 6.0f, ImGui::GetContentRegionAvail().x * 0.25f)));
+    ImGui::SetNextItemWidth(std::max(fs * 5.0f, name_w));
     ImGui::InputTextWithHint("##PresetName", "Preset name", save_name_buf_.data(), save_name_buf_.size());
     ImGui::SameLine();
     if (ImGui::SmallButton(tr("Save Rig"))) {
@@ -1147,7 +1279,7 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
         }
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton(tr("Load Rigs..."))) {
+    if (ImGui::SmallButton(tr("Load..."))) {
         rigs_loaded_ = false;
         ensure_rigs_loaded();
         ImGui::OpenPopup("##SavedRigsPopup");

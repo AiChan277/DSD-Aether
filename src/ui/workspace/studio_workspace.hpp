@@ -116,6 +116,8 @@ class StudioWorkspace {
     bool dock_layout_dirty_{true};
     bool layout_maximized_{false};
     float last_dock_host_w_{0.0f};
+    float min_guard_rebuild_w_{-1.0f};
+    float min_guard_rebuild_h_{-1.0f};
     float last_dock_host_h_{0.0f};
     uint8_t dock_resize_check_frames_{0};
     std::array<char, 48> maximized_window_{};

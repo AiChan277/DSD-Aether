@@ -246,6 +246,21 @@ target_link_libraries(dx12_and_capabilities_test PRIVATE
 )
 set_tests_properties(dx12_and_capabilities_test PROPERTIES TIMEOUT 180)
 
+# Lighting workspace tab: Vulkan + DX12 Stage/PiP pixel checks, single-row UI bounds, lighting_tab.png snapshot
+aether_add_cpp_test(lighting_tab_verification_test cpp/lighting_tab_verification_test.cpp)
+target_compile_definitions(lighting_tab_verification_test PRIVATE
+    AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+    AETHER_VRM_SNAPSHOT_DIR="${CMAKE_BINARY_DIR}/tests/ui_snapshots"
+)
+target_link_libraries(lighting_tab_verification_test PRIVATE
+    aether_ui
+    aether_renderer
+    aether_rhi
+    windowscodecs
+    ole32
+)
+set_tests_properties(lighting_tab_verification_test PROPERTIES TIMEOUT 240)
+
 # Phase 3: Non-destructive Node Material/Texture Override & Native PMX 2.0/2.1 Pipeline Tests
 aether_add_cpp_test(phase3_material_and_pmx_test cpp/phase3_material_and_pmx_test.cpp)
 target_compile_definitions(phase3_material_and_pmx_test PRIVATE
@@ -280,6 +295,7 @@ if(EXISTS "${_vcpkg_vk_layer_dir}/VkLayer_khronos_validation.json")
         dx11_backend_test
         real_vrm_verification_test
         dx12_and_capabilities_test
+        lighting_tab_verification_test
     )
         if(TEST ${_vk_test})
             set_tests_properties(${_vk_test} PROPERTIES
