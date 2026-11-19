@@ -21,16 +21,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use aether_asset_loader::ffi_slice::{borrow_arena_slices, borrow_utf8_cstr};
-use aether_asset_loader::{AssetLoader, LoaderError};
+use aether_asset_loader::{AssetLoader, LoaderError, PmxAuxBorrowedSlices, decode_image_file_rgba};
 use aether_ffi::{
-    AETHER_E_INTERNAL, AETHER_E_INVALID_ARG, AETHER_E_PANIC, AETHER_E_UNSUPPORTED,
-    AETHER_FFI_VERSION_MAJOR, AETHER_FFI_VERSION_MINOR, AETHER_OK, AETHER_THREAD_ROLE_ANY,
-    AETHER_THREAD_ROLE_LOADER, AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_PLUGIN,
-    AETHER_THREAD_ROLE_T2, AETHER_THREAD_ROLE_UI, AetherArenaSlice, AetherAssetRequirements,
-    AetherAvatarDesc, AetherGraphInputs, AetherGraphOutputs, AetherGraphPlanStats,
-    AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig, AetherHostEvent,
-    AetherHostHandle, AetherLoadRequest, AetherLoaderHandle, AetherPlanHandle, AetherRuntimeConfig,
-    AetherStatus, AetherTrackingFrame, LAYOUT_TABLE_JSON,
+    AETHER_E_BUFFER_TOO_SMALL, AETHER_E_INTERNAL, AETHER_E_INVALID_ARG, AETHER_E_PANIC,
+    AETHER_E_UNSUPPORTED, AETHER_FFI_VERSION_MAJOR, AETHER_FFI_VERSION_MINOR, AETHER_OK,
+    AETHER_THREAD_ROLE_ANY, AETHER_THREAD_ROLE_LOADER, AETHER_THREAD_ROLE_MAIN,
+    AETHER_THREAD_ROLE_PLUGIN, AETHER_THREAD_ROLE_T2, AETHER_THREAD_ROLE_UI, AetherArenaSlice,
+    AetherAssetRequirements, AetherAvatarDesc, AetherGraphInputs, AetherGraphOutputs,
+    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
+    AetherHostEvent, AetherHostHandle, AetherLoadRequest, AetherLoaderHandle,
+    AetherMaterialOverrideBuffer, AetherPlanHandle, AetherPmxAuxHeader, AetherPmxAuxSlices,
+    AetherRuntimeConfig, AetherStatus, AetherTrackingFrame, LAYOUT_TABLE_JSON,
 };
 use aether_plugin_host::{CompiledGraphPlan, HostError, PluginHost, SafeGraphInputs};
 
@@ -806,6 +807,217 @@ pub unsafe extern "C" fn aether_host_get_telemetry_readout(
         host_ref
             .get_telemetry_readout(readout_ref)
             .map_err(|e| map_host_error(&e))
+    })
+}
+
+/// Wait-free, allocation-free evaluation of the host's currently published graph plan including `MaterialOverrideBuffer`. `[T2]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_host_evaluate_active_ex(
+    host: AetherHostHandle,
+    inputs: *const AetherGraphInputs,
+    circadian_hour: f32,
+    out_pose: *mut AetherGraphOutputs,
+    out_mats: *mut AetherMaterialOverrideBuffer,
+) -> AetherStatus {
+    ffi_guard_cow(AETHER_THREAD_ROLE_T2, || {
+        if host.is_null() {
+            return Err((AETHER_E_INVALID_ARG, Cow::Borrowed("null host pointer")));
+        }
+        // SAFETY: Valid `host` handle guaranteed by caller for this call.
+        let host_ref = unsafe { &*host.cast::<PluginHost>() };
+        // SAFETY: Caller guarantees `inputs` and `out_pose` validity for this call.
+        let (safe_inputs, out_ref) =
+            unsafe { borrow_graph_io(inputs, out_pose) }.map_err(|(c, m)| (c, Cow::Borrowed(m)))?;
+        let mats_ref = if out_mats.is_null() {
+            None
+        } else {
+            if (out_mats as usize) % core::mem::align_of::<AetherMaterialOverrideBuffer>() != 0 {
+                return Err((
+                    AETHER_E_INVALID_ARG,
+                    Cow::Borrowed("unaligned out_mats pointer"),
+                ));
+            }
+            // SAFETY: Non-null, 64-byte-aligned `out_mats` pointer lent by caller.
+            Some(unsafe { &mut *out_mats })
+        };
+        host_ref
+            .evaluate_active_ex(&safe_inputs, circadian_hour, out_ref, mats_ref)
+            .map_err(|e| map_host_error(&e))
+    })
+}
+
+/// Evaluates a standalone compiled plan's material/texture nodes into `out_mats` cleanly. `[T2]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_graph_evaluate_materials(
+    plan: AetherPlanHandle,
+    inputs: *const AetherGraphInputs,
+    circadian_hour: f32,
+    out_mats: *mut AetherMaterialOverrideBuffer,
+) -> AetherStatus {
+    ffi_guard(AETHER_THREAD_ROLE_T2, || {
+        if plan.is_null() || out_mats.is_null() {
+            return Err((AETHER_E_INVALID_ARG, "null plan or out_mats pointer"));
+        }
+        if (out_mats as usize) % core::mem::align_of::<AetherMaterialOverrideBuffer>() != 0 {
+            return Err((AETHER_E_INVALID_ARG, "unaligned out_mats pointer"));
+        }
+        // SAFETY: Caller guarantees `plan` handle is valid and exclusively evaluated on T2 for this call.
+        let plan_ref = unsafe { &mut *plan.cast::<CompiledGraphPlan>() };
+        // SAFETY: `AetherGraphOutputs` is a `#[repr(C)]` POD struct of integer and float arrays.
+        let mut dummy_pose: AetherGraphOutputs = unsafe { std::mem::zeroed() };
+        // SAFETY: Caller guarantees `inputs` validity and `dummy_pose` is stack-local.
+        let (safe_inputs, pose_ref) = unsafe { borrow_graph_io(inputs, &raw mut dummy_pose)? };
+        // SAFETY: `out_mats` verified non-null and 64-byte aligned above.
+        let mats_ref = unsafe { &mut *out_mats };
+        let _ = plan_ref.evaluate_with_host_and_materials(
+            &safe_inputs,
+            None,
+            circadian_hour,
+            pose_ref,
+            Some(mats_ref),
+        );
+        Ok(())
+    })
+}
+
+/// Publishes parsed avatar model metadata (material slot names, format) to the node compiler. `[ui]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_host_set_model_metadata_json(
+    host: AetherHostHandle,
+    json_utf8: *const c_char,
+) -> AetherStatus {
+    ffi_guard_cow(AETHER_THREAD_ROLE_UI, || {
+        if host.is_null() || json_utf8.is_null() {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                Cow::Borrowed("null host or json_utf8 pointer"),
+            ));
+        }
+        // SAFETY: Valid `host` handle guaranteed by caller.
+        let host_ref = unsafe { &*host.cast::<PluginHost>() };
+        // SAFETY: Non-null NUL-terminated UTF-8 string guaranteed by caller.
+        let s = unsafe { CStr::from_ptr(json_utf8) }
+            .to_str()
+            .map_err(|_| (AETHER_E_INVALID_ARG, Cow::Borrowed("invalid UTF-8 JSON")))?;
+        host_ref
+            .set_model_metadata_json(s)
+            .map_err(|e| map_host_error(&e))
+    })
+}
+
+/// Queries PMX 2.0/2.1 extended stream counts (`SDEF`, `Append`, `IK`, `Material/UV Morph`, `RigidBody/6-DOF`). `[loader]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_loader_query_pmx_aux(
+    loader: AetherLoaderHandle,
+    out_hdr: *mut AetherPmxAuxHeader,
+) -> AetherStatus {
+    ffi_guard(AETHER_THREAD_ROLE_LOADER, || {
+        if loader.is_null() || out_hdr.is_null() {
+            return Err((AETHER_E_INVALID_ARG, "null loader or out_hdr pointer"));
+        }
+        // SAFETY: Valid `loader` handle and writable `out_hdr` guaranteed by caller.
+        let loader_ref = unsafe { &*loader.cast::<AssetLoader>() };
+        // SAFETY: `out_hdr` verified non-null above.
+        unsafe { *out_hdr = loader_ref.pmx_aux_header() };
+        Ok(())
+    })
+}
+
+/// Copies PMX 2.0/2.1 extended streams zero-copy into caller-owned C++ slices. `[loader]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_loader_fill_pmx_aux(
+    loader: AetherLoaderHandle,
+    out_slices: *const AetherPmxAuxSlices,
+) -> AetherStatus {
+    ffi_guard(AETHER_THREAD_ROLE_LOADER, || {
+        if loader.is_null() || out_slices.is_null() {
+            return Err((AETHER_E_INVALID_ARG, "null loader or out_slices pointer"));
+        }
+        // SAFETY: Valid `loader` handle and readable `out_slices` descriptor guaranteed by caller.
+        let loader_ref = unsafe { &*loader.cast::<AssetLoader>() };
+        // SAFETY: `out_slices` verified non-null above.
+        let s = unsafe { &*out_slices };
+        if s.struct_size != 0 && s.struct_size != size_of::<AetherPmxAuxSlices>() as u32 {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                "AetherPmxAuxSlices struct_size mismatch",
+            ));
+        }
+        #[allow(clippy::items_after_statements)]
+        unsafe fn borrow_opt_slice<'a, T>(
+            ptr: *mut T,
+            cap: u32,
+        ) -> Result<&'a mut [T], (AetherStatus, &'static str)> {
+            if cap == 0 || ptr.is_null() {
+                Ok(&mut [])
+            } else if (ptr as usize) % core::mem::align_of::<T>() != 0 {
+                Err((AETHER_E_INVALID_ARG, "unaligned PMX aux slice pointer"))
+            } else {
+                // SAFETY: Caller guarantees valid aligned writable buffer of `cap` elements.
+                Ok(unsafe { slice::from_raw_parts_mut(ptr, cap as usize) })
+            }
+        }
+        // SAFETY: Each slice pointer/cap pair is validated by `borrow_opt_slice`.
+        let mut borrowed = unsafe {
+            PmxAuxBorrowedSlices {
+                sdef_vertices: borrow_opt_slice(s.sdef_vertices, s.sdef_vertex_cap)?,
+                bone_exts: borrow_opt_slice(s.bone_exts, s.bone_ext_cap)?,
+                ik_links: borrow_opt_slice(s.ik_links, s.ik_link_cap)?,
+                morph_channels: borrow_opt_slice(s.morph_channels, s.morph_channel_cap)?,
+                group_children: borrow_opt_slice(s.group_children, s.group_child_cap)?,
+                uv_morphs: borrow_opt_slice(s.uv_morphs, s.uv_morph_cap)?,
+                mat_morphs: borrow_opt_slice(s.mat_morphs, s.mat_morph_cap)?,
+                bone_morphs: borrow_opt_slice(s.bone_morphs, s.bone_morph_cap)?,
+                rigid_bodies: borrow_opt_slice(s.rigid_bodies, s.rigid_body_cap)?,
+                constraints_6dof: borrow_opt_slice(s.constraints_6dof, s.constraint_6dof_cap)?,
+            }
+        };
+        loader_ref
+            .fill_pmx_aux(&mut borrowed)
+            .map_err(|e| map_loader_error(&e))
+    })
+}
+
+/// Decodes a local texture file (`.png/.jpg/.tga/.bmp/.dds/.ktx2/.spa/.sph`) into RGBA8. `[loader]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_texture_decode_file(
+    path_utf8: *const c_char,
+    srgb: u32,
+    out_width: *mut u32,
+    out_height: *mut u32,
+    out_format: *mut u32,
+    out_rgba: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> AetherStatus {
+    ffi_guard(AETHER_THREAD_ROLE_LOADER, || {
+        if path_utf8.is_null()
+            || out_width.is_null()
+            || out_height.is_null()
+            || out_format.is_null()
+            || out_len.is_null()
+        {
+            return Err((AETHER_E_INVALID_ARG, "null argument in aether_texture_decode_file"));
+        }
+        // SAFETY: Valid NUL-terminated UTF-8 path guaranteed by caller.
+        let path_str = unsafe { borrow_utf8_cstr(path_utf8) }.map_err(|e| map_loader_error(&e))?;
+        let (w, h, fmt, rgba) =
+            decode_image_file_rgba(Path::new(path_str), srgb != 0).map_err(|e| map_loader_error(&e))?;
+        // SAFETY: Non-null output pointers verified above.
+        unsafe {
+            *out_width = w;
+            *out_height = h;
+            *out_format = fmt;
+            *out_len = rgba.len();
+        }
+        if out_rgba.is_null() || cap < rgba.len() {
+            return Err((AETHER_E_BUFFER_TOO_SMALL, "out_rgba buffer too small"));
+        }
+        // SAFETY: `out_rgba` non-null and `cap >= rgba.len()` verified above.
+        unsafe {
+            ptr::copy_nonoverlapping(rgba.as_ptr(), out_rgba, rgba.len());
+        }
+        Ok(())
     })
 }
 

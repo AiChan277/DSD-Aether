@@ -169,6 +169,9 @@ pub fn canonical_humanoid_index(name: &str) -> Option<u16> {
 fn translate_jp_to_tokens(nfkc_lower: &str) -> Option<&'static str> {
     const JP_MAP: &[(&str, &str)] = &[
         ("下半身", "hips"),
+        ("センター", "mmd_center"),
+        ("グルーブ", "mmd_groove"),
+        ("全ての親", "mmd_root"),
         ("上半身3", "upper chest"),
         ("上半身2", "chest"),
         ("上半身", "spine"),
@@ -420,6 +423,12 @@ fn detect_convention(joints: &[RawJoint]) -> SkeletonConvention {
     }
 }
 
+fn is_mmd_cog_ancestor(name: &str) -> bool {
+    let n: String = name.nfkc().collect();
+    let t = n.trim();
+    matches!(t, "センター" | "グルーブ" | "全ての親" | "center" | "groove" | "motherbone")
+}
+
 fn exact_alias_match(
     h_idx: usize,
     tokens: &[String],
@@ -472,6 +481,16 @@ fn exact_alias_match(
     }
     if tokens == ["neck", "1"] && h_idx == 4 && side == Chirality::Center {
         return Some(0.96);
+    }
+    if matches!(
+        tokens.first().map(String::as_str),
+        Some("mmd_center" | "mmd_groove" | "mmd_root")
+    ) {
+        return if h_idx == 0 && !conv.has_explicit_hips {
+            Some(0.92)
+        } else {
+            Some(0.0)
+        };
     }
 
     None
@@ -770,6 +789,14 @@ pub fn match_humanoid_bones(joints: &[RawJoint]) -> HumanoidMatchResult {
                     }
                     let h_score = match (joints[j_idx].parent, canon_parent_name) {
                         (None, None) => 1.0,
+                        (Some(jp), None) if h_idx == 0 && is_mmd_cog_ancestor(&joints[jp].name) => {
+                            1.0
+                        }
+                        (Some(jp), Some(_))
+                            if h_idx == 1 && is_mmd_cog_ancestor(&joints[jp].name) =>
+                        {
+                            1.0
+                        }
                         (Some(jp), Some(cp_name)) => {
                             let c_p_idx = CANONICAL_PARENT[h_idx].unwrap_or(0) as usize;
                             if humanoid_to_joint[c_p_idx] == jp as u16 {

@@ -122,6 +122,7 @@ class Dx12FrameGraph {
     rhi::D3D12Buffer surface_buf_{};
     rhi::D3D12Buffer index_buf_{};
     rhi::D3D12Buffer material_buf_{};
+    rhi::D3D12Buffer material_grade_buf_{};
     rhi::D3D12Texture fallback_white_tex_{};
     rhi::D3D12Texture ltc_inv_m_{};
     rhi::D3D12Texture ltc_amp_{};
@@ -131,6 +132,8 @@ class Dx12FrameGraph {
     std::vector<rhi::D3D12Texture> avatar_textures_{};
     std::vector<uint32_t> avatar_tex_slots_{};
     std::vector<GpuMaterial> cached_materials_{};
+    std::vector<GpuMaterial> active_materials_scratch_{};
+    std::vector<GpuMaterialGrade> active_grades_scratch_{};
     std::vector<GpuSubmeshDraw> cached_submeshes_{};
     std::vector<uint32_t> opaque_draws_{};
     std::vector<uint32_t> cutout_draws_{};

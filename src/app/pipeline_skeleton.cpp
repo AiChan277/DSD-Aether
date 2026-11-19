@@ -639,12 +639,14 @@ void PipelineSkeleton::t2_entry() {
             }
             graph_in.dsp_rms_db = dsp_pkt.dsp_input_rms_db;
 
+            SkinningSnapshot& snap = skinning_buffer_.staging();
             AetherGraphOutputs graph_out{};
+            snap.material_overrides.struct_size = sizeof(AetherMaterialOverrideBuffer);
+            snap.material_overrides.count = 0U;
             if (AetherHostHandle host = plugin_host_.load(std::memory_order_acquire); host != nullptr) {
-                (void)aether_host_evaluate_active(host, &graph_in, &graph_out);
+                (void)aether_host_evaluate_active_ex(host, &graph_in, 12.0f, &graph_out, &snap.material_overrides);
             }
 
-            SkinningSnapshot& snap = skinning_buffer_.staging();
             vmc_frame_.valid = false;
             const animation::AudioLipSyncFrame audio_frame =
                 audio_lipsync_ ? audio_lipsync_->latest() : animation::AudioLipSyncFrame{};

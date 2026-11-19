@@ -75,6 +75,32 @@ NprVsOut vs_main(uint vid : SV_VertexID) {
     return o;
 }
 
+float3 apply_gpu_material_grade(float3 rgb, GpuMaterialGrade mg) {
+    if (mg.dynamic_params.w < 0.5) {
+        return rgb;
+    }
+    // 1. Hue shift in OKLab chroma plane
+    float hue_rad = radians(mg.grade_hsbc.x);
+    if (abs(hue_rad) > 1e-4) {
+        float3 lab = lin_srgb_to_oklab(max(rgb, float3(0.0, 0.0, 0.0)));
+        float ch = cos(hue_rad);
+        float sh = sin(hue_rad);
+        float a = lab.y * ch - lab.z * sh;
+        float b = lab.y * sh + lab.z * ch;
+        lab.y = a;
+        lab.z = b;
+        rgb = max(oklab_to_lin_srgb(lab), float3(0.0, 0.0, 0.0));
+    }
+    // 2. Saturation
+    float luma = luminance(rgb);
+    rgb = max(lerp(float3(luma, luma, luma), rgb, mg.grade_hsbc.y), float3(0.0, 0.0, 0.0));
+    // 3. Brightness & Contrast
+    rgb = max((rgb - 0.5) * mg.grade_hsbc.w + 0.5 + mg.grade_hsbc.z, float3(0.0, 0.0, 0.0));
+    // 4. Tint multiply
+    rgb = lerp(rgb, rgb * mg.grade_tint.rgb, saturate(mg.grade_tint.w));
+    return rgb;
+}
+
 [shader("fragment")]
 float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
@@ -82,9 +108,21 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     if (g_Pc.aux_buf_bda != 0ul) {
         mat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, i.material_id);
     }
+    GpuMaterialGrade mg = {};
+    mg.uv_scale_offset = float4(1.0, 1.0, 0.0, 0.0);
+    mg.grade_hsbc = float4(0.0, 1.0, 0.0, 1.0);
+    mg.grade_tint = float4(1.0, 1.0, 1.0, 0.0);
+    mg.dynamic_params = float4(0.0, 0.0, 0.0, 0.0);
+    if (fg.material_grade_bda != 0ul) {
+        mg = AETHER_LOAD(GpuMaterialGrade, fg.material_grade_bda, i.material_id);
+    }
+    float2 sample_uv = (mg.dynamic_params.w > 0.5)
+                           ? (i.uv * mg.uv_scale_offset.xy + mg.uv_scale_offset.zw)
+                           : i.uv;
 
-    float4 tex_lit = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, i.uv);
+    float4 tex_lit = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, sample_uv);
     float4 lit_rgba = tex_lit * mat.lit_color;
+    lit_rgba.rgb = apply_gpu_material_grade(lit_rgba.rgb, mg);
     float alpha = saturate(lit_rgba.a);
 
     bool is_cutout = (i.submesh_flags & 32u) != 0u;
@@ -135,6 +173,33 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     bool is_hair = ((mat_flags & 4u) != 0u) || ((i.submesh_flags & 6u) != 0u) || (rt_class == 1u);
     bool is_eye_iris = ((mat_flags & (1u << 12u)) != 0u);
     bool is_body_skin = !is_face && ((mat_flags & (1u << 13u)) != 0u);
+    if ((mat_flags & (1u << 16u)) != 0u) {
+        uint prof = (mat_flags >> 17u) & 7u;
+        if (prof == 0u) {
+            is_face = true;
+            is_hair = false;
+            is_eye_iris = false;
+        } else if (prof == 1u) {
+            is_hair = true;
+            is_face = false;
+            is_eye_iris = false;
+        } else if (prof == 2u) {
+            is_face = false;
+            is_hair = false;
+            is_eye_iris = false;
+            is_body_skin = false;
+            rt_class = 3u;
+        } else if (prof == 3u) {
+            is_eye_iris = true;
+            is_face = false;
+            is_hair = false;
+        } else if (prof == 4u) {
+            is_face = false;
+            is_hair = false;
+            is_eye_iris = false;
+            rt_class = 2u;
+        }
+    }
     float skin_chroma_w = is_body_skin ? compute_body_skin_texel_weight(lit_rgba.rgb, fg.face_skin_ref_rgb) : 0.0;
     float neck_w = is_body_skin ? compute_neck_seam_blend(i.world_pos, fg) : 0.0;
     float neck_skin_w = neck_w * skin_chroma_w;
@@ -668,6 +733,29 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         } else if (is_hair) {
             float rim_back = pow(saturate(1.0 - ndv), 3.0) * saturate(dot(-view_v, key_dir) * 0.5 + 0.5);
             backscatter_term = lit_rgba.rgb * key_col * float3(1.15, 0.75, 0.50) * (rim_back * bs_str * 0.35);
+        }
+    }
+
+    // Explicit Shader Profile overrides (0=Skin SDF, 1=Dual-Lobe Hair, 2=Micro-PBR Cloth, 3=Eye Caustic, 4=Metallic, 5=Glass, 6=Emissive)
+    bool has_explicit_profile = ((mat_flags & (1u << 16u)) != 0u);
+    uint shader_profile = (mat_flags >> 17u) & 7u;
+    if (has_explicit_profile) {
+        if (shader_profile == 4u) {
+            // Metallic: high-reflectance conductor GGX lobe + sky environment specular
+            float3 r_env = reflect(-view_v, shade_n);
+            float3 env_col = eval_hillaire_sky_sh9(r_env, fg);
+            float3 h_met = normalize_safe(key_dir + view_v, view_v);
+            float ggx_met = pow(saturate(dot(shade_n, h_met)), 64.0) * 0.85;
+            micro_pbr_term += lit_rgba.rgb * (env_col * 0.55 + key_col * ggx_met);
+        } else if (shader_profile == 5u) {
+            // Glass: Schlick dielectric Fresnel reflection + translucent transmission
+            float f_glass = 0.04 + 0.96 * pow(saturate(1.0 - ndv), 5.0);
+            float3 r_env = reflect(-view_v, shade_n);
+            micro_pbr_term += eval_hillaire_sky_sh9(r_env, fg) * f_glass * 0.75;
+            alpha = clamp(max(alpha * 0.45, f_glass), 0.15, 0.95);
+        } else if (shader_profile == 6u) {
+            // Emissive: self-illuminated unlit glow boost
+            emissive_term = max(emissive_term, lit_rgba.rgb * 1.25);
         }
     }
 

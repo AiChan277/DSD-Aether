@@ -52,7 +52,7 @@ constexpr NodeCategory kSol = NodeCategory::Solver;
 constexpr NodeCategory kBl = NodeCategory::Blend;
 constexpr NodeCategory kOut = NodeCategory::Output;
 
-constexpr std::array<NodeTemplate, 34> kTemplates = {{
+constexpr std::array<NodeTemplate, 39> kTemplates = {{
     // Sources (crimson)
     {"aether.source.npu_pose@1",
      "NPU Pose In",
@@ -203,10 +203,68 @@ constexpr std::array<NodeTemplate, 34> kTemplates = {{
      {},
      0},
     {"aether.output.osc_out@1", "OSC Out", kOut, "Outputs", {{{"value", kF}, {"trigger", kEv}}}, 2, {}, 0},
+    // Phase 3: Non-Destructive Model Material & Texture Nodes
+    {"aether.model.source@1",
+     "Model Source",
+     kSrc,
+     "Model & Materials",
+     {},
+     0,
+     {{{"skeleton_pose", kP},
+       {"morph_bus", kE},
+       {"material_table", PinDataKind::MaterialTable},
+       {"material_count", kF}}},
+     4},
+    {"aether.material.slot_override@1",
+     "Material Slot Override",
+     kBl,
+     "Model & Materials",
+     {{{"material_table", PinDataKind::MaterialTable},
+       {"texture", PinDataKind::TextureHandle},
+       {"shade_shift", kF},
+       {"sss_fringe", kF},
+       {"outline_scale", kF},
+       {"dynamic_driver", PinDataKind::MaterialOverride}}},
+     6,
+     {{{"override_out", PinDataKind::MaterialOverride}, {"slot_index", kF}}},
+     2},
+    {"aether.texture.asset@1",
+     "Texture Asset",
+     kSrc,
+     "Model & Materials",
+     {},
+     0,
+     {{{"texture", PinDataKind::TextureHandle}, {"ready", kB}}},
+     2},
+    {"aether.texture.grade@1",
+     "Texture Grade",
+     kBl,
+     "Model & Materials",
+     {{{"texture", PinDataKind::TextureHandle},
+       {"hue_shift", kF},
+       {"saturation", kF},
+       {"brightness", kF},
+       {"contrast", kF}}},
+     5,
+     {{{"texture", PinDataKind::TextureHandle}}},
+     1},
+    {"aether.material.dynamic_driver@1",
+     "Dynamic Material Driver",
+     kSol,
+     "Model & Materials",
+     {{{"signal_in", kF},
+       {"audio_rms", kF},
+       {"expression_weight", kF},
+       {"circadian_clock", kF},
+       {"material_table", PinDataKind::MaterialTable}}},
+     5,
+     {{{"driver_out", PinDataKind::MaterialOverride}, {"driven_value", kF}}},
+     2},
 }};
 
-constexpr std::array<const char*, 6> kMenuGroups = {"Sources",      "Solvers & Filters", "Blend & Procedural",
-                                                    "Math & Logic", "Outputs",           nullptr};
+constexpr std::array<const char*, 7> kMenuGroups = {
+    "Sources",           "Model & Materials", "Solvers & Filters", "Blend & Procedural",
+    "Math & Logic",      "Outputs",           nullptr};
 
 std::string_view type_base(std::string_view type_id) noexcept {
     const size_t at = type_id.find('@');
@@ -229,8 +287,15 @@ const NodeTemplate* find_template(const char* type_id) noexcept {
 /** Rust `default_param_for_input` fallbacks, shown in inline boxes until the user overrides them. */
 float default_input_value(const char* pin_name) noexcept {
     const std::string_view n(pin_name);
-    if (n == "gain" || n == "weight" || n == "rate_hz" || n == "intensity") {
+    if (n == "gain" || n == "weight" || n == "rate_hz" || n == "intensity" || n == "outline_scale" ||
+        n == "uv_scale_x" || n == "uv_scale_y" || n == "saturation" || n == "contrast") {
         return 1.0f;
+    }
+    if (n == "sss_fringe") {
+        return 0.5f;
+    }
+    if (n == "max_val") {
+        return 2.0f;
     }
     if (n == "amplitude") {
         return 0.05f;
@@ -398,7 +463,8 @@ void draw_pin_glyph(ImDrawList* dl, ImVec2 c, float r, PinDataKind kind, ImU32 c
                     connected ? tokens().col32_pin_hollow_fill : col, 1.4f);
         break;
     }
-    case PinDataKind::Pose: {
+    case PinDataKind::Pose:
+    case PinDataKind::MaterialTable: {
         const float k = r * 1.25f;
         const ImVec2 pts[4]{ImVec2(c.x, c.y - k), ImVec2(c.x + k, c.y), ImVec2(c.x, c.y + k), ImVec2(c.x - k, c.y)};
         dl->AddConvexPolyFilled(pts, 4, connected ? col : t.col32_pin_hollow_fill);
@@ -408,7 +474,9 @@ void draw_pin_glyph(ImDrawList* dl, ImVec2 c, float r, PinDataKind kind, ImU32 c
         break;
     }
     case PinDataKind::Expression:
-    case PinDataKind::Viseme: {
+    case PinDataKind::Viseme:
+    case PinDataKind::MaterialOverride:
+    case PinDataKind::TextureHandle: {
         const ImVec2 a(c.x - r, c.y - r);
         const ImVec2 b(c.x + r, c.y + r);
         dl->AddRectFilled(a, b, connected ? col : t.col32_pin_hollow_fill, r * 0.45f);
@@ -496,6 +564,12 @@ const char* pin_kind_name(PinDataKind kind) noexcept {
         return "Event";
     case PinDataKind::AudioFrame:
         return "AudioFrame";
+    case PinDataKind::MaterialTable:
+        return "MaterialTable";
+    case PinDataKind::MaterialOverride:
+        return "MaterialOverride";
+    case PinDataKind::TextureHandle:
+        return "TextureHandle";
     }
     return "Float";
 }
@@ -2331,11 +2405,159 @@ void NodeCanvas::draw_context_menus(const CanvasXform& xf, UndoStack& undo, Stud
         if (ni < 0) {
             ImGui::CloseCurrentPopup();
         } else {
-            const GraphNodeVm& n = nodes_[static_cast<size_t>(ni)];
+            GraphNodeVm& n = nodes_[static_cast<size_t>(ni)];
             const bool root = is_root_node_kind(n.kind.data());
             ImGui::TextColored(t.text_primary, "%s", n.title.data());
             ImGui::TextColored(t.text_tertiary, "%s", n.kind.data());
             ImGui::Separator();
+
+            const std::string_view kbase = type_base(n.kind.data());
+            auto parse_extra = [&]() -> nlohmann::json {
+                if (n.extra_params_json.empty()) {
+                    return nlohmann::json::object();
+                }
+                auto j = nlohmann::json::parse(n.extra_params_json, nullptr, false);
+                return j.is_object() ? j : nlohmann::json::object();
+            };
+            if (kbase == "aether.material.slot_override") {
+                nlohmann::json ex = parse_extra();
+                bool changed = false;
+                char slot_buf[64]{};
+                std::snprintf(slot_buf, sizeof(slot_buf), "%s", ex.value("slot_name", std::string{"*"}).c_str());
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::InputText(tr("Material Slot"), slot_buf, sizeof(slot_buf))) {
+                    ex["slot_name"] = std::string(slot_buf);
+                    changed = true;
+                }
+                static constexpr std::array<const char*, 8> kProfiles = {
+                    "keep",         "2.5D Skin SDF", "Dual-Lobe Hair", "Micro-PBR Cloth",
+                    "Eye Caustic",  "Metallic",      "Glass",          "Emissive"};
+                const std::string cur_prof = ex.value("shader_profile", std::string{"keep"});
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::BeginCombo(tr("Shader Profile"), cur_prof.c_str())) {
+                    for (const char* p : kProfiles) {
+                        const bool sel = (cur_prof == p);
+                        if (ImGui::Selectable(p, sel)) {
+                            ex["shader_profile"] = std::string(p);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                float sc[3]{0.72f, 0.75f, 0.85f};
+                if (ex.contains("shade_color") && ex["shade_color"].is_array() && ex["shade_color"].size() >= 3) {
+                    sc[0] = ex["shade_color"][0].get<float>();
+                    sc[1] = ex["shade_color"][1].get<float>();
+                    sc[2] = ex["shade_color"][2].get<float>();
+                }
+                if (ImGui::ColorEdit3(tr("Shade Color"), sc, ImGuiColorEditFlags_NoInputs)) {
+                    ex["shade_color"] = {sc[0], sc[1], sc[2], 1.0f};
+                    changed = true;
+                }
+                uint32_t rt_mask = ex.value("rt_shadow_mask", 0x7u);
+                bool rt_hair = (rt_mask & 1u) != 0u;
+                bool rt_hands = (rt_mask & 2u) != 0u;
+                bool rt_self = (rt_mask & 4u) != 0u;
+                if (ImGui::Checkbox(tr("RT Hair Shadow"), &rt_hair) |
+                    ImGui::Checkbox(tr("RT Hand Shadow"), &rt_hands) |
+                    ImGui::Checkbox(tr("RT Self Shadow"), &rt_self)) {
+                    rt_mask = (rt_hair ? 1u : 0u) | (rt_hands ? 2u : 0u) | (rt_self ? 4u : 0u);
+                    ex["rt_shadow_mask"] = rt_mask;
+                    changed = true;
+                }
+                if (changed) {
+                    n.extra_params_json = ex.dump();
+                    commit_edit("Edit Material Slot Override", undo, actions);
+                }
+                ImGui::Separator();
+            } else if (kbase == "aether.texture.asset") {
+                nlohmann::json ex = parse_extra();
+                bool changed = false;
+                char path_buf[256]{};
+                std::snprintf(path_buf, sizeof(path_buf), "%s", ex.value("path", std::string{}).c_str());
+                ImGui::SetNextItemWidth(180.0f);
+                if (ImGui::InputText(tr("Texture Path"), path_buf, sizeof(path_buf))) {
+                    ex["path"] = std::string(path_buf);
+                    changed = true;
+                }
+                bool is_srgb = (ex.value("color_space", std::string{"srgb"}) != "linear");
+                if (ImGui::Checkbox(tr("sRGB Color Space"), &is_srgb)) {
+                    ex["color_space"] = is_srgb ? "srgb" : "linear";
+                    changed = true;
+                }
+                bool is_spout = ex.value("use_spout2", ex.value("spout_enabled", false));
+                if (ImGui::Checkbox(tr("Spout2 Live Receiver"), &is_spout)) {
+                    ex["use_spout2"] = is_spout;
+                    changed = true;
+                }
+                static constexpr std::array<const char*, 6> kTexSlots = {
+                    "albedo", "shade", "normal", "matcap", "toon", "emissive"};
+                const std::string cur_slot = ex.value("target_slot", std::string{"albedo"});
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::BeginCombo(tr("Target Slot"), cur_slot.c_str())) {
+                    for (const char* s : kTexSlots) {
+                        if (ImGui::Selectable(s, cur_slot == s)) {
+                            ex["target_slot"] = std::string(s);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (changed) {
+                    n.extra_params_json = ex.dump();
+                    commit_edit("Edit Texture Asset Node", undo, actions);
+                }
+                ImGui::Separator();
+            } else if (kbase == "aether.texture.grade") {
+                nlohmann::json ex = parse_extra();
+                float tint[3]{1.0f, 1.0f, 1.0f};
+                if (ex.contains("tint") && ex["tint"].is_array() && ex["tint"].size() >= 3) {
+                    tint[0] = ex["tint"][0].get<float>();
+                    tint[1] = ex["tint"][1].get<float>();
+                    tint[2] = ex["tint"][2].get<float>();
+                }
+                if (ImGui::ColorEdit3(tr("Tint Multiply"), tint, ImGuiColorEditFlags_NoInputs)) {
+                    ex["tint"] = {tint[0], tint[1], tint[2], 1.0f};
+                    n.extra_params_json = ex.dump();
+                    commit_edit("Edit Texture Grade Tint", undo, actions);
+                }
+                ImGui::Separator();
+            } else if (kbase == "aether.material.dynamic_driver") {
+                nlohmann::json ex = parse_extra();
+                bool changed = false;
+                static constexpr std::array<const char*, 5> kSignals = {
+                    "audio_rms", "circadian_time", "blink_l", "mouth_open", "joy"};
+                static constexpr std::array<const char*, 3> kTargets = {
+                    "emissive_intensity", "blush_alpha", "rim_boost"};
+                const std::string cur_sig = ex.value("signal_source", std::string{"audio_rms"});
+                const std::string cur_tgt = ex.value("target_param", std::string{"emissive_intensity"});
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::BeginCombo(tr("Signal Source"), cur_sig.c_str())) {
+                    for (const char* s : kSignals) {
+                        if (ImGui::Selectable(s, cur_sig == s)) {
+                            ex["signal_source"] = std::string(s);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SetNextItemWidth(160.0f);
+                if (ImGui::BeginCombo(tr("Target Param"), cur_tgt.c_str())) {
+                    for (const char* tg : kTargets) {
+                        if (ImGui::Selectable(tg, cur_tgt == tg)) {
+                            ex["target_param"] = std::string(tg);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (changed) {
+                    n.extra_params_json = ex.dump();
+                    commit_edit("Edit Dynamic Material Driver", undo, actions);
+                }
+                ImGui::Separator();
+            }
+
             if (ImGui::MenuItem(tr("Break All Node Links"))) {
                 (void)break_node_links(ctx_node_id_, undo, actions);
             }

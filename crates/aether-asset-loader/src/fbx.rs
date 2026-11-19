@@ -203,6 +203,7 @@ pub fn parse_fbx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderErr
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         });
     }
     if materials.is_empty() {
@@ -245,6 +246,7 @@ pub fn parse_fbx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderErr
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         });
     }
 
@@ -478,5 +480,6 @@ pub fn parse_fbx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderErr
         spring_chains: Vec::new(),
         colliders: Vec::new(),
         textures,
+        pmx_aux: None,
     })
 }

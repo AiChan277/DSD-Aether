@@ -15,6 +15,7 @@ dependencies = [
 name = "aether-asset-loader"
 version = "1.0.0"
 dependencies = [
+ "aether-asset-pmx",
  "aether-ffi",
  "ahash",
  "bytemuck",
@@ -32,6 +33,16 @@ dependencies = [
  "unicode-normalization",
  "zune-jpeg",
  "zune-png",
+]
+
+[[package]]
+name = "aether-asset-pmx"
+version = "1.0.0"
+dependencies = [
+ "aether-ffi",
+ "encoding_rs",
+ "glam",
+ "thiserror",
 ]
 
 [[package]]

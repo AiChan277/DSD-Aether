@@ -10,6 +10,7 @@ default = []
 test-hooks = []
 
 [dependencies]
+aether-asset-pmx = { path = "../aether-asset-pmx" }
 aether-ffi = { path = "../aether-ffi" }
 ahash.workspace = true
 bytemuck.workspace = true

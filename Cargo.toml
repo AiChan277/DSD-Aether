@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/aether-ffi",
+    "crates/aether-asset-pmx",
     "crates/aether-asset-loader",
     "crates/aether-plugin-host",
     "crates/aether-rust-host",

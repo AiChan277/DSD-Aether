@@ -3,6 +3,19 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use aether_ffi::{
+    AETHER_DYN_SIG_AUDIO_RMS, AETHER_DYN_SIG_CIRCADIAN, AETHER_DYN_SIG_EXPRESSION,
+    AETHER_DYN_SIG_PIN, AETHER_DYN_TGT_BLUSH_ALPHA, AETHER_DYN_TGT_EMISSIVE_INTENSITY,
+    AETHER_DYN_TGT_RIM_BOOST, AETHER_INVALID_INDEX, AETHER_MAT_OVR_OUTLINE_SCALE,
+    AETHER_MAT_OVR_PROFILE, AETHER_MAT_OVR_RT_SHADOW_MASK, AETHER_MAT_OVR_SHADE_COLOR,
+    AETHER_MAT_OVR_SHADE_SHIFT, AETHER_MAT_OVR_SSS_FRINGE, AETHER_MAT_PROFILE_DUAL_LOBE_HAIR,
+    AETHER_MAT_PROFILE_EMISSIVE, AETHER_MAT_PROFILE_EYE_CAUSTIC, AETHER_MAT_PROFILE_GLASS,
+    AETHER_MAT_PROFILE_KEEP, AETHER_MAT_PROFILE_METALLIC, AETHER_MAT_PROFILE_MICRO_PBR_CLOTH,
+    AETHER_MAT_PROFILE_SKIN_SDF, AETHER_TEX_HANDLE_SPOUT_BIT, AETHER_TEX_SLOT_ALBEDO,
+    AETHER_TEX_SLOT_EMISSIVE, AETHER_TEX_SLOT_FACE_SDF, AETHER_TEX_SLOT_NORMAL,
+    AETHER_TEX_SLOT_ROUGHNESS, AETHER_TEX_SLOT_SHADE, AetherMaterialOverrideEntry,
+};
+
 use crate::error::HostError;
 use crate::graph::builtins::{
     NodeKind, ResolvedPort, classify_node_type, is_stateful_kind, resolve_ports,
@@ -61,6 +74,76 @@ pub struct AudioFrameData {
     pub visemes: [f32; 5],
 }
 
+/// Fixed-capacity parsed model material slot table flowing on `ValueType::MaterialTable` wires.
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialTableData {
+    pub slot_count: u32,
+    pub model_format: u32,
+    pub slot_hashes: [u32; 64],
+}
+
+impl Default for MaterialTableData {
+    fn default() -> Self {
+        Self {
+            slot_count: 0,
+            model_format: 0,
+            slot_hashes: [0; 64],
+        }
+    }
+}
+
+/// Fixed-size 64-bit texture handle + GPU non-destructive color grade state (`ValueType::TextureHandle`).
+#[derive(Clone, Copy, Debug)]
+pub struct TextureHandleData {
+    pub handle: u64,
+    pub srgb: bool,
+    pub is_spout: bool,
+    pub target_slot: u8,
+    pub grade_active: bool,
+    pub uv_scale_offset: [f32; 4],
+    pub grade_hsbc: [f32; 4],
+    pub grade_tint: [f32; 4],
+}
+
+impl Default for TextureHandleData {
+    fn default() -> Self {
+        Self {
+            handle: 0,
+            srgb: true,
+            is_spout: false,
+            target_slot: 0,
+            grade_active: false,
+            uv_scale_offset: [1.0, 1.0, 0.0, 0.0],
+            grade_hsbc: [0.0, 1.0, 0.0, 1.0],
+            grade_tint: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Fixed-size non-destructive material override slot (`ValueType::MaterialOverride`).
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialOverrideData {
+    pub entry: AetherMaterialOverrideEntry,
+    pub valid: bool,
+}
+
+impl Default for MaterialOverrideData {
+    fn default() -> Self {
+        let entry = AetherMaterialOverrideEntry {
+            material_index: AETHER_INVALID_INDEX,
+            shader_profile: AETHER_MAT_PROFILE_KEEP,
+            uv_scale_offset: [1.0, 1.0, 0.0, 0.0],
+            grade_hsbc: [0.0, 1.0, 0.0, 1.0],
+            grade_tint: [1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
+        Self {
+            entry,
+            valid: false,
+        }
+    }
+}
+
 /// Type-segregated flat slot arena sized once at compile time (`HR-01`).
 #[derive(Clone, Debug, Default)]
 pub struct ValuesArena {
@@ -76,6 +159,9 @@ pub struct ValuesArena {
     pub audio_frames: Vec<AudioFrameData>,
     pub colors: Vec<[f32; 4]>,
     pub luts: Vec<[f32; 64]>,
+    pub mat_tables: Vec<MaterialTableData>,
+    pub tex_handles: Vec<TextureHandleData>,
+    pub mat_overrides: Vec<MaterialOverrideData>,
 }
 
 /// Typed slot reference inside [`ValuesArena`].
@@ -92,6 +178,9 @@ pub enum SlotRef {
     VisemeSet(usize),
     AudioFrame(usize),
     Color(usize),
+    MaterialTable(usize),
+    MaterialOverride(usize),
+    TextureHandle(usize),
 }
 
 impl SlotRef {
@@ -107,7 +196,10 @@ impl SlotRef {
             | Self::ExprSet(i)
             | Self::VisemeSet(i)
             | Self::AudioFrame(i)
-            | Self::Color(i) => i,
+            | Self::Color(i)
+            | Self::MaterialTable(i)
+            | Self::MaterialOverride(i)
+            | Self::TextureHandle(i) => i,
         }
     }
 }
@@ -172,6 +264,21 @@ impl ValuesArena {
                 let idx = self.colors.len();
                 self.colors.push([1.0; 4]);
                 Ok(SlotRef::Color(idx))
+            }
+            ValueType::MaterialTable => {
+                let idx = self.mat_tables.len();
+                self.mat_tables.push(MaterialTableData::default());
+                Ok(SlotRef::MaterialTable(idx))
+            }
+            ValueType::MaterialOverride => {
+                let idx = self.mat_overrides.len();
+                self.mat_overrides.push(MaterialOverrideData::default());
+                Ok(SlotRef::MaterialOverride(idx))
+            }
+            ValueType::TextureHandle => {
+                let idx = self.tex_handles.len();
+                self.tex_handles.push(TextureHandleData::default());
+                Ok(SlotRef::TextureHandle(idx))
             }
             ValueType::String => Err(HostError::parse(
                 "ValueType::String is config-only and cannot have a runtime slot",
@@ -296,6 +403,18 @@ pub enum Op {
         dst: usize,
     },
     CopyColor {
+        src: usize,
+        dst: usize,
+    },
+    CopyMaterialTable {
+        src: usize,
+        dst: usize,
+    },
+    CopyMaterialOverride {
+        src: usize,
+        dst: usize,
+    },
+    CopyTextureHandle {
         src: usize,
         dst: usize,
     },
@@ -545,6 +664,71 @@ pub enum Op {
         in_floats: Box<[Option<usize>; LATCHED_IO_FLOATS]>,
         out_floats: Box<[Option<usize>; LATCHED_IO_FLOATS]>,
     },
+    ModelSource {
+        table: MaterialTableData,
+        out_pose: usize,
+        out_expr: usize,
+        out_table: usize,
+        out_count: usize,
+    },
+    TextureAsset {
+        tex_data: TextureHandleData,
+        out_tex: usize,
+        out_ready: usize,
+    },
+    TextureGrade {
+        in_tex: usize,
+        in_hue: usize,
+        in_sat: usize,
+        in_bright: usize,
+        in_contrast: usize,
+        in_tint: usize,
+        tint_from_param: [f32; 4],
+        tint_connected: bool,
+        uv_scale_offset: [f32; 4],
+        out_tex: usize,
+    },
+    DynamicMaterialDriver {
+        in_signal: usize,
+        in_audio_rms: usize,
+        in_expr_w: usize,
+        in_circadian: usize,
+        in_table: usize,
+        signal_connected: bool,
+        audio_connected: bool,
+        expr_connected: bool,
+        circadian_connected: bool,
+        signal_source: u32,
+        expr_slot: usize,
+        target_param: u32,
+        material_index: u32,
+        material_name_hash: u32,
+        gain: f32,
+        bias: f32,
+        min_v: f32,
+        max_v: f32,
+        out_ovr: usize,
+        out_val: usize,
+    },
+    MaterialSlotOverride {
+        in_table: usize,
+        in_tex: usize,
+        in_shade_shift: usize,
+        in_sss_fringe: usize,
+        in_outline_scale: usize,
+        in_driver: usize,
+        tex_connected: bool,
+        driver_connected: bool,
+        material_index: u32,
+        material_name_hash: u32,
+        base_override_mask: u32,
+        shader_profile: u32,
+        shade_color: [f32; 4],
+        rt_shadow_mask: u32,
+        explicit_tex_slot: Option<u8>,
+        out_ovr: usize,
+        out_slot_idx: usize,
+    },
 }
 
 /// Active WASM latched instance metadata attached to a compiled plan so background workers know which slots are live.
@@ -586,6 +770,9 @@ pub struct CompiledGraphPlan {
     pub(crate) pin_kinds: Vec<u8>,
     pub(crate) pin_values: Vec<[f32; 4]>,
     pub(crate) latched_bindings: Vec<LatchedBinding>,
+    pub(crate) mat_override_sink_slots: Vec<usize>,
+    pub(crate) model_format: u32,
+    pub(crate) model_material_count: u32,
 }
 
 impl CompiledGraphPlan {
@@ -607,6 +794,9 @@ impl CompiledGraphPlan {
             pin_kinds: Vec::new(),
             pin_values: Vec::new(),
             latched_bindings: Vec::new(),
+            mat_override_sink_slots: Vec::new(),
+            model_format: 0,
+            model_material_count: 0,
         }
     }
 
@@ -680,6 +870,97 @@ fn default_param_for_input(node: &GraphNode, port_name: &str) -> Option<f32> {
         }
         "focal_mm" => Some(50.0),
         "flatness" => Some(0.45),
+        "saturation" | "contrast" | "outline_scale" => Some(1.0),
+        "sss_fringe" => Some(0.5),
+        "shade_shift" => Some(-0.05),
+        _ => None,
+    }
+}
+
+pub(crate) fn fnv1a_lower_u32(text: &str) -> u32 {
+    let mut h: u32 = 0x811C_9DC5;
+    for b in text.as_bytes() {
+        h ^= u32::from(b.to_ascii_lowercase());
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+pub(crate) fn fnv1a_u64(text: &str) -> u64 {
+    if text.is_empty() {
+        return 0;
+    }
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+    for &b in text.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    if (h & !AETHER_TEX_HANDLE_SPOUT_BIT) == 0 {
+        1
+    } else {
+        h & !AETHER_TEX_HANDLE_SPOUT_BIT
+    }
+}
+
+fn param_vec4(node: &GraphNode, key: &str, default: [f32; 4]) -> [f32; 4] {
+    if let Some(arr) = node.params.get(key).and_then(serde_json::Value::as_array) {
+        let mut out = default;
+        for (i, dst) in out.iter_mut().enumerate() {
+            if let Some(v) = arr.get(i).and_then(serde_json::Value::as_f64) {
+                let f = v as f32;
+                if f.is_finite() {
+                    *dst = f;
+                }
+            }
+        }
+        out
+    } else {
+        default
+    }
+}
+
+fn parse_shader_profile(node: &GraphNode) -> Option<u32> {
+    if let Some(u) = node
+        .params
+        .get("shader_profile")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return u32::try_from(u).ok();
+    }
+    let s = node
+        .params
+        .get("shader_profile")
+        .and_then(serde_json::Value::as_str)?
+        .trim()
+        .to_ascii_lowercase();
+    match s.as_str() {
+        "2.5d skin sdf" | "skin_sdf" | "skin" => Some(AETHER_MAT_PROFILE_SKIN_SDF),
+        "dual-lobe hair" | "dual_lobe_hair" | "hair" => Some(AETHER_MAT_PROFILE_DUAL_LOBE_HAIR),
+        "micro-pbr cloth" | "micro_pbr_cloth" | "cloth" => {
+            Some(AETHER_MAT_PROFILE_MICRO_PBR_CLOTH)
+        }
+        "eye caustic" | "eye_caustic" | "eye" => Some(AETHER_MAT_PROFILE_EYE_CAUSTIC),
+        "metallic" | "metal" => Some(AETHER_MAT_PROFILE_METALLIC),
+        "glass" => Some(AETHER_MAT_PROFILE_GLASS),
+        "emissive" | "glow" => Some(AETHER_MAT_PROFILE_EMISSIVE),
+        _ => None,
+    }
+}
+
+fn parse_tex_slot(val: Option<&serde_json::Value>) -> Option<u8> {
+    if let Some(u) = val.and_then(serde_json::Value::as_u64) {
+        return u8::try_from(u.min(5)).ok();
+    }
+    let s = val?.as_str()?.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "albedo" | "base" | "base_color" => Some(AETHER_TEX_SLOT_ALBEDO as u8),
+        "shadetex" | "shade_tex" | "shade" => Some(AETHER_TEX_SLOT_SHADE as u8),
+        "facesdf" | "face_sdf" | "sdf" => Some(AETHER_TEX_SLOT_FACE_SDF as u8),
+        "normalmap" | "normal_map" | "normal" => Some(AETHER_TEX_SLOT_NORMAL as u8),
+        "roughnessmap" | "roughness_map" | "roughness" | "matcap" | "sphere" => {
+            Some(AETHER_TEX_SLOT_ROUGHNESS as u8)
+        }
+        "emissivemask" | "emissive_mask" | "emissive" => Some(AETHER_TEX_SLOT_EMISSIVE as u8),
         _ => None,
     }
 }
@@ -713,6 +994,15 @@ fn emit_copy_or_coerce(
             ops.push(Op::CopyAudioFrame { src: s, dst: d });
         }
         (SlotRef::Color(s), SlotRef::Color(d)) => ops.push(Op::CopyColor { src: s, dst: d }),
+        (SlotRef::MaterialTable(s), SlotRef::MaterialTable(d)) => {
+            ops.push(Op::CopyMaterialTable { src: s, dst: d });
+        }
+        (SlotRef::MaterialOverride(s), SlotRef::MaterialOverride(d)) => {
+            ops.push(Op::CopyMaterialOverride { src: s, dst: d });
+        }
+        (SlotRef::TextureHandle(s), SlotRef::TextureHandle(d)) => {
+            ops.push(Op::CopyTextureHandle { src: s, dst: d });
+        }
         (SlotRef::Bool(s), SlotRef::Float(d)) => ops.push(Op::CastBoolToFloat { src: s, dst: d }),
         (SlotRef::Float(s), SlotRef::Bool(d)) => ops.push(Op::CastFloatToBool { src: s, dst: d }),
         (SlotRef::Float(s), SlotRef::Vec3(d)) => {
@@ -899,6 +1189,31 @@ pub fn compile_graph_document(
     let mut node_ids: Vec<u64> = Vec::with_capacity(doc.nodes.len());
     let mut latched_bindings: Vec<LatchedBinding> = Vec::new();
     let mut next_latched_slot = 0_usize;
+    let mut mat_override_sink_slots: Vec<usize> = Vec::new();
+    let mut model_format = 0_u32;
+    let mut model_material_count = 0_u32;
+    let mut compiled_slot_names: Vec<String> = Vec::new();
+    for node in &doc.nodes {
+        if classify_node_type(&node.type_id) == Some(NodeKind::ModelSource) {
+            model_format = param_u32(node, "model_format", 0);
+            if let Some(arr) = node
+                .params
+                .get("material_slots")
+                .and_then(serde_json::Value::as_array)
+            {
+                for item in arr.iter().take(64) {
+                    if let Some(s) = item.as_str() {
+                        compiled_slot_names.push(s.to_owned());
+                    }
+                }
+            }
+            if compiled_slot_names.is_empty() {
+                model_material_count = param_u32(node, "material_count", 0);
+            } else {
+                model_material_count = u32::try_from(compiled_slot_names.len()).unwrap_or(0);
+            }
+        }
+    }
 
     let mut port_slots: BTreeMap<(u64, String, bool), SlotRef> = BTreeMap::new();
     let mut delay_nodes: Vec<(usize, u64)> = Vec::new();
@@ -1372,6 +1687,313 @@ pub fn compile_graph_document(
                     out_floats: Box::new(out_floats),
                 }
             }
+            NodeKind::ModelSource => {
+                let mut table = MaterialTableData {
+                    slot_count: model_material_count,
+                    model_format,
+                    slot_hashes: [0; 64],
+                };
+                for (si, sname) in compiled_slot_names.iter().take(64).enumerate() {
+                    table.slot_hashes[si] = fnv1a_lower_u32(sname);
+                }
+                Op::ModelSource {
+                    table,
+                    out_pose: out_slot("skeleton_pose"),
+                    out_expr: out_slot("morph_bus"),
+                    out_table: out_slot("material_table"),
+                    out_count: out_slot("material_count"),
+                }
+            }
+            NodeKind::TextureAsset => {
+                let use_spout = param_bool(node, "use_spout2", false)
+                    || param_bool(node, "spout_enabled", false);
+                let srgb = node
+                    .params
+                    .get("color_space")
+                    .and_then(serde_json::Value::as_str)
+                    .map_or_else(
+                        || param_bool(node, "srgb", true),
+                        |cs| !cs.eq_ignore_ascii_case("linear"),
+                    );
+                let target_slot = parse_tex_slot(
+                    node.params
+                        .get("target_slot")
+                        .or_else(|| node.params.get("tex_slot")),
+                )
+                .unwrap_or(0);
+                let handle = if let Some(explicit_h) = node
+                    .params
+                    .get("texture_handle")
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    if use_spout {
+                        explicit_h | AETHER_TEX_HANDLE_SPOUT_BIT
+                    } else {
+                        explicit_h
+                    }
+                } else if use_spout {
+                    let sender = node
+                        .params
+                        .get("spout_sender")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Aether2.5D");
+                    fnv1a_u64(sender) | AETHER_TEX_HANDLE_SPOUT_BIT
+                } else {
+                    let path = node
+                        .params
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if path.is_empty() {
+                        0
+                    } else {
+                        fnv1a_u64(path) ^ (if srgb { 0 } else { 0x5555_5555_5555_5555 })
+                    }
+                };
+                let tex_data = TextureHandleData {
+                    handle,
+                    srgb,
+                    is_spout: use_spout,
+                    target_slot,
+                    grade_active: false,
+                    uv_scale_offset: [1.0, 1.0, 0.0, 0.0],
+                    grade_hsbc: [0.0, 1.0, 0.0, 1.0],
+                    grade_tint: [1.0, 1.0, 1.0, 1.0],
+                };
+                Op::TextureAsset {
+                    tex_data,
+                    out_tex: out_slot("texture"),
+                    out_ready: out_slot("ready"),
+                }
+            }
+            NodeKind::TextureGrade => {
+                let tint_from_param = if node.params.contains_key("tint") {
+                    param_vec4(node, "tint", [1.0, 1.0, 1.0, 1.0])
+                } else {
+                    param_vec4(node, "tint_rgb", [1.0, 1.0, 1.0, 1.0])
+                };
+                let tint_connected = driven_inputs.contains_key(&(node.id, "tint".to_owned()));
+                let mut uv_scale_offset =
+                    param_vec4(node, "uv_scale_offset", [1.0, 1.0, 0.0, 0.0]);
+                if let Some(sc) = node
+                    .params
+                    .get("uv_scale")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    if let Some(x) = sc.first().and_then(serde_json::Value::as_f64) {
+                        uv_scale_offset[0] = x as f32;
+                    }
+                    if let Some(y) = sc.get(1).and_then(serde_json::Value::as_f64) {
+                        uv_scale_offset[1] = y as f32;
+                    }
+                }
+                if let Some(of) = node
+                    .params
+                    .get("uv_offset")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    if let Some(x) = of.first().and_then(serde_json::Value::as_f64) {
+                        uv_scale_offset[2] = x as f32;
+                    }
+                    if let Some(y) = of.get(1).and_then(serde_json::Value::as_f64) {
+                        uv_scale_offset[3] = y as f32;
+                    }
+                }
+                if let Some(sx) = node.params.get("uv_scale_x").and_then(serde_json::Value::as_f64) {
+                    uv_scale_offset[0] = sx as f32;
+                }
+                if let Some(sy) = node.params.get("uv_scale_y").and_then(serde_json::Value::as_f64) {
+                    uv_scale_offset[1] = sy as f32;
+                }
+                if let Some(ox) = node.params.get("uv_offset_x").and_then(serde_json::Value::as_f64) {
+                    uv_scale_offset[2] = ox as f32;
+                }
+                if let Some(oy) = node.params.get("uv_offset_y").and_then(serde_json::Value::as_f64) {
+                    uv_scale_offset[3] = oy as f32;
+                }
+                Op::TextureGrade {
+                    in_tex: in_slot("texture"),
+                    in_hue: in_slot("hue_shift"),
+                    in_sat: in_slot("saturation"),
+                    in_bright: in_slot("brightness"),
+                    in_contrast: in_slot("contrast"),
+                    in_tint: in_slot("tint"),
+                    tint_from_param,
+                    tint_connected,
+                    uv_scale_offset,
+                    out_tex: out_slot("texture"),
+                }
+            }
+            NodeKind::DynamicMaterialDriver => {
+                let signal_connected =
+                    driven_inputs.contains_key(&(node.id, "signal_in".to_owned()));
+                let audio_connected =
+                    driven_inputs.contains_key(&(node.id, "audio_rms".to_owned()));
+                let expr_connected =
+                    driven_inputs.contains_key(&(node.id, "expression_weight".to_owned()));
+                let circadian_connected =
+                    driven_inputs.contains_key(&(node.id, "circadian_clock".to_owned()));
+                let signal_source = match node
+                    .params
+                    .get("signal_source")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("expression" | "expression_weight") => AETHER_DYN_SIG_EXPRESSION,
+                    Some("circadian" | "circadian_clock" | "clock") => AETHER_DYN_SIG_CIRCADIAN,
+                    Some("pin" | "input_pin" | "signal_in") => AETHER_DYN_SIG_PIN,
+                    _ => {
+                        if signal_connected {
+                            AETHER_DYN_SIG_PIN
+                        } else if expr_connected {
+                            AETHER_DYN_SIG_EXPRESSION
+                        } else if circadian_connected {
+                            AETHER_DYN_SIG_CIRCADIAN
+                        } else {
+                            AETHER_DYN_SIG_AUDIO_RMS
+                        }
+                    }
+                };
+                let target_param = match node
+                    .params
+                    .get("target_param")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("blush" | "blush_alpha") => AETHER_DYN_TGT_BLUSH_ALPHA,
+                    Some("rim" | "rim_boost") => AETHER_DYN_TGT_RIM_BOOST,
+                    _ => AETHER_DYN_TGT_EMISSIVE_INTENSITY,
+                };
+                let expr_slot = (param_u32(node, "expression_slot", 17) as usize).min(63);
+                let slot_name = node
+                    .params
+                    .get("slot_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let material_name_hash = if slot_name.is_empty() {
+                    0
+                } else {
+                    fnv1a_lower_u32(slot_name)
+                };
+                let mut material_index = node
+                    .params
+                    .get("slot_index")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|v| if v >= 0 { u32::try_from(v).ok() } else { None })
+                    .unwrap_or(AETHER_INVALID_INDEX);
+                if material_index == AETHER_INVALID_INDEX && !slot_name.is_empty() {
+                    if let Some(pos) = compiled_slot_names
+                        .iter()
+                        .position(|n| n.eq_ignore_ascii_case(slot_name))
+                    {
+                        material_index = u32::try_from(pos).unwrap_or(AETHER_INVALID_INDEX);
+                    }
+                }
+                let out_ovr = out_slot("driver_out");
+                let feeds_slot_override = normalized_edges.iter().any(|e| {
+                    e.from_node == node.id
+                        && e.from_port == "driver_out"
+                        && kinds[id_to_idx[&e.to_node]] == NodeKind::MaterialSlotOverride
+                });
+                if !feeds_slot_override {
+                    mat_override_sink_slots.push(out_ovr);
+                }
+                Op::DynamicMaterialDriver {
+                    in_signal: in_slot("signal_in"),
+                    in_audio_rms: in_slot("audio_rms"),
+                    in_expr_w: in_slot("expression_weight"),
+                    in_circadian: in_slot("circadian_clock"),
+                    in_table: in_slot("material_table"),
+                    signal_connected,
+                    audio_connected,
+                    expr_connected,
+                    circadian_connected,
+                    signal_source,
+                    expr_slot,
+                    target_param,
+                    material_index,
+                    material_name_hash,
+                    gain: param_f32(node, "gain", 1.0),
+                    bias: param_f32(node, "bias", 0.0),
+                    min_v: param_f32(node, "min_val", 0.0),
+                    max_v: param_f32(node, "max_val", 4.0),
+                    out_ovr,
+                    out_val: out_slot("driven_value"),
+                }
+            }
+            NodeKind::MaterialSlotOverride => {
+                let slot_name = node
+                    .params
+                    .get("slot_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let material_name_hash = if slot_name.is_empty() {
+                    0
+                } else {
+                    fnv1a_lower_u32(slot_name)
+                };
+                let mut material_index = node
+                    .params
+                    .get("slot_index")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|v| if v >= 0 { u32::try_from(v).ok() } else { None })
+                    .unwrap_or(AETHER_INVALID_INDEX);
+                if material_index == AETHER_INVALID_INDEX && !slot_name.is_empty() {
+                    if let Some(pos) = compiled_slot_names
+                        .iter()
+                        .position(|n| n.eq_ignore_ascii_case(slot_name))
+                    {
+                        material_index = u32::try_from(pos).unwrap_or(AETHER_INVALID_INDEX);
+                    }
+                }
+                let mut base_override_mask =
+                    AETHER_MAT_OVR_SHADE_SHIFT | AETHER_MAT_OVR_SSS_FRINGE | AETHER_MAT_OVR_OUTLINE_SCALE;
+                let shader_profile = if let Some(prof) = parse_shader_profile(node) {
+                    base_override_mask |= AETHER_MAT_OVR_PROFILE;
+                    prof
+                } else {
+                    AETHER_MAT_PROFILE_KEEP
+                };
+                if node.params.contains_key("shade_color") {
+                    base_override_mask |= AETHER_MAT_OVR_SHADE_COLOR;
+                }
+                if node.params.contains_key("rt_shadow_mask") {
+                    base_override_mask |= AETHER_MAT_OVR_RT_SHADOW_MASK;
+                }
+                let shade_color = param_vec4(node, "shade_color", [0.75, 0.72, 0.85, 1.0]);
+                let rt_shadow_mask = param_u32(node, "rt_shadow_mask", 0x07);
+                let explicit_tex_slot = parse_tex_slot(
+                    node.params
+                        .get("tex_slot")
+                        .or_else(|| node.params.get("target_slot")),
+                );
+                let tex_connected = driven_inputs.contains_key(&(node.id, "texture".to_owned()));
+                let driver_connected =
+                    driven_inputs.contains_key(&(node.id, "dynamic_driver".to_owned()));
+                let out_ovr = out_slot("override_out");
+                mat_override_sink_slots.push(out_ovr);
+                Op::MaterialSlotOverride {
+                    in_table: in_slot("material_table"),
+                    in_tex: in_slot("texture"),
+                    in_shade_shift: in_slot("shade_shift"),
+                    in_sss_fringe: in_slot("sss_fringe"),
+                    in_outline_scale: in_slot("outline_scale"),
+                    in_driver: in_slot("dynamic_driver"),
+                    tex_connected,
+                    driver_connected,
+                    material_index,
+                    material_name_hash,
+                    base_override_mask,
+                    shader_profile,
+                    shade_color,
+                    rt_shadow_mask,
+                    explicit_tex_slot,
+                    out_ovr,
+                    out_slot_idx: out_slot("slot_index"),
+                }
+            }
         };
 
         ops.push(emitted);
@@ -1411,5 +2033,8 @@ pub fn compile_graph_document(
         pin_kinds: vec![0; pin_count],
         pin_values: vec![[0.0; 4]; pin_count],
         latched_bindings,
+        mat_override_sink_slots,
+        model_format,
+        model_material_count,
     })
 }

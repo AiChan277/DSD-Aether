@@ -185,7 +185,8 @@ struct PrecisionDarkTokens {
 
     // Pin data-type colors (§3.2) indexed by `PinDataKind`:
     // 0:Float 1:Bool 2:Vec3 3:Pose 4:Expression 5:Viseme 6:Event 7:AudioFrame
-    std::array<ImU32, 8> col32_pin_types{
+    // 8:MaterialTable 9:MaterialOverride 10:TextureHandle
+    std::array<ImU32, 11> col32_pin_types{
         hex_col32(0x38BDF8FF), // Float / Confidence: cyan
         hex_col32(0xFB7185FF), // Bool: rose
         hex_col32(0xFB923CFF), // Vec3 / direction: orange
@@ -194,6 +195,9 @@ struct PrecisionDarkTokens {
         hex_col32(0xEAB308FF), // Viseme5 lip-sync weights: amber
         hex_col32(0xE2E8F0FF), // Event / trigger exec: white
         hex_col32(0xA855F7FF), // AudioFrame DSP envelope & formants: purple
+        hex_col32(0x34D399FF), // MaterialTable: emerald
+        hex_col32(0x2DD4BFFF), // MaterialOverride: teal
+        hex_col32(0x818CF8FF), // TextureHandle: indigo
     };
     ImU32 col32_pin_hollow_fill = hex_col32(0x0B0D10FF);
     ImU32 col32_safe_box_edge = hex_col32(0x10B981D9);

@@ -16,14 +16,17 @@ namespace aether::ui {
 
 /** UI pin data types mirroring the Rust graph `ValueType`s that the canvas can author (`§3.2`). */
 enum class PinDataKind : uint8_t {
-    Float = 0,      // Float / confidence (cyan circle)
-    Bool = 1,       // Bool (rose square)
-    Vec3 = 2,       // Vec3 / direction (orange circle)
-    Pose = 3,       // PoseStream, 55 joints (pink diamond)
-    Expression = 4, // Blendshape52 ExprSet (gold rounded square)
-    Viseme = 5,     // Viseme5 lip-sync weights (amber rounded square)
-    Event = 6,      // Event / trigger exec (white arrow)
-    AudioFrame = 7, // DSP audio frame: envelope & F1/F2 formants (purple waveform diamond)
+    Float = 0,            // Float / confidence (cyan circle)
+    Bool = 1,             // Bool (rose square)
+    Vec3 = 2,             // Vec3 / direction (orange circle)
+    Pose = 3,             // PoseStream, 55 joints (pink diamond)
+    Expression = 4,       // Blendshape52 ExprSet (gold rounded square)
+    Viseme = 5,           // Viseme5 lip-sync weights (amber rounded square)
+    Event = 6,            // Event / trigger exec (white arrow)
+    AudioFrame = 7,       // DSP audio frame: envelope & F1/F2 formants (purple waveform diamond)
+    MaterialTable = 8,    // Avatar material slot table (emerald hexagon/diamond)
+    MaterialOverride = 9, // Non-destructive material override stream (teal rounded square)
+    TextureHandle = 10,   // Async texture asset or live Spout2 feed handle (indigo square)
 };
 
 /** Mirrors Rust `ValueType::can_connect` so the canvas only creates links the compiler accepts. */
@@ -38,7 +41,7 @@ enum class NodeCategory : uint8_t {
     Output = 3, // Output sinks: royal purple
 };
 
-inline constexpr size_t kMaxNodePins = 6;
+inline constexpr size_t kMaxNodePins = 10;
 
 struct GraphPinVm {
     std::array<char, 24> name{};

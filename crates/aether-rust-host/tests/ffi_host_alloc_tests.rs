@@ -11,17 +11,20 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use aether_ffi::{
-    AETHER_HOST_CMD_SET_GRAPH_JSON, AETHER_HOST_EVT_GRAPH_COMPILED, AETHER_OK,
-    AETHER_PIN_VALUE_FLOAT, AETHER_THREAD_ROLE_ANY, AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_T2,
-    AETHER_THREAD_ROLE_UI, AetherGraphInputs, AetherGraphOutputs, AetherGraphTelemetryReadout,
-    AetherHostCommand, AetherHostConfig, AetherHostEvent, AetherHostHandle,
+    AETHER_HOST_CMD_SET_GRAPH_JSON, AETHER_HOST_EVT_GRAPH_COMPILED, AETHER_MAT_OVR_EMISSIVE,
+    AETHER_MAT_OVR_GRADE, AETHER_MAT_OVR_PROFILE, AETHER_MAT_OVR_TEXTURE,
+    AETHER_MAT_PROFILE_DUAL_LOBE_HAIR, AETHER_OK, AETHER_PIN_VALUE_FLOAT, AETHER_THREAD_ROLE_ANY,
+    AETHER_THREAD_ROLE_MAIN, AETHER_THREAD_ROLE_T2, AETHER_THREAD_ROLE_UI, AetherGraphInputs,
+    AetherGraphOutputs, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
+    AetherHostEvent, AetherHostHandle, AetherMaterialOverrideBuffer,
 };
 use aether_plugin_host::GraphDocument;
 use aether_plugin_host::graph::model::{GraphEdge, GraphNode};
 use aether_rust_host::{
     aether_host_create, aether_host_destroy, aether_host_evaluate_active,
-    aether_host_get_telemetry_readout, aether_host_poll_events, aether_host_post_command,
-    aether_set_thread_role, aether_test_alloc_reset, aether_test_thread_alloc_calls,
+    aether_host_evaluate_active_ex, aether_host_get_telemetry_readout, aether_host_poll_events,
+    aether_host_post_command, aether_host_set_model_metadata_json, aether_set_thread_role,
+    aether_test_alloc_reset, aether_test_thread_alloc_calls,
 };
 
 #[test]
@@ -192,6 +195,128 @@ fn t2_host_evaluate_active_has_zero_allocs_even_across_plan_hotswap()
 
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
     // SAFETY: `host` is live and owned by this test until destruction.
+    unsafe { aether_host_destroy(host) };
+    aether_set_thread_role(AETHER_THREAD_ROLE_ANY);
+    Ok(())
+}
+
+#[test]
+fn t2_material_texture_nodes_evaluate_with_zero_allocs() -> Result<(), Box<dyn std::error::Error>> {
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    let cfg = AetherHostConfig {
+        struct_size: size_of::<AetherHostConfig>() as u32,
+        worker_threads: 2,
+        osc_in_port: 0,
+        osc_out_port: 0,
+        ws_port: 0,
+        flags: 0,
+        plugins_dir_utf8: ptr::null(),
+    };
+    let mut host: AetherHostHandle = ptr::null_mut();
+    // SAFETY: Valid config and non-null output handle pointer.
+    assert_eq!(unsafe { aether_host_create(&cfg, &mut host) }, AETHER_OK);
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_UI);
+    let meta_cstr = std::ffi::CString::new(
+        r#"{"format":1,"materials":["Face_00_SKIN","Hair_00_HAIR","Cardigan_00_CLOTH"]}"#,
+    )?;
+    // SAFETY: Valid host and NUL-terminated JSON string.
+    assert_eq!(
+        unsafe { aether_host_set_model_metadata_json(host, meta_cstr.as_ptr()) },
+        AETHER_OK
+    );
+
+    let graph_json = serde_json::json!({
+        "schema_version": 1,
+        "nodes": [
+            { "id": 1, "type": "aether.model.source@1", "params": {} },
+            { "id": 2, "type": "aether.texture.asset@1", "params": { "path": "tex/hair_ramp.png", "color_space": "srgb", "target_slot": "shade_tex" } },
+            { "id": 3, "type": "aether.texture.grade@1", "params": { "hue_shift": 15.0, "saturation": 1.25, "brightness": 0.05, "contrast": 1.1 } },
+            { "id": 4, "type": "aether.material.dynamic_driver@1", "params": { "signal_source": "audio_rms", "target_param": "emissive_intensity", "gain": 2.0 } },
+            { "id": 5, "type": "aether.material.slot_override@1", "params": { "slot_name": "Hair_00_HAIR", "shader_profile": "Dual-Lobe Hair", "shade_shift": -0.12, "sss_fringe": 0.65, "outline_scale": 1.2 } }
+        ],
+        "edges": [
+            { "id": 1, "from_node": 1, "from_port": "material_table", "to_node": 5, "to_port": "material_table" },
+            { "id": 2, "from_node": 2, "from_port": "texture", "to_node": 3, "to_port": "texture" },
+            { "id": 3, "from_node": 3, "from_port": "texture", "to_node": 5, "to_port": "texture" },
+            { "id": 4, "from_node": 4, "from_port": "driver_out", "to_node": 5, "to_port": "dynamic_driver" }
+        ]
+    });
+    let cstr = std::ffi::CString::new(graph_json.to_string())?;
+    let cmd = AetherHostCommand {
+        struct_size: size_of::<AetherHostCommand>() as u32,
+        kind: AETHER_HOST_CMD_SET_GRAPH_JSON,
+        target_id: 0,
+        param_f32: 0.0,
+        param_u32: 0,
+        payload_len: cstr.as_bytes().len() as u64,
+        payload_utf8: cstr.as_ptr(),
+    };
+    // SAFETY: Valid host and command pointer.
+    assert_eq!(unsafe { aether_host_post_command(host, &cmd) }, AETHER_OK);
+
+    let mut compiled = false;
+    for _ in 0..40 {
+        std::thread::sleep(Duration::from_millis(10));
+        let mut evs = [unsafe { core::mem::zeroed::<AetherHostEvent>() }; 8];
+        let mut count = 0u32;
+        // SAFETY: Valid host and event buffer.
+        let _ = unsafe { aether_host_poll_events(host, evs.as_mut_ptr(), 8, &mut count) };
+        for ev in &evs[..count as usize] {
+            if ev.kind == AETHER_HOST_EVT_GRAPH_COMPILED {
+                compiled = true;
+            }
+        }
+        if compiled {
+            break;
+        }
+    }
+    assert!(compiled, "material graph must compile cleanly");
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_T2);
+    let gin = AetherGraphInputs {
+        tracking: ptr::null(),
+        now_us: 1_000_000,
+        dt_s: 1.0 / 60.0,
+        tick_index: 10,
+        dsp_visemes: [0.0; 5],
+        dsp_rms_db: -15.0,
+        keys_down: [0; 2],
+        keys_pressed: [0; 2],
+        external_params: [0.0; 64],
+    };
+    let mut gout: AetherGraphOutputs = unsafe { core::mem::zeroed() };
+    let mut gmats: AetherMaterialOverrideBuffer = unsafe { core::mem::zeroed() };
+
+    aether_test_alloc_reset();
+    for _ in 0..100 {
+        // SAFETY: Valid T2 pointers and 64-byte aligned outputs.
+        let st =
+            unsafe { aether_host_evaluate_active_ex(host, &gin, 18.0, &mut gout, &mut gmats) };
+        assert_eq!(st, AETHER_OK);
+    }
+    assert_eq!(
+        aether_test_thread_alloc_calls(),
+        0,
+        "T2 evaluate_active_ex with all 5 material/texture nodes must perform 0 heap allocations"
+    );
+    assert_eq!(gmats.count, 1);
+    let e0 = &gmats.entries[0];
+    assert_eq!(e0.material_index, 1); // "Hair_00_HAIR" -> slot 1
+    assert_eq!(e0.shader_profile, AETHER_MAT_PROFILE_DUAL_LOBE_HAIR);
+    assert_ne!(
+        e0.override_mask
+            & (AETHER_MAT_OVR_PROFILE
+                | AETHER_MAT_OVR_TEXTURE
+                | AETHER_MAT_OVR_GRADE
+                | AETHER_MAT_OVR_EMISSIVE),
+        0
+    );
+    assert!((e0.grade_hsbc[0] - 15.0).abs() < 1e-4);
+    assert!((e0.dynamic_params[0] - 1.5).abs() < 1e-3);
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    // SAFETY: Valid host owned by this test.
     unsafe { aether_host_destroy(host) };
     aether_set_thread_role(AETHER_THREAD_ROLE_ANY);
     Ok(())

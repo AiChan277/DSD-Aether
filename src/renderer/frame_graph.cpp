@@ -252,6 +252,7 @@ void FrameGraph::destroy() noexcept {
     if (device_ != nullptr) {
         device_->destroy_buffer(skinned_vertices_buf_);
         device_->destroy_buffer(material_buf_);
+        device_->destroy_buffer(material_grade_buf_);
         device_->destroy_buffer(submesh_draw_buf_);
         for (const uint32_t s : avatar_tex_slots_) {
             if (s != UINT32_MAX && s != fallback_white_slot_) {
@@ -1364,9 +1365,12 @@ Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     avatar_tex_slots_.clear();
     device_->destroy_buffer(skinned_vertices_buf_);
     device_->destroy_buffer(material_buf_);
+    device_->destroy_buffer(material_grade_buf_);
     device_->destroy_buffer(submesh_draw_buf_);
     cached_submeshes_.clear();
     cached_materials_.clear();
+    active_materials_scratch_.clear();
+    active_grades_scratch_.clear();
     opaque_draw_indices_.clear();
     cutout_draw_indices_.clear();
     transparent_draw_indices_.clear();
@@ -1433,6 +1437,21 @@ Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
                 cached_materials_.size() * sizeof(GpuMaterial));
     vmaFlushAllocation(device_->allocator(), material_buf_.allocation, 0,
                        cached_materials_.size() * sizeof(GpuMaterial));
+
+    active_materials_scratch_ = cached_materials_;
+    active_grades_scratch_.assign(cached_materials_.size(), GpuMaterialGrade{});
+    auto mgb_res = device_->create_buffer(
+        active_grades_scratch_.size() * sizeof(GpuMaterialGrade),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VMA_MEMORY_USAGE_AUTO,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+    if (!mgb_res) {
+        return Unexpected<Error>{mgb_res.error()};
+    }
+    material_grade_buf_ = mgb_res.value();
+    std::memcpy(material_grade_buf_.info.pMappedData, active_grades_scratch_.data(),
+                active_grades_scratch_.size() * sizeof(GpuMaterialGrade));
+    vmaFlushAllocation(device_->allocator(), material_grade_buf_.allocation, 0,
+                       active_grades_scratch_.size() * sizeof(GpuMaterialGrade));
 
     auto sub_buf_res = device_->create_buffer(
         cached_submeshes_.size() * sizeof(GpuSubmeshDraw),
@@ -1596,6 +1615,29 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     const uint32_t cur_res = static_cast<uint32_t>(req.frame_index & 1ULL);
     fg.reservoir_curr_bda = hb.reservoir_bufs[cur_res].device_address;
     fg.reservoir_prev_bda = hb.reservoir_bufs[1u - cur_res].device_address;
+
+    if (req.avatar != nullptr && req.avatar == bound_avatar_ && !cached_materials_.empty()) {
+        detail::update_gpu_materials_with_overrides(*req.avatar, cached_materials_, req.material_overrides,
+                                                    active_materials_scratch_, active_grades_scratch_);
+        if (material_buf_.info.pMappedData != nullptr) {
+            std::memcpy(material_buf_.info.pMappedData, active_materials_scratch_.data(),
+                        active_materials_scratch_.size() * sizeof(GpuMaterial));
+            vmaFlushAllocation(device_->allocator(), material_buf_.allocation, 0,
+                               active_materials_scratch_.size() * sizeof(GpuMaterial));
+        }
+        if (material_grade_buf_.info.pMappedData != nullptr) {
+            std::memcpy(material_grade_buf_.info.pMappedData, active_grades_scratch_.data(),
+                        active_grades_scratch_.size() * sizeof(GpuMaterialGrade));
+            vmaFlushAllocation(device_->allocator(), material_grade_buf_.allocation, 0,
+                               active_grades_scratch_.size() * sizeof(GpuMaterialGrade));
+        }
+        const uint32_t ps = req.frame_slot % GpuAvatar::kPoseSlotCount;
+        fg.material_grade_bda = material_grade_buf_.device_address;
+        fg.pmx_sdef_bda = req.avatar->pmx_sdef_buf.device_address;
+        fg.skin_buf_bda = req.avatar->skin_buf.device_address;
+        fg.uv_delta_bda = req.avatar->dynamic_uv_delta_bufs[ps].device_address;
+        fg.joint_mats_bda = req.avatar->dynamic_joint_mat_bufs[ps].device_address;
+    }
 
     std::memcpy(fg_alloc.mapped, &fg, sizeof(fg));
 

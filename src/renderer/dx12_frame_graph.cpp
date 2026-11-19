@@ -683,10 +683,13 @@ void Dx12FrameGraph::destroy_avatar_resources() noexcept {
     avatar_textures_.clear();
     avatar_tex_slots_.clear();
     device_->destroy_buffer(material_buf_);
+    device_->destroy_buffer(material_grade_buf_);
     device_->destroy_buffer(index_buf_);
     device_->destroy_buffer(surface_buf_);
     device_->destroy_buffer(skinned_vertices_buf_);
     cached_materials_.clear();
+    active_materials_scratch_.clear();
+    active_grades_scratch_.clear();
     cached_submeshes_.clear();
     opaque_draws_.clear();
     cutout_draws_.clear();
@@ -810,6 +813,16 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
         return make_unexpected(mat_res.error());
     material_buf_ = mat_res.value();
     std::memcpy(material_buf_.mapped_ptr, cached_materials_.data(), static_cast<size_t>(mat_bytes));
+
+    active_materials_scratch_ = cached_materials_;
+    active_grades_scratch_.assign(cached_materials_.size(), GpuMaterialGrade{});
+    const uint64_t grade_bytes = static_cast<uint64_t>(active_grades_scratch_.size()) * sizeof(GpuMaterialGrade);
+    auto grade_res = device_->create_buffer(grade_bytes, rhi::D3D12BufferUsage::ShaderResource,
+                                            rhi::D3D12BufferHeap::UploadCpu, true, false);
+    if (!grade_res)
+        return make_unexpected(grade_res.error());
+    material_grade_buf_ = grade_res.value();
+    std::memcpy(material_grade_buf_.mapped_ptr, active_grades_scratch_.data(), static_cast<size_t>(grade_bytes));
 
     if (device_->dxr_supported() && pso_ray_effects_ != nullptr) {
         if (auto dr = prepare_dxr_structures(*avatar); !dr) {
@@ -1190,6 +1203,20 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     const uint32_t cur_res = static_cast<uint32_t>(req.frame_index & 1ULL);
     fg.reservoir_curr_bda = hb.reservoir_bufs[cur_res].uav_handle();
     fg.reservoir_prev_bda = hb.reservoir_bufs[1u - cur_res].srv_handle();
+
+    if (has_avatar && !cached_materials_.empty()) {
+        detail::update_gpu_materials_with_overrides(*req.avatar, cached_materials_, req.material_overrides,
+                                                    active_materials_scratch_, active_grades_scratch_);
+        if (material_buf_.mapped_ptr != nullptr) {
+            std::memcpy(material_buf_.mapped_ptr, active_materials_scratch_.data(),
+                        active_materials_scratch_.size() * sizeof(GpuMaterial));
+        }
+        if (material_grade_buf_.mapped_ptr != nullptr) {
+            std::memcpy(material_grade_buf_.mapped_ptr, active_grades_scratch_.data(),
+                        active_grades_scratch_.size() * sizeof(GpuMaterialGrade));
+        }
+        fg.material_grade_bda = material_grade_buf_.srv_handle();
+    }
 
     std::memcpy(sl.fg_buf.mapped_ptr, &fg, sizeof(fg));
     const uint64_t fg_handle = sl.fg_buf.srv_handle();

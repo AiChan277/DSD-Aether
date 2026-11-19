@@ -44,6 +44,8 @@ add_library(aether_renderer STATIC
     accel_struct.hpp
     asset_upload/gpu_avatar.cpp
     asset_upload/asset_job.cpp
+    material_override_cache.cpp
+    material_override_cache.hpp
     circadian_lighting.cpp
     circadian_lighting.hpp
     denoise/denoiser_backend.hpp
@@ -88,6 +90,7 @@ find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(aether_renderer PUBLIC
     aether_rhi
     aether_core
+    aether_animation
     aether_rust_host
     nlohmann_json::nlohmann_json
 )

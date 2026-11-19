@@ -696,9 +696,12 @@ void GpuAvatar::destroy() noexcept {
     device->destroy_buffer(index_buf);
     device->destroy_buffer(morph_delta_buf);
     device->destroy_buffer(bone_line_buf);
+    device->destroy_buffer(pmx_sdef_buf);
     for (uint32_t s = 0; s < kPoseSlotCount; ++s) {
         device->destroy_buffer(dynamic_vertex25d_bufs[s]);
         device->destroy_buffer(dynamic_bone_line_bufs[s]);
+        device->destroy_buffer(dynamic_uv_delta_bufs[s]);
+        device->destroy_buffer(dynamic_joint_mat_bufs[s]);
         slot_applied_pose_seq[s] = 0ULL;
     }
     bone_line_vertex_count = 0;
@@ -916,17 +919,321 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
             }
         }
 
+        // Phase 3: Evaluate PMX Group, UV, Material, and Bone morphs + step 60 Hz PMX skeleton/physics solver
+        if (pmx_aux_header.is_pmx != 0U) {
+            if (!pmx_channel_weights_scratch.empty()) {
+                std::fill(pmx_channel_weights_scratch.begin(), pmx_channel_weights_scratch.end(), 0.0f);
+                const size_t copy_n = std::min(morph_weights_scratch.size(), pmx_channel_weights_scratch.size());
+                for (size_t i = 0; i < copy_n; ++i) {
+                    pmx_channel_weights_scratch[i] = morph_weights_scratch[i];
+                }
+                for (int pass = 0; pass < 2; ++pass) {
+                    for (size_t ci = 0; ci < pmx_morph_channels.size(); ++ci) {
+                        const auto& ch = pmx_morph_channels[ci];
+                        if (ch.morph_kind != AETHER_PMX_MORPH_GROUP) {
+                            continue;
+                        }
+                        const float gw = pmx_channel_weights_scratch[ci];
+                        if (std::abs(gw) < 1e-4f) {
+                            continue;
+                        }
+                        const uint32_t end = std::min<uint32_t>(
+                            ch.child_offset + ch.child_count,
+                            static_cast<uint32_t>(pmx_group_children.size()));
+                        for (uint32_t gi = ch.child_offset; gi < end; ++gi) {
+                            const auto& child = pmx_group_children[gi];
+                            if (static_cast<size_t>(child.child_morph_index) < pmx_channel_weights_scratch.size() &&
+                                static_cast<size_t>(child.child_morph_index) != ci) {
+                                pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] =
+                                    std::clamp(
+                                        pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] +
+                                            gw * child.weight,
+                                        0.0f, 1.0f);
+                            }
+                        }
+                    }
+                }
+
+                if (!uv_deltas_scratch.empty()) {
+                    for (auto& uv : uv_deltas_scratch) {
+                        uv[0] = 0.0f;
+                        uv[1] = 0.0f;
+                    }
+                    for (size_t ci = 0; ci < pmx_morph_channels.size(); ++ci) {
+                        const auto& ch = pmx_morph_channels[ci];
+                        if (ch.morph_kind != AETHER_PMX_MORPH_UV) {
+                            continue;
+                        }
+                        const float w = pmx_channel_weights_scratch[ci];
+                        if (std::abs(w) < 1e-4f) {
+                            continue;
+                        }
+                        const uint32_t end = std::min<uint32_t>(
+                            ch.uv_offset + ch.uv_count,
+                            static_cast<uint32_t>(pmx_uv_morphs.size()));
+                        for (uint32_t ui = ch.uv_offset; ui < end; ++ui) {
+                            const auto& ud = pmx_uv_morphs[ui];
+                            if (ud.vertex_index < uv_deltas_scratch.size()) {
+                                uv_deltas_scratch[ud.vertex_index][0] += ud.duv[0] * w;
+                                uv_deltas_scratch[ud.vertex_index][1] += ud.duv[1] * w;
+                            }
+                        }
+                    }
+                    if (dynamic_uv_delta_bufs[frame_slot].info.pMappedData != nullptr) {
+                        const size_t uv_bytes = uv_deltas_scratch.size() * sizeof(float) * 2U;
+                        std::memcpy(dynamic_uv_delta_bufs[frame_slot].info.pMappedData, uv_deltas_scratch.data(),
+                                    uv_bytes);
+                        vmaFlushAllocation(device->allocator(), dynamic_uv_delta_bufs[frame_slot].allocation, 0,
+                                           VK_WHOLE_SIZE);
+                    }
+                }
+
+                if (morphed_materials_scratch.size() == materials.size() && !materials.empty()) {
+                    std::memcpy(morphed_materials_scratch.data(), materials.data(),
+                                materials.size() * sizeof(AetherNprMaterial));
+                    for (size_t ci = 0; ci < pmx_morph_channels.size(); ++ci) {
+                        const auto& ch = pmx_morph_channels[ci];
+                        if (ch.morph_kind != AETHER_PMX_MORPH_MATERIAL) {
+                            continue;
+                        }
+                        const float w = pmx_channel_weights_scratch[ci];
+                        if (std::abs(w) < 1e-4f) {
+                            continue;
+                        }
+                        const uint32_t end = std::min<uint32_t>(
+                            ch.mat_offset + ch.mat_count,
+                            static_cast<uint32_t>(pmx_mat_morphs.size()));
+                        for (uint32_t mi = ch.mat_offset; mi < end; ++mi) {
+                            const auto& md = pmx_mat_morphs[mi];
+                            const size_t mat_lo =
+                                (md.material_index < 0) ? 0U : static_cast<size_t>(md.material_index);
+                            const size_t mat_hi = (md.material_index < 0)
+                                                      ? morphed_materials_scratch.size()
+                                                      : std::min(mat_lo + 1U, morphed_materials_scratch.size());
+                            for (size_t ti = mat_lo; ti < mat_hi; ++ti) {
+                                auto& dst = morphed_materials_scratch[ti];
+                                if (md.op_mode == 0U) {
+                                    for (int c = 0; c < 4; ++c) {
+                                        dst.base_color[c] *= (1.0f + (md.diffuse[c] - 1.0f) * w);
+                                    }
+                                    for (int c = 0; c < 3; ++c) {
+                                        dst.shade_color_gi[c] *= (1.0f + (md.toon_tint[c] - 1.0f) * w);
+                                        dst.emissive_and_pad[c] *= (1.0f + (md.ambient[c] - 1.0f) * w);
+                                        dst.outline_color_mix[c] *= (1.0f + (md.edge_color[c] - 1.0f) * w);
+                                    }
+                                    dst.outline_width *= (1.0f + (md.edge_size - 1.0f) * w);
+                                } else {
+                                    for (int c = 0; c < 4; ++c) {
+                                        dst.base_color[c] =
+                                            std::clamp(dst.base_color[c] + md.diffuse[c] * w, 0.0f, 4.0f);
+                                    }
+                                    for (int c = 0; c < 3; ++c) {
+                                        dst.shade_color_gi[c] =
+                                            std::clamp(dst.shade_color_gi[c] + md.toon_tint[c] * w, 0.0f, 4.0f);
+                                        dst.emissive_and_pad[c] =
+                                            std::clamp(dst.emissive_and_pad[c] + md.ambient[c] * w, 0.0f, 8.0f);
+                                        dst.outline_color_mix[c] =
+                                            std::clamp(dst.outline_color_mix[c] + md.edge_color[c] * w, 0.0f, 4.0f);
+                                    }
+                                    dst.outline_width = std::max(0.0f, dst.outline_width + md.edge_size * w);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!pmx_solver.empty() && pmx_local_t_scratch.size() == j_count * 3U &&
+                pmx_local_r_scratch.size() == j_count * 4U) {
+                for (size_t j = 0; j < j_count; ++j) {
+                    for (int k = 0; k < 3; ++k) {
+                        pmx_local_t_scratch[j * 3U + k] = joints[j].bind_translation[k];
+                    }
+                    for (int k = 0; k < 4; ++k) {
+                        pmx_local_r_scratch[j * 4U + k] = joints[j].bind_rotation_quat[k];
+                    }
+                }
+                for (size_t ci = 0; ci < pmx_morph_channels.size() && ci < pmx_channel_weights_scratch.size(); ++ci) {
+                    const auto& ch = pmx_morph_channels[ci];
+                    if (ch.morph_kind != AETHER_PMX_MORPH_BONE) {
+                        continue;
+                    }
+                    const float w = pmx_channel_weights_scratch[ci];
+                    if (std::abs(w) < 1e-4f) {
+                        continue;
+                    }
+                    const uint32_t end = std::min<uint32_t>(
+                        ch.bone_offset + ch.bone_count,
+                        static_cast<uint32_t>(pmx_bone_morphs.size()));
+                    for (uint32_t bi = ch.bone_offset; bi < end; ++bi) {
+                        const auto& bm = pmx_bone_morphs[bi];
+                        if (static_cast<size_t>(bm.bone_index) < j_count) {
+                            const size_t jb = static_cast<size_t>(bm.bone_index);
+                            pmx_local_t_scratch[jb * 3U + 0] += bm.translation[0] * w;
+                            pmx_local_t_scratch[jb * 3U + 1] += bm.translation[1] * w;
+                            pmx_local_t_scratch[jb * 3U + 2] += bm.translation[2] * w;
+                        }
+                    }
+                }
+                pmx_solver.step(animation::PmxSkeletonAndPhysicsSolver::kFixedDt, joints, pmx_local_t_scratch,
+                                pmx_local_r_scratch, pmx_local_s_scratch, pmx_world_mats_scratch);
+                if (pmx_rest_inv_mats.size() == j_count * 12U) {
+                    for (size_t j = 0; j < j_count; ++j) {
+                        const float* w_col = &pmx_world_mats_scratch[j * 16U];
+                        const float* inv_row = &pmx_rest_inv_mats[j * 12U];
+                        // Multiply column-major 4x4 w_col by row-major 3x4 inv_row into row-major 3x4 delta
+                        std::array<float, 12> w_row{
+                            w_col[0], w_col[4], w_col[8],  w_col[12],
+                            w_col[1], w_col[5], w_col[9],  w_col[13],
+                            w_col[2], w_col[6], w_col[10], w_col[14],
+                        };
+                        std::array<float, 12> inv_arr{};
+                        std::memcpy(inv_arr.data(), inv_row, sizeof(float) * 12U);
+                        std::array<float, 12> pmx_delta{};
+                        mul_3x4(w_row, inv_arr, pmx_delta);
+                        std::array<float, 12> composed{};
+                        mul_3x4(joint_skin_matrices[j], pmx_delta, composed);
+                        joint_skin_matrices[j] = composed;
+                    }
+                }
+            }
+        }
+
+        if (dynamic_joint_mat_bufs[frame_slot].info.pMappedData != nullptr && !joint_skin_matrices.empty()) {
+            const size_t jm_bytes = joint_skin_matrices.size() * sizeof(float) * 12U;
+            std::memcpy(dynamic_joint_mat_bufs[frame_slot].info.pMappedData, joint_skin_matrices.data(), jm_bytes);
+            vmaFlushAllocation(device->allocator(), dynamic_joint_mat_bufs[frame_slot].allocation, 0, VK_WHOLE_SIZE);
+        }
+
         const size_t v_count = skinned_vertices_scratch.size();
         const bool has_skin = (skin_vertices.size() == v_count && !joint_skin_matrices.empty());
         if (has_skin) {
             constexpr float kInvUnorm16 = 1.0f / 65535.0f;
             const size_t max_j = joint_skin_matrices.size();
+            auto quat_from_3x4 = [](const std::array<float, 12>& m) noexcept -> std::array<float, 4> {
+                const float m00 = m[0], m01 = m[1], m02 = m[2];
+                const float m10 = m[4], m11 = m[5], m12 = m[6];
+                const float m20 = m[8], m21 = m[9], m22 = m[10];
+                const float trace = m00 + m11 + m22;
+                float qx = 0.0f, qy = 0.0f, qz = 0.0f, qw = 1.0f;
+                if (trace > 0.0f) {
+                    const float s = std::sqrt(trace + 1.0f) * 2.0f;
+                    qw = 0.25f * s;
+                    qx = (m21 - m12) / s;
+                    qy = (m02 - m20) / s;
+                    qz = (m10 - m01) / s;
+                } else if (m00 > m11 && m00 > m22) {
+                    const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+                    qw = (m21 - m12) / s;
+                    qx = 0.25f * s;
+                    qy = (m01 + m10) / s;
+                    qz = (m02 + m20) / s;
+                } else if (m11 > m22) {
+                    const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+                    qw = (m02 - m20) / s;
+                    qx = (m01 + m10) / s;
+                    qy = 0.25f * s;
+                    qz = (m12 + m21) / s;
+                } else {
+                    const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+                    qw = (m10 - m01) / s;
+                    qx = (m02 + m20) / s;
+                    qy = (m12 + m21) / s;
+                    qz = 0.25f * s;
+                }
+                const float n2 = qx * qx + qy * qy + qz * qz + qw * qw;
+                if (n2 > 1e-12f) {
+                    const float inv = 1.0f / std::sqrt(n2);
+                    return {qx * inv, qy * inv, qz * inv, qw * inv};
+                }
+                return {0.0f, 0.0f, 0.0f, 1.0f};
+            };
+            auto slerp_q = [](std::array<float, 4> a, std::array<float, 4> b, float t) noexcept -> std::array<float, 4> {
+                float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+                if (dot < 0.0f) {
+                    b = {-b[0], -b[1], -b[2], -b[3]};
+                    dot = -dot;
+                }
+                float wa = 1.0f - t;
+                float wb = t;
+                if (dot < 0.9995f) {
+                    const float theta = std::acos(std::clamp(dot, -1.0f, 1.0f));
+                    const float sin_t = std::sin(theta);
+                    if (std::abs(sin_t) > 1e-6f) {
+                        wa = std::sin((1.0f - t) * theta) / sin_t;
+                        wb = std::sin(t * theta) / sin_t;
+                    }
+                }
+                const float qx = a[0] * wa + b[0] * wb;
+                const float qy = a[1] * wa + b[1] * wb;
+                const float qz = a[2] * wa + b[2] * wb;
+                const float qw = a[3] * wa + b[3] * wb;
+                const float n2 = qx * qx + qy * qy + qz * qz + qw * qw;
+                const float inv = (n2 > 1e-12f) ? (1.0f / std::sqrt(n2)) : 1.0f;
+                return {qx * inv, qy * inv, qz * inv, qw * inv};
+            };
+            auto quat_rot = [](const std::array<float, 4>& q, const float v[3], float out[3]) noexcept {
+                const float ux = q[0], uy = q[1], uz = q[2], s = q[3];
+                const float tx = 2.0f * (uy * v[2] - uz * v[1]);
+                const float ty = 2.0f * (uz * v[0] - ux * v[2]);
+                const float tz = 2.0f * (ux * v[1] - uy * v[0]);
+                out[0] = v[0] + s * tx + (uy * tz - uz * ty);
+                out[1] = v[1] + s * ty + (uz * tx - ux * tz);
+                out[2] = v[2] + s * tz + (ux * ty - uy * tx);
+            };
+
             for (size_t vi = 0; vi < v_count; ++vi) {
                 const AetherVertexSkin& sk = skin_vertices[vi];
                 if (sk.weights_unorm16[0] == 0U || sk.joints[0] >= max_j) {
                     continue;
                 }
                 AetherVertex25D& vtx = skinned_vertices_scratch[vi];
+                const float in_pos[3] = {vtx.position[0], vtx.position[1], vtx.position[2]};
+                const float in_tn[3] = {vtx.true_normal[0], vtx.true_normal[1], vtx.true_normal[2]};
+                const float in_pn[3] = {vtx.proxy_normal[0], vtx.proxy_normal[1], vtx.proxy_normal[2]};
+
+                // SDEF Spherical Deform volume-preserving skinning for PMX vertices with flags & 1
+                if (vi < pmx_sdef_vertices.size() && (pmx_sdef_vertices[vi].flags & 1U) != 0U &&
+                    sk.weights_unorm16[1] != 0U && sk.joints[1] < max_j) {
+                    const auto& sdef = pmx_sdef_vertices[vi];
+                    const float w0 = std::clamp(static_cast<float>(sk.weights_unorm16[0]) * kInvUnorm16, 0.0f, 1.0f);
+                    const float w1 = 1.0f - w0;
+                    const auto& m0 = joint_skin_matrices[sk.joints[0]];
+                    const auto& m1 = joint_skin_matrices[sk.joints[1]];
+                    const auto q0 = quat_from_3x4(m0);
+                    const auto q1 = quat_from_3x4(m1);
+                    const auto qb = slerp_q(q0, q1, w1);
+
+                    const float rw[3] = {
+                        w0 * sdef.r0[0] + w1 * sdef.r1[0],
+                        w0 * sdef.r0[1] + w1 * sdef.r1[1],
+                        w0 * sdef.r0[2] + w1 * sdef.r1[2],
+                    };
+                    const float c0[3] = {
+                        sdef.c[0] + 0.5f * (sdef.r0[0] - rw[0]),
+                        sdef.c[1] + 0.5f * (sdef.r0[1] - rw[1]),
+                        sdef.c[2] + 0.5f * (sdef.r0[2] - rw[2]),
+                    };
+                    const float c1[3] = {
+                        sdef.c[0] + 0.5f * (sdef.r1[0] - rw[0]),
+                        sdef.c[1] + 0.5f * (sdef.r1[1] - rw[1]),
+                        sdef.c[2] + 0.5f * (sdef.r1[2] - rw[2]),
+                    };
+                    float mc0[3]{}, mc1[3]{}, rel_p[3]{}, rot_p[3]{};
+                    transform_point_3x4(m0, c0, mc0);
+                    transform_point_3x4(m1, c1, mc1);
+                    rel_p[0] = in_pos[0] - sdef.c[0];
+                    rel_p[1] = in_pos[1] - sdef.c[1];
+                    rel_p[2] = in_pos[2] - sdef.c[2];
+                    quat_rot(qb, rel_p, rot_p);
+                    vtx.position[0] = w0 * mc0[0] + w1 * mc1[0] + rot_p[0];
+                    vtx.position[1] = w0 * mc0[1] + w1 * mc1[1] + rot_p[1];
+                    vtx.position[2] = w0 * mc0[2] + w1 * mc1[2] + rot_p[2];
+                    quat_rot(qb, in_tn, vtx.true_normal);
+                    quat_rot(qb, in_pn, vtx.proxy_normal);
+                    continue;
+                }
+
                 std::array<float, 12> blended{};
                 if (sk.weights_unorm16[0] == 65535U || sk.weights_unorm16[1] == 0U) {
                     blended = joint_skin_matrices[sk.joints[0]];
@@ -957,9 +1264,6 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                         blended = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
                     }
                 }
-                const float in_pos[3] = {vtx.position[0], vtx.position[1], vtx.position[2]};
-                const float in_tn[3] = {vtx.true_normal[0], vtx.true_normal[1], vtx.true_normal[2]};
-                const float in_pn[3] = {vtx.proxy_normal[0], vtx.proxy_normal[1], vtx.proxy_normal[2]};
                 transform_point_3x4(blended, in_pos, vtx.position);
                 transform_dir_3x4(blended, in_tn, vtx.true_normal);
                 transform_dir_3x4(blended, in_pn, vtx.proxy_normal);
@@ -1033,6 +1337,45 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     if (str_bytes > 0) {
         avatar->strings.assign(reinterpret_cast<const char*>(mapped + staged->stream_offsets[AETHER_STREAM_STRINGS]),
                                static_cast<size_t>(str_bytes));
+    }
+
+    // Move PMX 2.0/2.1 auxiliary payload and initialize zero-alloc runtime buffers.
+    avatar->pmx_aux_header = staged->pmx_aux_header;
+    avatar->pmx_sdef_vertices = std::move(staged->pmx_sdef_vertices);
+    avatar->pmx_bone_exts = std::move(staged->pmx_bone_exts);
+    avatar->pmx_ik_links = std::move(staged->pmx_ik_links);
+    avatar->pmx_morph_channels = std::move(staged->pmx_morph_channels);
+    avatar->pmx_group_children = std::move(staged->pmx_group_children);
+    avatar->pmx_uv_morphs = std::move(staged->pmx_uv_morphs);
+    avatar->pmx_mat_morphs = std::move(staged->pmx_mat_morphs);
+    avatar->pmx_bone_morphs = std::move(staged->pmx_bone_morphs);
+    avatar->pmx_rigid_bodies = std::move(staged->pmx_rigid_bodies);
+    avatar->pmx_constraints_6dof = std::move(staged->pmx_constraints_6dof);
+    avatar->morphed_materials_scratch = avatar->materials;
+
+    if (avatar->pmx_aux_header.is_pmx != 0U) {
+        avatar->uv_deltas_scratch.assign(avatar->requirements.vertex_count, {0.0f, 0.0f});
+        avatar->pmx_channel_weights_scratch.assign(avatar->pmx_morph_channels.size(), 0.0f);
+        const size_t jc = avatar->joints.size();
+        avatar->pmx_local_t_scratch.resize(jc * 3U, 0.0f);
+        avatar->pmx_local_r_scratch.resize(jc * 4U, 0.0f);
+        avatar->pmx_local_s_scratch.resize(jc * 3U, 1.0f);
+        avatar->pmx_world_mats_scratch.resize(jc * 16U, 0.0f);
+        avatar->pmx_rest_world_mats.resize(jc * 16U, 0.0f);
+        avatar->pmx_rest_inv_mats.resize(jc * 12U, 0.0f);
+        for (size_t j = 0; j < jc; ++j) {
+            for (int k = 0; k < 3; ++k) {
+                avatar->pmx_local_t_scratch[j * 3U + k] = avatar->joints[j].bind_translation[k];
+                avatar->pmx_local_s_scratch[j * 3U + k] = avatar->joints[j].bind_scale[k];
+            }
+            for (int k = 0; k < 4; ++k) {
+                avatar->pmx_local_r_scratch[j * 4U + k] = avatar->joints[j].bind_rotation_quat[k];
+            }
+            std::memcpy(&avatar->pmx_rest_inv_mats[j * 12U], avatar->joints[j].inverse_bind_matrix_row_major,
+                        sizeof(float) * 12U);
+        }
+        avatar->pmx_solver.init(avatar->joints, avatar->pmx_bone_exts, avatar->pmx_ik_links,
+                                avatar->pmx_rigid_bodies, avatar->pmx_constraints_6dof);
     }
 
     // Populate fallback 1x1 white RGBA8 texel in the reserved staging tail.
@@ -1196,6 +1539,46 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
             std::memcpy(avatar->dynamic_bone_line_bufs[s].info.pMappedData, avatar->bone_line_scratch.data(),
                         static_cast<size_t>(bone_bytes));
             vmaFlushAllocation(rhi.allocator(), avatar->dynamic_bone_line_bufs[s].allocation, 0, VK_WHOLE_SIZE);
+        }
+    }
+
+    if (!avatar->pmx_sdef_vertices.empty()) {
+        const VkDeviceSize sdef_bytes =
+            static_cast<VkDeviceSize>(avatar->pmx_sdef_vertices.size()) * sizeof(AetherPmxSdefVertex);
+        auto r = rhi.create_uma_zero_copy_buffer(
+            sdef_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        if (r) {
+            avatar->pmx_sdef_buf = r.value();
+            std::memcpy(avatar->pmx_sdef_buf.info.pMappedData, avatar->pmx_sdef_vertices.data(),
+                        static_cast<size_t>(sdef_bytes));
+            vmaFlushAllocation(rhi.allocator(), avatar->pmx_sdef_buf.allocation, 0, VK_WHOLE_SIZE);
+        }
+    }
+    if (!avatar->uv_deltas_scratch.empty()) {
+        const VkDeviceSize uv_bytes =
+            static_cast<VkDeviceSize>(avatar->uv_deltas_scratch.size()) * sizeof(float) * 2U;
+        for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
+            auto r = rhi.create_uma_zero_copy_buffer(
+                uv_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            if (r) {
+                avatar->dynamic_uv_delta_bufs[s] = r.value();
+                std::memset(avatar->dynamic_uv_delta_bufs[s].info.pMappedData, 0, static_cast<size_t>(uv_bytes));
+                vmaFlushAllocation(rhi.allocator(), avatar->dynamic_uv_delta_bufs[s].allocation, 0, VK_WHOLE_SIZE);
+            }
+        }
+    }
+    if (!avatar->joint_skin_matrices.empty()) {
+        const VkDeviceSize jm_bytes =
+            static_cast<VkDeviceSize>(avatar->joint_skin_matrices.size()) * sizeof(float) * 12U;
+        for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
+            auto r = rhi.create_uma_zero_copy_buffer(
+                jm_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            if (r) {
+                avatar->dynamic_joint_mat_bufs[s] = r.value();
+                std::memcpy(avatar->dynamic_joint_mat_bufs[s].info.pMappedData, avatar->joint_skin_matrices.data(),
+                            static_cast<size_t>(jm_bytes));
+                vmaFlushAllocation(rhi.allocator(), avatar->dynamic_joint_mat_bufs[s].allocation, 0, VK_WHOLE_SIZE);
+            }
         }
     }
 

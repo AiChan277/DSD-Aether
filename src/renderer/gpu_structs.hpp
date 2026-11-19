@@ -76,6 +76,14 @@ struct alignas(16) GpuMaterial {
 };
 static_assert(sizeof(GpuMaterial) == 160);
 
+struct alignas(16) GpuMaterialGrade {
+    float uv_scale_offset[4]{1.0f, 1.0f, 0.0f, 0.0f}; // [scale_x, scale_y, offset_x, offset_y]
+    float grade_hsbc[4]{0.0f, 1.0f, 0.0f, 1.0f};      // [hue_shift_deg, saturation, brightness, contrast]
+    float grade_tint[4]{1.0f, 1.0f, 1.0f, 1.0f};      // [tint_r, tint_g, tint_b, tint_strength]
+    float dynamic_params[4]{0.0f, 0.0f, 0.0f, 0.0f};  // [emissive_intensity, blush_alpha, rim_boost, flags]
+};
+static_assert(sizeof(GpuMaterialGrade) == 64);
+
 struct alignas(16) GpuSubmeshDraw {
     uint32_t index_offset{0};
     uint32_t index_count{0};
@@ -170,6 +178,12 @@ struct alignas(16) GpuFrameGlobals {
     uint32_t studio_aux_u32[2]{0u, 0u};
     // x = is_orthographic (0/1), y = ortho_height (m), z = stage_diag_mode (0=Lit, 1=Clay 18% Gray, 2=False Color), w = reserved
     float stage_camera_params[4]{0.0f, 2.20f, 0.0f, 0.0f};
+    uint64_t joint_mats_bda{0};
+    uint64_t pmx_sdef_bda{0};
+    uint64_t skin_buf_bda{0};
+    uint64_t uv_delta_bda{0};
+    uint64_t material_grade_bda{0};
+    uint64_t _phase3_pad_bda{0};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

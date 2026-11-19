@@ -70,9 +70,10 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
     o.uv = v.uv;
 
     uint crease_q8 = is_face_mat ? 0u : (uint(round(saturate(v.tangent_crease.w) * 255.0)) & 0xFFu);
+    bool suppress_edge = (v.proxy_norm_out.w <= 0.05);
     o.material_id = g_Pc.param0;
     o.packed_mat = mat_id | (rt_class << 10u) | (is_face_mat ? 0x1000u : 0u) | (is_body_skin_atlas ? 0x2000u : 0u) |
-                   (is_hair ? 0x8000u : 0u) | (crease_q8 << 16u);
+                   (suppress_edge ? 0x4000u : 0u) | (is_hair ? 0x8000u : 0u) | (crease_q8 << 16u);
 
     float k_eff = saturate(z_flat_weight * fg.head_pivot_view_and_flatness.w);
     float sdf_mask = max(v.prev_pos_sdf.w, ((mat_flags & 2u) != 0u) ? 1.0 : 0.0);

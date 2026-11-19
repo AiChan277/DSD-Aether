@@ -783,6 +783,291 @@
 #define AETHER_LIGHT_CHANNEL_ALL 15u
 
 /*
+ Host command kind: push parsed VRM/PMX material & bone metadata JSON (`payload_utf8`).
+ */
+#define AETHER_HOST_CMD_SET_MODEL_METADATA_JSON 11
+
+/*
+ Compact live pin summary value kind: parsed model material table (`[count, hash, 0, 0]`).
+ */
+#define AETHER_PIN_VALUE_MAT_TABLE 11
+
+/*
+ Compact live pin summary value kind: material override handle (`[slot_idx, override_mask, profile, 0]`).
+ */
+#define AETHER_PIN_VALUE_MAT_OVERRIDE 12
+
+/*
+ Compact live pin summary value kind: 64-bit texture handle (`[lo_u32, hi_u32, srgb, grade_active]`).
+ */
+#define AETHER_PIN_VALUE_TEX_HANDLE 13
+
+/*
+ Maximum per-frame non-destructive material override records emitted by the node graph.
+ */
+#define AETHER_MAX_MATERIAL_OVERRIDES 64
+
+/*
+ Number of overrideable texture slots per material (`Albedo, ShadeTex, FaceSDF, Normal, Roughness, Emissive`).
+ */
+#define AETHER_TEX_SLOT_COUNT 6
+
+/*
+ Sentinel 64-bit [`AetherTextureHandle`] flag marking a live `Spout2` input stream.
+ */
+#define AETHER_TEX_HANDLE_SPOUT_BIT (1ull << 63)
+
+/*
+ Preserve existing auto-classified / authored material shader profile.
+ */
+#define AETHER_MAT_PROFILE_KEEP 4294967295
+
+/*
+ Shader profile: `2.5D Skin SDF`.
+ */
+#define AETHER_MAT_PROFILE_SKIN_SDF 0
+
+/*
+ Shader profile: `Dual-Lobe Hair`.
+ */
+#define AETHER_MAT_PROFILE_DUAL_LOBE_HAIR 1
+
+/*
+ Shader profile: `Micro-PBR Cloth`.
+ */
+#define AETHER_MAT_PROFILE_MICRO_PBR_CLOTH 2
+
+/*
+ Shader profile: `Eye Caustic`.
+ */
+#define AETHER_MAT_PROFILE_EYE_CAUSTIC 3
+
+/*
+ Shader profile: `Metallic` (GGX + stepped specular).
+ */
+#define AETHER_MAT_PROFILE_METALLIC 4
+
+/*
+ Shader profile: `Glass` (translucent Fresnel highlight).
+ */
+#define AETHER_MAT_PROFILE_GLASS 5
+
+/*
+ Shader profile: `Emissive` (self-lit HDR glow).
+ */
+#define AETHER_MAT_PROFILE_EMISSIVE 6
+
+/*
+ Texture slot target: Base Albedo (`0`).
+ */
+#define AETHER_TEX_SLOT_ALBEDO 0
+
+/*
+ Texture slot target: `MToon` Shade Texture (`1`).
+ */
+#define AETHER_TEX_SLOT_SHADE 1
+
+/*
+ Texture slot target: Face SDF Shadow Threshold (`2`).
+ */
+#define AETHER_TEX_SLOT_FACE_SDF 2
+
+/*
+ Texture slot target: Tangent-Space Normal Map (`3`).
+ */
+#define AETHER_TEX_SLOT_NORMAL 3
+
+/*
+ Texture slot target: Micro-PBR Roughness / Sphere Map (`4`).
+ */
+#define AETHER_TEX_SLOT_ROUGHNESS 4
+
+/*
+ Texture slot target: Emissive Mask (`5`).
+ */
+#define AETHER_TEX_SLOT_EMISSIVE 5
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Shader Profile.
+ */
+#define AETHER_MAT_OVR_PROFILE (1u << 0)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Shade Color.
+ */
+#define AETHER_MAT_OVR_SHADE_COLOR (1u << 1)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Shade Shift.
+ */
+#define AETHER_MAT_OVR_SHADE_SHIFT (1u << 2)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: SSS Fringe.
+ */
+#define AETHER_MAT_OVR_SSS_FRINGE (1u << 3)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Outline Scale.
+ */
+#define AETHER_MAT_OVR_OUTLINE_SCALE (1u << 4)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: RT Shadow Mask.
+ */
+#define AETHER_MAT_OVR_RT_SHADOW_MASK (1u << 5)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Emissive Intensity multiplier/boost.
+ */
+#define AETHER_MAT_OVR_EMISSIVE (1u << 6)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Blush Alpha overlay.
+ */
+#define AETHER_MAT_OVR_BLUSH_ALPHA (1u << 7)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Rim Boost multiplier.
+ */
+#define AETHER_MAT_OVR_RIM_BOOST (1u << 8)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Texture Handle slot overrides.
+ */
+#define AETHER_MAT_OVR_TEXTURE (1u << 9)
+
+/*
+ `AetherMaterialOverrideEntry.override_mask` bit: Real-time GPU `TextureGrade` HSV/Brightness/Contrast/Tint/UV.
+ */
+#define AETHER_MAT_OVR_GRADE (1u << 10)
+
+/*
+ Dynamic material driver signal source: live Audio RMS envelope (`[0, 1]`).
+ */
+#define AETHER_DYN_SIG_AUDIO_RMS 0
+
+/*
+ Dynamic material driver signal source: `ARKit` / `Live2D` Expression Weight (`[0, 1]`).
+ */
+#define AETHER_DYN_SIG_EXPRESSION 1
+
+/*
+ Dynamic material driver signal source: Circadian Clock normalized factor (`[0, 1]`).
+ */
+#define AETHER_DYN_SIG_CIRCADIAN 2
+
+/*
+ Dynamic material driver signal source: Connected `signal_in` pin.
+ */
+#define AETHER_DYN_SIG_PIN 3
+
+/*
+ Dynamic material driver target: `Emissive Intensity`.
+ */
+#define AETHER_DYN_TGT_EMISSIVE_INTENSITY 0
+
+/*
+ Dynamic material driver target: `Blush Alpha`.
+ */
+#define AETHER_DYN_TGT_BLUSH_ALPHA 1
+
+/*
+ Dynamic material driver target: `Rim Boost`.
+ */
+#define AETHER_DYN_TGT_RIM_BOOST 2
+
+/*
+ `AetherNprMaterial.flags` bit 12: Eye/Iris material classification.
+ */
+#define AETHER_MAT_FLAG_EYE_IRIS (1u << 12)
+
+/*
+ `AetherNprMaterial.flags` bit 13: Body/Neck skin material classification.
+ */
+#define AETHER_MAT_FLAG_BODY_SKIN (1u << 13)
+
+/*
+ `AetherNprMaterial.flags` bit 16: Explicit shader profile tag present in bits `17..19`.
+ */
+#define AETHER_MAT_FLAG_HAS_PROFILE (1u << 16)
+
+/*
+ Shift for encoded `AETHER_MAT_PROFILE_*` inside `AetherNprMaterial.flags` bits `17..19`.
+ */
+#define AETHER_MAT_FLAG_PROFILE_SHIFT 17
+
+/*
+ PMX bone append flag: rotational append (`付与回転`, `0x0100`).
+ */
+#define AETHER_PMX_APPEND_ROT (1u << 0)
+
+/*
+ PMX bone append flag: translational append (`付与移動`, `0x0200`).
+ */
+#define AETHER_PMX_APPEND_MOVE (1u << 1)
+
+/*
+ PMX bone append flag: local parent append source (`0x0080`).
+ */
+#define AETHER_PMX_APPEND_LOCAL (1u << 2)
+
+/*
+ PMX morph type discriminator matching binary spec (`0=Group, 1=Vertex, 2=Bone, 3=UV, 8=Material`).
+ */
+#define AETHER_PMX_MORPH_GROUP 0
+
+/*
+ PMX vertex position morph.
+ */
+#define AETHER_PMX_MORPH_VERTEX 1
+
+/*
+ PMX bone translation + rotation morph.
+ */
+#define AETHER_PMX_MORPH_BONE 2
+
+/*
+ PMX primary/additional UV coordinate morph.
+ */
+#define AETHER_PMX_MORPH_UV 3
+
+/*
+ PMX material color/alpha/emissive/edge morph.
+ */
+#define AETHER_PMX_MORPH_MATERIAL 8
+
+/*
+ PMX `RigidBody` physics mode: bone-following kinematic (`0`).
+ */
+#define AETHER_PMX_RB_KINEMATIC 0
+
+/*
+ PMX `RigidBody` physics mode: pure dynamic physics (`1`).
+ */
+#define AETHER_PMX_RB_DYNAMIC 1
+
+/*
+ PMX `RigidBody` physics mode: dynamic physics aligned to bone pivot (`2`).
+ */
+#define AETHER_PMX_RB_DYNAMIC_BONE 2
+
+/*
+ PMX `RigidBody` collision shape: sphere (`0`).
+ */
+#define AETHER_PMX_SHAPE_SPHERE 0
+
+/*
+ PMX `RigidBody` collision shape: box (`1`).
+ */
+#define AETHER_PMX_SHAPE_BOX 1
+
+/*
+ PMX `RigidBody` collision shape: capsule (`2`).
+ */
+#define AETHER_PMX_SHAPE_CAPSULE 2
+
+/*
  FFI status code (`0` = success, `< 0` = typed error).
  */
 typedef int32_t AetherStatus;
@@ -1356,6 +1641,330 @@ typedef struct AETHER_ALIGNED(64) AetherGraphTelemetryReadout {
      */
     uint64_t _reserved_tail[4];
 } AetherGraphTelemetryReadout;
+
+/*
+ Non-destructive per-slot material, shader profile, texture, and GPU grade override — 192 B exact, 64-byte aligned.
+ */
+typedef struct AETHER_ALIGNED(64) AetherMaterialOverrideEntry {
+    /*
+     Target model material index (`AETHER_INVALID_INDEX` when resolved by lowercase `material_name_hash`).
+     */
+    uint32_t material_index;
+    /*
+     FNV-1a 32-bit hash of the lowercase material slot name.
+     */
+    uint32_t material_name_hash;
+    /*
+     Bitmask of overridden fields (`AETHER_MAT_OVR_*`).
+     */
+    uint32_t override_mask;
+    /*
+     Requested shader profile (`AETHER_MAT_PROFILE_*`), valid when `AETHER_MAT_OVR_PROFILE` is set.
+     */
+    uint32_t shader_profile;
+    /*
+     Overridden linear RGBA shade color (`rgb` + validity/mix alpha in `w`).
+     */
+    float shade_color[4];
+    /*
+     `[0]=shade_shift`, `[1]=sss_fringe`, `[2]=outline_scale`, `[3]=reserved`.
+     */
+    float scalar_params[4];
+    /*
+     `[0]=emissive_intensity`, `[1]=blush_alpha`, `[2]=rim_boost`, `[3]=reserved`.
+     */
+    float dynamic_params[4];
+    /*
+     64-bit texture handles indexed by `AETHER_TEX_SLOT_*` (`0=Albedo..5=Emissive`).
+     */
+    uint64_t texture_handles[6];
+    /*
+     Non-destructive GPU UV transform `[scale_x, scale_y, offset_x, offset_y]`.
+     */
+    float uv_scale_offset[4];
+    /*
+     Non-destructive GPU color grade `[hue_shift_deg, saturation, brightness, contrast]`.
+     */
+    float grade_hsbc[4];
+    /*
+     Non-destructive GPU tint multiply `[r, g, b, tint_strength]`.
+     */
+    float grade_tint[4];
+    /*
+     Bitmask per slot `0..5`: bit `k = 1` selects sRGB decode, `0` selects Linear decode.
+     */
+    uint32_t tex_srgb_mask;
+    /*
+     Bitmask per slot `0..5`: bit `k = 1` indicates live `Spout2` texture feed.
+     */
+    uint32_t tex_spout_mask;
+    /*
+     RT shadow receiver/caster mask override (`bit 0 = Hair, bit 1 = Hands, bit 2 = Self`).
+     */
+    uint32_t rt_shadow_mask;
+    /*
+     Auxiliary flags (`bit 0 = grade_active`).
+     */
+    uint32_t source_flags;
+    /*
+     Deterministic tail padding to 192 bytes (3 cache lines).
+     */
+    uint32_t _pad_tail[4];
+} AetherMaterialOverrideEntry;
+
+/*
+ Fixed-capacity wait-free node graph material override payload — 12352 B exact, 64-byte aligned.
+ */
+typedef struct AETHER_ALIGNED(64) AetherMaterialOverrideBuffer {
+    /*
+     Size guard (`sizeof(AetherMaterialOverrideBuffer)`).
+     */
+    uint32_t struct_size;
+    /*
+     Number of valid entries in `entries[0..count]`.
+     */
+    uint32_t count;
+    /*
+     Active circadian clock hour `[0, 24)` passed into `DynamicMaterialDriverNode`.
+     */
+    float circadian_hour;
+    /*
+     Evaluation epoch / frame tick counter.
+     */
+    uint32_t eval_epoch;
+    /*
+     Active avatar source format (`AETHER_SOURCE_FORMAT_*`).
+     */
+    uint32_t model_format;
+    /*
+     Parsed model material slot count.
+     */
+    uint32_t model_material_count;
+    /*
+     Header alignment padding to 64 bytes.
+     */
+    uint32_t _hdr_pad[10];
+    /*
+     Pre-allocated fixed-capacity override entries (zero per-frame heap allocation).
+     */
+    struct AetherMaterialOverrideEntry entries[64];
+} AetherMaterialOverrideBuffer;
+
+/*
+ Queried counts of PMX 2.0/2.1 extended streams — 64 B (`aether_loader_query_pmx_aux`).
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxAuxHeader {
+    uint32_t struct_size;
+    uint32_t is_pmx;
+    uint32_t sdef_vertex_count;
+    uint32_t bone_ext_count;
+    uint32_t ik_link_count;
+    uint32_t morph_channel_count;
+    uint32_t group_child_count;
+    uint32_t uv_morph_count;
+    uint32_t mat_morph_count;
+    uint32_t bone_morph_count;
+    uint32_t rigid_body_count;
+    uint32_t constraint_6dof_count;
+    uint32_t _reserved[4];
+} AetherPmxAuxHeader;
+
+/*
+ Per-vertex PMX Spherical Deform (`SDEF`) control anchors in right-handed AETHER metres — 48 B.
+ */
+typedef struct AETHER_ALIGNED(16) AetherPmxSdefVertex {
+    float c[3];
+    /*
+     `bit 0 = 1` when vertex uses SDEF spherical skinning (`BDEF2` otherwise).
+     */
+    uint32_t flags;
+    float r0[3];
+    uint32_t _pad0;
+    float r1[3];
+    uint32_t _pad1;
+} AetherPmxSdefVertex;
+
+/*
+ Per-bone PMX Append Transform + CCD-IK metadata — 48 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxBoneExt {
+    int32_t append_parent;
+    float append_ratio;
+    /*
+     `AETHER_PMX_APPEND_*` bits.
+     */
+    uint32_t append_flags;
+    int32_t ik_target;
+    int32_t ik_loops;
+    float ik_limit_rad;
+    uint32_t ik_link_offset;
+    uint32_t ik_link_count;
+    int32_t transform_level;
+    uint32_t _pad[3];
+} AetherPmxBoneExt;
+
+/*
+ One bone link in a PMX `CCD-IK` chain — 32 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxIkLink {
+    uint32_t bone_index;
+    uint32_t has_limit;
+    float limit_min_rad[3];
+    float limit_max_rad[3];
+} AetherPmxIkLink;
+
+/*
+ Extended PMX morph descriptor covering Group, Vertex, Bone, UV, and Material morphs — 48 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxMorphChannelDesc {
+    /*
+     `AETHER_PMX_MORPH_*` (`0=Group, 1=Vertex, 2=Bone, 3=UV, 8=Material`).
+     */
+    uint32_t morph_kind;
+    /*
+     Mapped Appendix B expression slot (`0..63`) or `AETHER_INVALID_INDEX`.
+     */
+    uint32_t appendix_b_slot;
+    /*
+     Bound `Vertex` morph range index in `AETHER_STREAM_MORPH_RANGES` (`AETHER_INVALID_INDEX` if none).
+     */
+    uint32_t vertex_morph_index;
+    /*
+     Lowercase FNV-1a hash of the morph name (`mabataki`, `F1..F8`, etc.).
+     */
+    uint32_t name_hash;
+    uint32_t child_offset;
+    uint32_t child_count;
+    uint32_t bone_offset;
+    uint32_t bone_count;
+    uint32_t uv_offset;
+    uint32_t uv_count;
+    uint32_t mat_offset;
+    uint32_t mat_count;
+} AetherPmxMorphChannelDesc;
+
+/*
+ Child weight inside a PMX `Group` morph — 16 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxGroupMorphChild {
+    uint32_t child_morph_index;
+    float weight;
+    uint32_t _pad[2];
+} AetherPmxGroupMorphChild;
+
+/*
+ Sparse per-vertex UV coordinate delta inside a PMX `UV` morph — 16 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxUvMorphDelta {
+    uint32_t vertex_index;
+    uint32_t _pad0;
+    float duv[2];
+} AetherPmxUvMorphDelta;
+
+/*
+ Per-material scalar/color delta inside a PMX `Material` morph — 128 B.
+ */
+typedef struct AETHER_ALIGNED(16) AetherPmxMaterialMorphDelta {
+    /*
+     Target material index (`-1` applies to all avatar materials).
+     */
+    int32_t material_index;
+    /*
+     `0 = Multiply`, `1 = Add`.
+     */
+    uint32_t op_mode;
+    float spec_pow;
+    float edge_size;
+    float diffuse[4];
+    float specular[4];
+    float ambient[4];
+    float edge_color[4];
+    float tex_tint[4];
+    float sphere_tint[4];
+    float toon_tint[4];
+} AetherPmxMaterialMorphDelta;
+
+/*
+ Per-bone translation + quaternion offset inside a PMX `Bone` morph — 40 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxBoneMorphOffset {
+    uint32_t bone_index;
+    uint32_t _pad0;
+    float translation[3];
+    float rotation_quat[4];
+    uint32_t _pad1;
+} AetherPmxBoneMorphOffset;
+
+/*
+ PMX `RigidBody` descriptor in right-handed metres — 80 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxRigidBodyDesc {
+    int32_t bone_index;
+    uint32_t group_index;
+    uint32_t collision_mask;
+    /*
+     `AETHER_PMX_SHAPE_*` (`0=sphere, 1=box, 2=capsule`).
+     */
+    uint32_t shape_kind;
+    /*
+     `AETHER_PMX_RB_*` (`0=kinematic, 1=dynamic, 2=dynamic+bone`).
+     */
+    uint32_t phys_mode;
+    uint32_t _pad0;
+    float size[3];
+    float mass;
+    float pos_ms[3];
+    float linear_damping;
+    float rot_euler_rh[3];
+    float angular_damping;
+    float restitution;
+    float friction;
+} AetherPmxRigidBodyDesc;
+
+/*
+ PMX 6-DOF Spring Joint descriptor in right-handed metres — 112 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxConstraint6DofDesc {
+    int32_t rb_a;
+    int32_t rb_b;
+    float spring_pos[3];
+    float spring_rot[3];
+    float pos_ms[3];
+    float rot_euler_rh[3];
+    float pos_min[3];
+    float pos_max[3];
+    float rot_min[3];
+    float rot_max[3];
+    uint32_t _pad[2];
+} AetherPmxConstraint6DofDesc;
+
+/*
+ Caller-lent typed output buffers filled by `aether_loader_fill_pmx_aux` — 128 B.
+ */
+typedef struct AETHER_ALIGNED(8) AetherPmxAuxSlices {
+    uint32_t struct_size;
+    uint32_t _pad0;
+    struct AetherPmxSdefVertex *sdef_vertices;
+    uint32_t sdef_vertex_cap;
+    uint32_t bone_ext_cap;
+    struct AetherPmxBoneExt *bone_exts;
+    struct AetherPmxIkLink *ik_links;
+    uint32_t ik_link_cap;
+    uint32_t morph_channel_cap;
+    struct AetherPmxMorphChannelDesc *morph_channels;
+    struct AetherPmxGroupMorphChild *group_children;
+    uint32_t group_child_cap;
+    uint32_t uv_morph_cap;
+    struct AetherPmxUvMorphDelta *uv_morphs;
+    struct AetherPmxMaterialMorphDelta *mat_morphs;
+    uint32_t mat_morph_cap;
+    uint32_t bone_morph_cap;
+    struct AetherPmxBoneMorphOffset *bone_morphs;
+    struct AetherPmxRigidBodyDesc *rigid_bodies;
+    uint32_t rigid_body_cap;
+    uint32_t constraint_6dof_cap;
+    struct AetherPmxConstraint6DofDesc *constraints_6dof;
+} AetherPmxAuxSlices;
 
 /*
  Stream 0: 2.5D NPR geometry vertex — 64 B, frozen by MTD (§5.2).
@@ -2026,6 +2635,11 @@ typedef struct AETHER_ALIGNED(64) AetherStudioLightGpu {
 } AetherStudioLightGpu;
 
 /*
+ 64-bit opaque handle referencing an async local texture asset or live `Spout2` stream (`0` = unbound).
+ */
+typedef uint64_t AetherTextureHandle;
+
+/*
  Operation succeeded.
  */
 #define AETHER_OK 0
@@ -2235,6 +2849,53 @@ extern AetherStatus aether_host_get_plan_stats(AetherHostHandle host,
  */
 extern AetherStatus aether_host_get_telemetry_readout(AetherHostHandle host,
                                                       struct AetherGraphTelemetryReadout *out_readout);
+
+/*
+ Evaluates active plan including non-destructive `MaterialOverrideBuffer` without heap allocs. `[T2]`
+ */
+extern AetherStatus aether_host_evaluate_active_ex(AetherHostHandle host,
+                                                   const struct AetherGraphInputs *inputs,
+                                                   float circadian_hour,
+                                                   struct AetherGraphOutputs *out_pose,
+                                                   struct AetherMaterialOverrideBuffer *out_mats);
+
+/*
+ Evaluates a standalone compiled plan's material/texture nodes into `out_mats` cleanly. `[T2]`
+ */
+extern AetherStatus aether_graph_evaluate_materials(AetherPlanHandle plan,
+                                                    const struct AetherGraphInputs *inputs,
+                                                    float circadian_hour,
+                                                    struct AetherMaterialOverrideBuffer *out_mats);
+
+/*
+ Publishes parsed avatar model metadata (material slot names, format) to the node compiler. `[ui]`
+ */
+extern AetherStatus aether_host_set_model_metadata_json(AetherHostHandle host,
+                                                        const char *json_utf8);
+
+/*
+ Queries PMX 2.0/2.1 extended stream counts (`SDEF`, `Append`, `IK`, `Material/UV Morph`, `RigidBody/6-DOF`). `[loader]`
+ */
+extern AetherStatus aether_loader_query_pmx_aux(AetherLoaderHandle loader,
+                                                struct AetherPmxAuxHeader *out_hdr);
+
+/*
+ Copies PMX 2.0/2.1 extended streams zero-copy into caller-owned C++ slices. `[loader]`
+ */
+extern AetherStatus aether_loader_fill_pmx_aux(AetherLoaderHandle loader,
+                                               const struct AetherPmxAuxSlices *out_slices);
+
+/*
+ Decodes a local texture file (`.png/.jpg/.tga/.bmp/.dds/.ktx2/.spa/.sph`) into RGBA8. `[loader]`
+ */
+extern AetherStatus aether_texture_decode_file(const char *path_utf8,
+                                               uint32_t srgb,
+                                               uint32_t *out_width,
+                                               uint32_t *out_height,
+                                               uint32_t *out_format,
+                                               uint8_t *out_rgba,
+                                               uintptr_t cap,
+                                               uintptr_t *out_len);
 
 /*
  Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`

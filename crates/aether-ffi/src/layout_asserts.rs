@@ -6,10 +6,14 @@ use crate::types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
     AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
-    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc,
-    AetherNprMaterial, AetherRuntimeConfig, AetherSpringJointDesc, AetherStudioLightGpu,
-    AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame, AetherVertex25D, AetherVertexSkin,
-    AetherVertexSurface,
+    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMaterialOverrideBuffer,
+    AetherMaterialOverrideEntry, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
+    AetherPmxAuxHeader, AetherPmxAuxSlices, AetherPmxBoneExt, AetherPmxBoneMorphOffset,
+    AetherPmxConstraint6DofDesc, AetherPmxGroupMorphChild, AetherPmxIkLink,
+    AetherPmxMaterialMorphDelta, AetherPmxMorphChannelDesc, AetherPmxRigidBodyDesc,
+    AetherPmxSdefVertex, AetherPmxUvMorphDelta, AetherRuntimeConfig, AetherSpringJointDesc,
+    AetherStudioLightGpu, AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame,
+    AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
 };
 
 // ---- Frozen MTD Structs (§5.2) ----
@@ -349,6 +353,43 @@ const _: () = assert!(offset_of!(AetherStudioLightGpu, ies_profile_index) == 104
 const _: () = assert!(offset_of!(AetherStudioLightGpu, catchlight_weight) == 108);
 const _: () = assert!(offset_of!(AetherStudioLightGpu, shadow_bias_scale) == 112);
 const _: () = assert!(offset_of!(AetherStudioLightGpu, padding) == 116);
+
+const _: () = assert!(size_of::<AetherMaterialOverrideEntry>() == 192);
+const _: () = assert!(align_of::<AetherMaterialOverrideEntry>() == 64);
+const _: () = assert!(offset_of!(AetherMaterialOverrideEntry, shade_color) == 16);
+const _: () = assert!(offset_of!(AetherMaterialOverrideEntry, texture_handles) == 64);
+const _: () = assert!(offset_of!(AetherMaterialOverrideEntry, uv_scale_offset) == 112);
+const _: () = assert!(offset_of!(AetherMaterialOverrideEntry, grade_hsbc) == 128);
+const _: () = assert!(offset_of!(AetherMaterialOverrideEntry, tex_srgb_mask) == 160);
+
+const _: () = assert!(size_of::<AetherMaterialOverrideBuffer>() == 12352);
+const _: () = assert!(align_of::<AetherMaterialOverrideBuffer>() == 64);
+const _: () = assert!(offset_of!(AetherMaterialOverrideBuffer, entries) == 64);
+
+const _: () = assert!(size_of::<AetherPmxAuxHeader>() == 64);
+const _: () = assert!(align_of::<AetherPmxAuxHeader>() == 8);
+const _: () = assert!(size_of::<AetherPmxSdefVertex>() == 48);
+const _: () = assert!(align_of::<AetherPmxSdefVertex>() == 16);
+const _: () = assert!(size_of::<AetherPmxBoneExt>() == 48);
+const _: () = assert!(align_of::<AetherPmxBoneExt>() == 8);
+const _: () = assert!(size_of::<AetherPmxIkLink>() == 32);
+const _: () = assert!(align_of::<AetherPmxIkLink>() == 8);
+const _: () = assert!(size_of::<AetherPmxMorphChannelDesc>() == 48);
+const _: () = assert!(align_of::<AetherPmxMorphChannelDesc>() == 8);
+const _: () = assert!(size_of::<AetherPmxGroupMorphChild>() == 16);
+const _: () = assert!(align_of::<AetherPmxGroupMorphChild>() == 8);
+const _: () = assert!(size_of::<AetherPmxUvMorphDelta>() == 16);
+const _: () = assert!(align_of::<AetherPmxUvMorphDelta>() == 8);
+const _: () = assert!(size_of::<AetherPmxMaterialMorphDelta>() == 128);
+const _: () = assert!(align_of::<AetherPmxMaterialMorphDelta>() == 16);
+const _: () = assert!(size_of::<AetherPmxBoneMorphOffset>() == 40);
+const _: () = assert!(align_of::<AetherPmxBoneMorphOffset>() == 8);
+const _: () = assert!(size_of::<AetherPmxRigidBodyDesc>() == 80);
+const _: () = assert!(align_of::<AetherPmxRigidBodyDesc>() == 8);
+const _: () = assert!(size_of::<AetherPmxConstraint6DofDesc>() == 112);
+const _: () = assert!(align_of::<AetherPmxConstraint6DofDesc>() == 8);
+const _: () = assert!(size_of::<AetherPmxAuxSlices>() == 128);
+const _: () = assert!(align_of::<AetherPmxAuxSlices>() == 8);
 
 #[cfg(test)]
 mod tests {

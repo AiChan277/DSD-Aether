@@ -246,6 +246,21 @@ target_link_libraries(dx12_and_capabilities_test PRIVATE
 )
 set_tests_properties(dx12_and_capabilities_test PROPERTIES TIMEOUT 180)
 
+# Phase 3: Non-destructive Node Material/Texture Override & Native PMX 2.0/2.1 Pipeline Tests
+aether_add_cpp_test(phase3_material_and_pmx_test cpp/phase3_material_and_pmx_test.cpp)
+target_compile_definitions(phase3_material_and_pmx_test PRIVATE
+    AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(phase3_material_and_pmx_test PRIVATE
+    aether_renderer
+    aether_rhi
+    aether_animation
+    aether_ui
+    windowscodecs
+    ole32
+)
+set_tests_properties(phase3_material_and_pmx_test PROPERTIES TIMEOUT 180)
+
 # Ensure Vulkan tests discover vcpkg's Release Khronos validation layer (avoids Debug-CRT HotPathGuard noise
 # and enables CTest without requiring a separate system VULKAN_SDK installation).
 set(_vcpkg_vk_layer_dir "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")

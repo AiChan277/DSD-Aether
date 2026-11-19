@@ -17,10 +17,14 @@ use types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
     AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
-    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc,
-    AetherNprMaterial, AetherRuntimeConfig, AetherSpringJointDesc, AetherStudioLightGpu,
-    AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame, AetherVertex25D, AetherVertexSkin,
-    AetherVertexSurface,
+    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMaterialOverrideBuffer,
+    AetherMaterialOverrideEntry, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
+    AetherPmxAuxHeader, AetherPmxAuxSlices, AetherPmxBoneExt, AetherPmxBoneMorphOffset,
+    AetherPmxConstraint6DofDesc, AetherPmxGroupMorphChild, AetherPmxIkLink,
+    AetherPmxMaterialMorphDelta, AetherPmxMorphChannelDesc, AetherPmxRigidBodyDesc,
+    AetherPmxSdefVertex, AetherPmxUvMorphDelta, AetherRuntimeConfig, AetherSpringJointDesc,
+    AetherStudioLightGpu, AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame,
+    AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
 };
 
 struct FieldEntry {
@@ -508,6 +512,216 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             catchlight_weight,
             shadow_bias_scale,
             padding
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherMaterialOverrideEntry,
+        [
+            material_index,
+            material_name_hash,
+            override_mask,
+            shader_profile,
+            shade_color,
+            scalar_params,
+            dynamic_params,
+            texture_handles,
+            uv_scale_offset,
+            grade_hsbc,
+            grade_tint,
+            tex_srgb_mask,
+            tex_spout_mask,
+            rt_shadow_mask,
+            source_flags,
+            _pad_tail
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherMaterialOverrideBuffer,
+        [
+            struct_size,
+            count,
+            circadian_hour,
+            eval_epoch,
+            model_format,
+            model_material_count,
+            _hdr_pad,
+            entries
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxAuxHeader,
+        [
+            struct_size,
+            is_pmx,
+            sdef_vertex_count,
+            bone_ext_count,
+            ik_link_count,
+            morph_channel_count,
+            group_child_count,
+            uv_morph_count,
+            mat_morph_count,
+            bone_morph_count,
+            rigid_body_count,
+            constraint_6dof_count,
+            _reserved
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxSdefVertex,
+        [c, flags, r0, _pad0, r1, _pad1]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxBoneExt,
+        [
+            append_parent,
+            append_ratio,
+            append_flags,
+            ik_target,
+            ik_loops,
+            ik_limit_rad,
+            ik_link_offset,
+            ik_link_count,
+            transform_level,
+            _pad
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxIkLink,
+        [bone_index, has_limit, limit_min_rad, limit_max_rad]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxMorphChannelDesc,
+        [
+            morph_kind,
+            appendix_b_slot,
+            vertex_morph_index,
+            name_hash,
+            child_offset,
+            child_count,
+            bone_offset,
+            bone_count,
+            uv_offset,
+            uv_count,
+            mat_offset,
+            mat_count
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxGroupMorphChild,
+        [child_morph_index, weight, _pad]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxUvMorphDelta,
+        [vertex_index, _pad0, duv]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxMaterialMorphDelta,
+        [
+            material_index,
+            op_mode,
+            spec_pow,
+            edge_size,
+            diffuse,
+            specular,
+            ambient,
+            edge_color,
+            tex_tint,
+            sphere_tint,
+            toon_tint
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxBoneMorphOffset,
+        [bone_index, _pad0, translation, rotation_quat, _pad1]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxRigidBodyDesc,
+        [
+            bone_index,
+            group_index,
+            collision_mask,
+            shape_kind,
+            phys_mode,
+            _pad0,
+            size,
+            mass,
+            pos_ms,
+            linear_damping,
+            rot_euler_rh,
+            angular_damping,
+            restitution,
+            friction
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxConstraint6DofDesc,
+        [
+            rb_a,
+            rb_b,
+            spring_pos,
+            spring_rot,
+            pos_ms,
+            rot_euler_rh,
+            pos_min,
+            pos_max,
+            rot_min,
+            rot_max,
+            _pad
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherPmxAuxSlices,
+        [
+            struct_size,
+            _pad0,
+            sdef_vertices,
+            sdef_vertex_cap,
+            bone_ext_cap,
+            bone_exts,
+            ik_links,
+            ik_link_cap,
+            morph_channel_cap,
+            morph_channels,
+            group_children,
+            group_child_cap,
+            uv_morph_cap,
+            uv_morphs,
+            mat_morphs,
+            mat_morph_cap,
+            bone_morph_cap,
+            bone_morphs,
+            rigid_bodies,
+            rigid_body_cap,
+            constraint_6dof_cap,
+            constraints_6dof
         ]
     );
 

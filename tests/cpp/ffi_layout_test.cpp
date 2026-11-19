@@ -78,6 +78,24 @@ static_assert(sizeof(AetherGraphTelemetryReadout) == 13120);
 static_assert(alignof(AetherGraphTelemetryReadout) == 64);
 static_assert(offsetof(AetherGraphTelemetryReadout, struct_size) == 0);
 static_assert(offsetof(AetherGraphTelemetryReadout, active_node_count) == 4);
+
+static_assert(sizeof(AetherMaterialOverrideEntry) == 192);
+static_assert(alignof(AetherMaterialOverrideEntry) == 64);
+static_assert(sizeof(AetherMaterialOverrideBuffer) == 12352);
+static_assert(alignof(AetherMaterialOverrideBuffer) == 64);
+static_assert(sizeof(AetherPmxAuxHeader) == 64);
+static_assert(sizeof(AetherPmxSdefVertex) == 48);
+static_assert(alignof(AetherPmxSdefVertex) == 16);
+static_assert(sizeof(AetherPmxBoneExt) == 48);
+static_assert(sizeof(AetherPmxIkLink) == 32);
+static_assert(sizeof(AetherPmxMorphChannelDesc) == 48);
+static_assert(sizeof(AetherPmxGroupMorphChild) == 16);
+static_assert(sizeof(AetherPmxUvMorphDelta) == 16);
+static_assert(sizeof(AetherPmxMaterialMorphDelta) == 128);
+static_assert(sizeof(AetherPmxBoneMorphOffset) == 40);
+static_assert(sizeof(AetherPmxRigidBodyDesc) == 80);
+static_assert(sizeof(AetherPmxConstraint6DofDesc) == 112);
+static_assert(sizeof(AetherPmxAuxSlices) == 128);
 static_assert(offsetof(AetherGraphTelemetryReadout, pin_readout_count) == 8);
 static_assert(offsetof(AetherGraphTelemetryReadout, valid) == 12);
 static_assert(offsetof(AetherGraphTelemetryReadout, eval_sequence) == 16);
@@ -378,6 +396,33 @@ TEST_CASE("FFI layout table JSON matches C++ sizeof, alignof, and offsetof", "[f
     };
     verify_struct_in_json(map, "AetherStudioLightGpu", sizeof(AetherStudioLightGpu), alignof(AetherStudioLightGpu),
                           studio_light_fields);
+
+    const ExpectedFieldOffset mat_ovr_fields[] = {
+        {"material_index", offsetof(AetherMaterialOverrideEntry, material_index)},
+        {"shade_color", offsetof(AetherMaterialOverrideEntry, shade_color)},
+        {"texture_handles", offsetof(AetherMaterialOverrideEntry, texture_handles)},
+        {"uv_scale_offset", offsetof(AetherMaterialOverrideEntry, uv_scale_offset)},
+        {"grade_hsbc", offsetof(AetherMaterialOverrideEntry, grade_hsbc)},
+        {"tex_srgb_mask", offsetof(AetherMaterialOverrideEntry, tex_srgb_mask)},
+    };
+    verify_struct_in_json(map, "AetherMaterialOverrideEntry", sizeof(AetherMaterialOverrideEntry),
+                          alignof(AetherMaterialOverrideEntry), mat_ovr_fields);
+
+    const ExpectedFieldOffset mat_ovr_buf_fields[] = {
+        {"struct_size", offsetof(AetherMaterialOverrideBuffer, struct_size)},
+        {"entries", offsetof(AetherMaterialOverrideBuffer, entries)},
+    };
+    verify_struct_in_json(map, "AetherMaterialOverrideBuffer", sizeof(AetherMaterialOverrideBuffer),
+                          alignof(AetherMaterialOverrideBuffer), mat_ovr_buf_fields);
+
+    const ExpectedFieldOffset pmx_sdef_fields[] = {
+        {"c", offsetof(AetherPmxSdefVertex, c)},
+        {"flags", offsetof(AetherPmxSdefVertex, flags)},
+        {"r0", offsetof(AetherPmxSdefVertex, r0)},
+        {"r1", offsetof(AetherPmxSdefVertex, r1)},
+    };
+    verify_struct_in_json(map, "AetherPmxSdefVertex", sizeof(AetherPmxSdefVertex), alignof(AetherPmxSdefVertex),
+                          pmx_sdef_fields);
 }
 
 TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "[ffi]") {

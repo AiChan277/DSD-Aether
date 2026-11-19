@@ -56,6 +56,9 @@ use aether_ffi::{
     AETHER_TEX_FORMAT_RGBA8_SRGB, AETHER_TEX_FORMAT_RGBA8_UNORM, AETHER_WARN_UNIT_GUESS,
     AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc, AetherExpressionBindingDesc,
     AetherJointDesc, AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
+    AetherPmxAuxHeader, AetherPmxBoneExt, AetherPmxBoneMorphOffset, AetherPmxConstraint6DofDesc,
+    AetherPmxGroupMorphChild, AetherPmxIkLink, AetherPmxMaterialMorphDelta,
+    AetherPmxMorphChannelDesc, AetherPmxRigidBodyDesc, AetherPmxSdefVertex, AetherPmxUvMorphDelta,
     AetherSpringJointDesc, AetherStatus, AetherSubmeshDesc, AetherTextureDesc, AetherVertex25D,
     AetherVertexSkin, AetherVertexSurface,
 };
@@ -74,6 +77,7 @@ use crate::pool::run_in_worker_pool;
 use crate::retarget::{
     ResolvedExprBinding, build_expression_retarget, build_spring_descriptors, normalise_avatar_pose,
 };
+pub use crate::textures::decode_image_file_rgba;
 use crate::textures::{decode_textures_into_arena, plan_textures};
 use crate::vrm_gltf::parse_vrm_or_gltf;
 
@@ -148,6 +152,21 @@ struct FileLoaderState {
     max_threads: usize,
     planned_textures: Vec<PlannedTexMeta>,
     open_warnings_mask: u32,
+    pmx_aux_hdr: AetherPmxAuxHeader,
+}
+
+/// Safe borrowed destination slices for `AssetLoader::fill_pmx_aux`.
+pub struct PmxAuxBorrowedSlices<'a> {
+    pub sdef_vertices: &'a mut [AetherPmxSdefVertex],
+    pub bone_exts: &'a mut [AetherPmxBoneExt],
+    pub ik_links: &'a mut [AetherPmxIkLink],
+    pub morph_channels: &'a mut [AetherPmxMorphChannelDesc],
+    pub group_children: &'a mut [AetherPmxGroupMorphChild],
+    pub uv_morphs: &'a mut [AetherPmxUvMorphDelta],
+    pub mat_morphs: &'a mut [AetherPmxMaterialMorphDelta],
+    pub bone_morphs: &'a mut [AetherPmxBoneMorphOffset],
+    pub rigid_bodies: &'a mut [AetherPmxRigidBodyDesc],
+    pub constraints_6dof: &'a mut [AetherPmxConstraint6DofDesc],
 }
 
 enum LoaderBackend {
@@ -367,6 +386,28 @@ impl AssetLoader {
             .collect();
 
         let source_format = avatar.source_format;
+        let pmx_aux_hdr = if let Some(ref aux) = avatar.pmx_aux {
+            AetherPmxAuxHeader {
+                struct_size: size_of::<AetherPmxAuxHeader>() as u32,
+                is_pmx: 1,
+                sdef_vertex_count: aux.sdef_vertices.len() as u32,
+                bone_ext_count: aux.bone_exts.len() as u32,
+                ik_link_count: aux.ik_links.len() as u32,
+                morph_channel_count: aux.morph_channels.len() as u32,
+                group_child_count: aux.group_children.len() as u32,
+                uv_morph_count: aux.uv_morphs.len() as u32,
+                mat_morph_count: aux.mat_morphs.len() as u32,
+                bone_morph_count: aux.bone_morphs.len() as u32,
+                rigid_body_count: aux.rigid_bodies.len() as u32,
+                constraint_6dof_count: aux.constraints_6dof.len() as u32,
+                _reserved: [0; 4],
+            }
+        } else {
+            AetherPmxAuxHeader {
+                struct_size: size_of::<AetherPmxAuxHeader>() as u32,
+                ..bytemuck::Zeroable::zeroed()
+            }
+        };
 
         Ok(Self {
             requirements: AetherAssetRequirements {
@@ -393,6 +434,7 @@ impl AssetLoader {
                 max_threads,
                 planned_textures,
                 open_warnings_mask: warnings,
+                pmx_aux_hdr,
             }),
         })
     }
@@ -449,6 +491,56 @@ impl AssetLoader {
     #[must_use]
     pub const fn requirements(&self) -> &AetherAssetRequirements {
         &self.requirements
+    }
+
+    /// Queries PMX 2.0/2.1 extended stream counts (`O(1)`, zero allocations).
+    #[must_use]
+    pub fn pmx_aux_header(&self) -> AetherPmxAuxHeader {
+        match &self.backend {
+            LoaderBackend::File(state) => state.pmx_aux_hdr,
+            #[cfg(feature = "test-hooks")]
+            LoaderBackend::Synthetic { .. } => AetherPmxAuxHeader {
+                struct_size: size_of::<AetherPmxAuxHeader>() as u32,
+                ..bytemuck::Zeroable::zeroed()
+            },
+        }
+    }
+
+    /// Fills PMX 2.0/2.1 extended streams (`SDEF`, `Append`, `CCD-IK`, `Morphs`, `RigidBodies`, `6-DOF`) into caller slices.
+    pub fn fill_pmx_aux(&self, dst: &mut PmxAuxBorrowedSlices<'_>) -> Result<(), LoaderError> {
+        fn copy_prefix<T: Copy>(src: &[T], out: &mut [T]) {
+            let n = src.len().min(out.len());
+            out[..n].copy_from_slice(&src[..n]);
+        }
+
+        #[allow(clippy::infallible_destructuring_match)]
+        let state = match &self.backend {
+            LoaderBackend::File(s) => s,
+            #[cfg(feature = "test-hooks")]
+            LoaderBackend::Synthetic { .. } => return Ok(()),
+        };
+        if state.pmx_aux_hdr.is_pmx == 0 {
+            return Ok(());
+        }
+        run_in_worker_pool(state.max_threads, || {
+            let mut avatar = detect_and_parse(&state.mmap, &state.path_buf)?;
+            let matched = match_humanoid_bones(&avatar.joints);
+            let _ = normalise_avatar_pose(&mut avatar, &matched);
+            let Some(aux) = avatar.pmx_aux else {
+                return Ok(());
+            };
+            copy_prefix(&aux.sdef_vertices, dst.sdef_vertices);
+            copy_prefix(&aux.bone_exts, dst.bone_exts);
+            copy_prefix(&aux.ik_links, dst.ik_links);
+            copy_prefix(&aux.morph_channels, dst.morph_channels);
+            copy_prefix(&aux.group_children, dst.group_children);
+            copy_prefix(&aux.uv_morphs, dst.uv_morphs);
+            copy_prefix(&aux.mat_morphs, dst.mat_morphs);
+            copy_prefix(&aux.bone_morphs, dst.bone_morphs);
+            copy_prefix(&aux.rigid_bodies, dst.rigid_bodies);
+            copy_prefix(&aux.constraints_6dof, dst.constraints_6dof);
+            Ok(())
+        })
     }
 
     /// Decodes/bakes directly into C++-lent arena slices without persistent heap allocations.

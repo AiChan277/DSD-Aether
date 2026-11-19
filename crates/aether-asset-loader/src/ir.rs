@@ -2,6 +2,12 @@
 
 use std::path::PathBuf;
 
+use aether_ffi::{
+    AetherPmxBoneExt, AetherPmxBoneMorphOffset, AetherPmxConstraint6DofDesc,
+    AetherPmxGroupMorphChild, AetherPmxIkLink, AetherPmxMaterialMorphDelta,
+    AetherPmxMorphChannelDesc, AetherPmxRigidBodyDesc, AetherPmxSdefVertex, AetherPmxUvMorphDelta,
+};
+
 /// Detected coordinate/scale metadata carried by a source asset.
 #[derive(Clone, Copy, Debug)]
 pub struct SourceUnitMetadata {
@@ -98,6 +104,8 @@ pub struct RawMaterial {
     pub tex_uv_mask: Option<u32>,
     pub tex_ramp: Option<u32>,
     pub tex_sdf_face: Option<u32>,
+    /// Optional Ray-MMD / explicit 2.5D shader profile (`AETHER_MAT_PROFILE_*`).
+    pub shader_profile: Option<u32>,
 }
 
 /// Raw skeleton joint extracted from source format.
@@ -221,6 +229,21 @@ pub struct RawTextureDesc {
     pub final_format: u32,
 }
 
+/// Extended PMX 2.0/2.1 streams (`SDEF`, `Append`, `CCD-IK`, `Group/Bone/UV/Material Morphs`, `RigidBody + 6-DOF`).
+#[derive(Clone, Debug, Default)]
+pub struct RawPmxAux {
+    pub sdef_vertices: Vec<AetherPmxSdefVertex>,
+    pub bone_exts: Vec<AetherPmxBoneExt>,
+    pub ik_links: Vec<AetherPmxIkLink>,
+    pub morph_channels: Vec<AetherPmxMorphChannelDesc>,
+    pub group_children: Vec<AetherPmxGroupMorphChild>,
+    pub uv_morphs: Vec<AetherPmxUvMorphDelta>,
+    pub mat_morphs: Vec<AetherPmxMaterialMorphDelta>,
+    pub bone_morphs: Vec<AetherPmxBoneMorphOffset>,
+    pub rigid_bodies: Vec<AetherPmxRigidBodyDesc>,
+    pub constraints_6dof: Vec<AetherPmxConstraint6DofDesc>,
+}
+
 /// Complete parsed avatar collected from format parser & normalized before `fill()`.
 #[derive(Clone, Debug)]
 pub struct ParsedAvatar {
@@ -237,4 +260,5 @@ pub struct ParsedAvatar {
     pub spring_chains: Vec<RawSpringChain>,
     pub colliders: Vec<RawCollider>,
     pub textures: Vec<RawTextureDesc>,
+    pub pmx_aux: Option<RawPmxAux>,
 }

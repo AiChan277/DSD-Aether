@@ -31,6 +31,12 @@ pub enum ValueType {
     AudioFrame,
     /// Linear RGBA color `[r, g, b, a]`.
     Color,
+    /// Parsed model material slot table exposed by `ModelSourceNode` (§6.2).
+    MaterialTable,
+    /// Non-destructive material/shader/texture/grade override record (`MaterialSlotOverrideNode`, `DynamicMaterialDriverNode`).
+    MaterialOverride,
+    /// 64-bit texture handle + GPU non-destructive grade descriptors (`TextureAssetNode`, `TextureGradeNode`).
+    TextureHandle,
     /// Compile-time configuration parameter only (forbidden on runtime data wires).
     String,
 }
@@ -54,6 +60,9 @@ impl ValueType {
                 | (Self::VisemeSet, Self::VisemeSet)
                 | (Self::AudioFrame, Self::AudioFrame)
                 | (Self::Color, Self::Color)
+                | (Self::MaterialTable, Self::MaterialTable)
+                | (Self::MaterialOverride, Self::MaterialOverride)
+                | (Self::TextureHandle, Self::TextureHandle)
         )
     }
 }

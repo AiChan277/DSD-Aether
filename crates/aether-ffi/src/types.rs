@@ -712,3 +712,262 @@ pub struct AetherStudioLightGpu {
     /// Deterministic padding completing the 128-byte (2 cache lines) stride.
     pub padding: [f32; 3],
 }
+
+/// 64-bit opaque handle referencing an async local texture asset or live `Spout2` stream (`0` = unbound).
+pub type AetherTextureHandle = u64;
+
+/// Non-destructive per-slot material, shader profile, texture, and GPU grade override — 192 B exact, 64-byte aligned.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherMaterialOverrideEntry {
+    /// Target model material index (`AETHER_INVALID_INDEX` when resolved by lowercase `material_name_hash`).
+    pub material_index: u32,
+    /// FNV-1a 32-bit hash of the lowercase material slot name.
+    pub material_name_hash: u32,
+    /// Bitmask of overridden fields (`AETHER_MAT_OVR_*`).
+    pub override_mask: u32,
+    /// Requested shader profile (`AETHER_MAT_PROFILE_*`), valid when `AETHER_MAT_OVR_PROFILE` is set.
+    pub shader_profile: u32,
+    /// Overridden linear RGBA shade color (`rgb` + validity/mix alpha in `w`).
+    pub shade_color: [f32; 4],
+    /// `[0]=shade_shift`, `[1]=sss_fringe`, `[2]=outline_scale`, `[3]=reserved`.
+    pub scalar_params: [f32; 4],
+    /// `[0]=emissive_intensity`, `[1]=blush_alpha`, `[2]=rim_boost`, `[3]=reserved`.
+    pub dynamic_params: [f32; 4],
+    /// 64-bit texture handles indexed by `AETHER_TEX_SLOT_*` (`0=Albedo..5=Emissive`).
+    pub texture_handles: [u64; 6],
+    /// Non-destructive GPU UV transform `[scale_x, scale_y, offset_x, offset_y]`.
+    pub uv_scale_offset: [f32; 4],
+    /// Non-destructive GPU color grade `[hue_shift_deg, saturation, brightness, contrast]`.
+    pub grade_hsbc: [f32; 4],
+    /// Non-destructive GPU tint multiply `[r, g, b, tint_strength]`.
+    pub grade_tint: [f32; 4],
+    /// Bitmask per slot `0..5`: bit `k = 1` selects sRGB decode, `0` selects Linear decode.
+    pub tex_srgb_mask: u32,
+    /// Bitmask per slot `0..5`: bit `k = 1` indicates live `Spout2` texture feed.
+    pub tex_spout_mask: u32,
+    /// RT shadow receiver/caster mask override (`bit 0 = Hair, bit 1 = Hands, bit 2 = Self`).
+    pub rt_shadow_mask: u32,
+    /// Auxiliary flags (`bit 0 = grade_active`).
+    pub source_flags: u32,
+    /// Deterministic tail padding to 192 bytes (3 cache lines).
+    pub _pad_tail: [u32; 4],
+}
+
+/// Fixed-capacity wait-free node graph material override payload — 12352 B exact, 64-byte aligned.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherMaterialOverrideBuffer {
+    /// Size guard (`sizeof(AetherMaterialOverrideBuffer)`).
+    pub struct_size: u32,
+    /// Number of valid entries in `entries[0..count]`.
+    pub count: u32,
+    /// Active circadian clock hour `[0, 24)` passed into `DynamicMaterialDriverNode`.
+    pub circadian_hour: f32,
+    /// Evaluation epoch / frame tick counter.
+    pub eval_epoch: u32,
+    /// Active avatar source format (`AETHER_SOURCE_FORMAT_*`).
+    pub model_format: u32,
+    /// Parsed model material slot count.
+    pub model_material_count: u32,
+    /// Header alignment padding to 64 bytes.
+    pub _hdr_pad: [u32; 10],
+    /// Pre-allocated fixed-capacity override entries (zero per-frame heap allocation).
+    pub entries: [AetherMaterialOverrideEntry; 64],
+}
+
+/// Queried counts of PMX 2.0/2.1 extended streams — 64 B (`aether_loader_query_pmx_aux`).
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxAuxHeader {
+    pub struct_size: u32,
+    pub is_pmx: u32,
+    pub sdef_vertex_count: u32,
+    pub bone_ext_count: u32,
+    pub ik_link_count: u32,
+    pub morph_channel_count: u32,
+    pub group_child_count: u32,
+    pub uv_morph_count: u32,
+    pub mat_morph_count: u32,
+    pub bone_morph_count: u32,
+    pub rigid_body_count: u32,
+    pub constraint_6dof_count: u32,
+    pub _reserved: [u32; 4],
+}
+
+/// Per-vertex PMX Spherical Deform (`SDEF`) control anchors in right-handed AETHER metres — 48 B.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxSdefVertex {
+    pub c: [f32; 3],
+    /// `bit 0 = 1` when vertex uses SDEF spherical skinning (`BDEF2` otherwise).
+    pub flags: u32,
+    pub r0: [f32; 3],
+    pub _pad0: u32,
+    pub r1: [f32; 3],
+    pub _pad1: u32,
+}
+
+/// Per-bone PMX Append Transform + CCD-IK metadata — 48 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxBoneExt {
+    pub append_parent: i32,
+    pub append_ratio: f32,
+    /// `AETHER_PMX_APPEND_*` bits.
+    pub append_flags: u32,
+    pub ik_target: i32,
+    pub ik_loops: i32,
+    pub ik_limit_rad: f32,
+    pub ik_link_offset: u32,
+    pub ik_link_count: u32,
+    pub transform_level: i32,
+    pub _pad: [u32; 3],
+}
+
+/// One bone link in a PMX `CCD-IK` chain — 32 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxIkLink {
+    pub bone_index: u32,
+    pub has_limit: u32,
+    pub limit_min_rad: [f32; 3],
+    pub limit_max_rad: [f32; 3],
+}
+
+/// Extended PMX morph descriptor covering Group, Vertex, Bone, UV, and Material morphs — 48 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxMorphChannelDesc {
+    /// `AETHER_PMX_MORPH_*` (`0=Group, 1=Vertex, 2=Bone, 3=UV, 8=Material`).
+    pub morph_kind: u32,
+    /// Mapped Appendix B expression slot (`0..63`) or `AETHER_INVALID_INDEX`.
+    pub appendix_b_slot: u32,
+    /// Bound `Vertex` morph range index in `AETHER_STREAM_MORPH_RANGES` (`AETHER_INVALID_INDEX` if none).
+    pub vertex_morph_index: u32,
+    /// Lowercase FNV-1a hash of the morph name (`mabataki`, `F1..F8`, etc.).
+    pub name_hash: u32,
+    pub child_offset: u32,
+    pub child_count: u32,
+    pub bone_offset: u32,
+    pub bone_count: u32,
+    pub uv_offset: u32,
+    pub uv_count: u32,
+    pub mat_offset: u32,
+    pub mat_count: u32,
+}
+
+/// Child weight inside a PMX `Group` morph — 16 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxGroupMorphChild {
+    pub child_morph_index: u32,
+    pub weight: f32,
+    pub _pad: [u32; 2],
+}
+
+/// Sparse per-vertex UV coordinate delta inside a PMX `UV` morph — 16 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxUvMorphDelta {
+    pub vertex_index: u32,
+    pub _pad0: u32,
+    pub duv: [f32; 2],
+}
+
+/// Per-material scalar/color delta inside a PMX `Material` morph — 128 B.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxMaterialMorphDelta {
+    /// Target material index (`-1` applies to all avatar materials).
+    pub material_index: i32,
+    /// `0 = Multiply`, `1 = Add`.
+    pub op_mode: u32,
+    pub spec_pow: f32,
+    pub edge_size: f32,
+    pub diffuse: [f32; 4],
+    pub specular: [f32; 4],
+    pub ambient: [f32; 4],
+    pub edge_color: [f32; 4],
+    pub tex_tint: [f32; 4],
+    pub sphere_tint: [f32; 4],
+    pub toon_tint: [f32; 4],
+}
+
+/// Per-bone translation + quaternion offset inside a PMX `Bone` morph — 40 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxBoneMorphOffset {
+    pub bone_index: u32,
+    pub _pad0: u32,
+    pub translation: [f32; 3],
+    pub rotation_quat: [f32; 4],
+    pub _pad1: u32,
+}
+
+/// PMX `RigidBody` descriptor in right-handed metres — 80 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxRigidBodyDesc {
+    pub bone_index: i32,
+    pub group_index: u32,
+    pub collision_mask: u32,
+    /// `AETHER_PMX_SHAPE_*` (`0=sphere, 1=box, 2=capsule`).
+    pub shape_kind: u32,
+    /// `AETHER_PMX_RB_*` (`0=kinematic, 1=dynamic, 2=dynamic+bone`).
+    pub phys_mode: u32,
+    pub _pad0: u32,
+    pub size: [f32; 3],
+    pub mass: f32,
+    pub pos_ms: [f32; 3],
+    pub linear_damping: f32,
+    pub rot_euler_rh: [f32; 3],
+    pub angular_damping: f32,
+    pub restitution: f32,
+    pub friction: f32,
+}
+
+/// PMX 6-DOF Spring Joint descriptor in right-handed metres — 112 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherPmxConstraint6DofDesc {
+    pub rb_a: i32,
+    pub rb_b: i32,
+    pub spring_pos: [f32; 3],
+    pub spring_rot: [f32; 3],
+    pub pos_ms: [f32; 3],
+    pub rot_euler_rh: [f32; 3],
+    pub pos_min: [f32; 3],
+    pub pos_max: [f32; 3],
+    pub rot_min: [f32; 3],
+    pub rot_max: [f32; 3],
+    pub _pad: [u32; 2],
+}
+
+/// Caller-lent typed output buffers filled by `aether_loader_fill_pmx_aux` — 128 B.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug)]
+pub struct AetherPmxAuxSlices {
+    pub struct_size: u32,
+    pub _pad0: u32,
+    pub sdef_vertices: *mut AetherPmxSdefVertex,
+    pub sdef_vertex_cap: u32,
+    pub bone_ext_cap: u32,
+    pub bone_exts: *mut AetherPmxBoneExt,
+    pub ik_links: *mut AetherPmxIkLink,
+    pub ik_link_cap: u32,
+    pub morph_channel_cap: u32,
+    pub morph_channels: *mut AetherPmxMorphChannelDesc,
+    pub group_children: *mut AetherPmxGroupMorphChild,
+    pub group_child_cap: u32,
+    pub uv_morph_cap: u32,
+    pub uv_morphs: *mut AetherPmxUvMorphDelta,
+    pub mat_morphs: *mut AetherPmxMaterialMorphDelta,
+    pub mat_morph_cap: u32,
+    pub bone_morph_cap: u32,
+    pub bone_morphs: *mut AetherPmxBoneMorphOffset,
+    pub rigid_bodies: *mut AetherPmxRigidBodyDesc,
+    pub rigid_body_cap: u32,
+    pub constraint_6dof_cap: u32,
+    pub constraints_6dof: *mut AetherPmxConstraint6DofDesc,
+}

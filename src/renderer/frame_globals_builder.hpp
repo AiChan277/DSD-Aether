@@ -597,7 +597,8 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
 
             const std::string mat_name = read_material_cstr(avatar, m.name_offset);
             const RtMaskBucket rtb = classify_rt_bucket(mat_name, mat_sm_names[i], m.flags, mat_sm_flags[i]);
-            uint32_t packed_flags = (m.flags & 0xFFu);
+            uint32_t packed_flags =
+                (m.flags & (0xFFu | AETHER_MAT_FLAG_HAS_PROFILE | (0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT)));
             packed_flags |= (static_cast<uint32_t>(rtb) & 3u) << kMatExtraRtClassShift;
             if (is_genuine_eye_iris_name(mat_name, mat_sm_names[i])) {
                 packed_flags |= kMatExtraEyeIrisBit;
@@ -727,6 +728,147 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             out_cutout.push_back(i);
         } else {
             out_opaque.push_back(i);
+        }
+    }
+}
+
+[[nodiscard]] constexpr uint32_t fnv1a_lower_mat_name(std::string_view s) noexcept {
+    uint32_t h = 0x811C9DC5u;
+    for (char ch : s) {
+        const auto b = static_cast<uint8_t>((ch >= 'A' && ch <= 'Z') ? (ch + ('a' - 'A')) : ch);
+        h ^= static_cast<uint32_t>(b);
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+inline void update_gpu_materials_with_overrides(
+    const GpuAvatar& avatar,
+    const std::vector<GpuMaterial>& base_gpu_materials,
+    const AetherMaterialOverrideBuffer* overrides,
+    std::vector<GpuMaterial>& out_gpu_materials,
+    std::vector<GpuMaterialGrade>& out_grades) noexcept {
+    const size_t n = base_gpu_materials.size();
+    if (out_gpu_materials.size() != n || out_grades.size() != n || n == 0) {
+        return;
+    }
+    std::memcpy(out_gpu_materials.data(), base_gpu_materials.data(), n * sizeof(GpuMaterial));
+    for (size_t i = 0; i < n; ++i) {
+        out_grades[i] = GpuMaterialGrade{};
+    }
+
+    // 1. Fold PMX Material Morph deltas from avatar.morphed_materials_scratch when active
+    if (avatar.pmx_aux_header.is_pmx != 0U && avatar.morphed_materials_scratch.size() == avatar.materials.size()) {
+        for (size_t i = 0; i < avatar.morphed_materials_scratch.size() && i < n; ++i) {
+            const auto& m = avatar.morphed_materials_scratch[i];
+            auto& gm = out_gpu_materials[i];
+            std::memcpy(gm.lit_color, m.base_color, sizeof(gm.lit_color));
+            gm.shade_color[0] = m.shade_color_gi[0];
+            gm.shade_color[1] = m.shade_color_gi[1];
+            gm.shade_color[2] = m.shade_color_gi[2];
+            gm.outline_color_width[0] = m.outline_color_mix[0];
+            gm.outline_color_width[1] = m.outline_color_mix[1];
+            gm.outline_color_width[2] = m.outline_color_mix[2];
+            gm.outline_color_width[3] = m.outline_width;
+            gm.emission_and_shift[0] = m.emissive_and_pad[0];
+            gm.emission_and_shift[1] = m.emissive_and_pad[1];
+            gm.emission_and_shift[2] = m.emissive_and_pad[2];
+        }
+    }
+
+    if (overrides == nullptr || overrides->count == 0U) {
+        return;
+    }
+
+    constexpr uint32_t kWildcardHash = fnv1a_lower_mat_name("*");
+    constexpr uint32_t kEmptyHash = fnv1a_lower_mat_name("");
+    const uint32_t count = std::min<uint32_t>(overrides->count, AETHER_MAX_MATERIAL_OVERRIDES);
+
+    for (uint32_t ei = 0; ei < count; ++ei) {
+        const AetherMaterialOverrideEntry& ovr = overrides->entries[ei];
+        for (size_t mi = 0; mi < n; ++mi) {
+            bool matched = false;
+            if (ovr.material_index != AETHER_INVALID_INDEX) {
+                matched = (ovr.material_index == static_cast<uint32_t>(mi));
+            } else if (ovr.material_name_hash == kWildcardHash || ovr.material_name_hash == kEmptyHash) {
+                matched = true;
+            } else if (mi < avatar.materials.size()) {
+                const uint32_t off = avatar.materials[mi].name_offset;
+                std::string_view sv{};
+                if (off < avatar.strings.size()) {
+                    sv = std::string_view(avatar.strings).substr(off);
+                    const size_t nul = sv.find('\0');
+                    if (nul != std::string_view::npos) {
+                        sv = sv.substr(0, nul);
+                    }
+                }
+                matched = (fnv1a_lower_mat_name(sv) == ovr.material_name_hash);
+            }
+            if (!matched) {
+                continue;
+            }
+
+            GpuMaterial& gm = out_gpu_materials[mi];
+            GpuMaterialGrade& grade = out_grades[mi];
+            const uint32_t mask = ovr.override_mask;
+
+            if ((mask & AETHER_MAT_OVR_PROFILE) != 0U &&
+                ovr.shader_profile != AETHER_MAT_PROFILE_KEEP &&
+                ovr.shader_profile <= AETHER_MAT_PROFILE_EMISSIVE) {
+                gm.extra_slots[2] &= ~(0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT);
+                gm.extra_slots[2] |= AETHER_MAT_FLAG_HAS_PROFILE |
+                                     ((ovr.shader_profile & 0x7u) << AETHER_MAT_FLAG_PROFILE_SHIFT);
+            }
+            if ((mask & AETHER_MAT_OVR_SHADE_COLOR) != 0U) {
+                gm.shade_color[0] = ovr.shade_color[0];
+                gm.shade_color[1] = ovr.shade_color[1];
+                gm.shade_color[2] = ovr.shade_color[2];
+                gm.shade_color[3] = ovr.shade_color[3];
+            }
+            if ((mask & AETHER_MAT_OVR_SHADE_SHIFT) != 0U) {
+                gm.emission_and_shift[3] = std::clamp(ovr.scalar_params[0], -1.0f, 1.0f);
+            }
+            if ((mask & AETHER_MAT_OVR_SSS_FRINGE) != 0U) {
+                gm.toon_params[2] = std::clamp(ovr.scalar_params[1], 0.0f, 2.0f);
+            }
+            if ((mask & AETHER_MAT_OVR_OUTLINE_SCALE) != 0U) {
+                gm.outline_color_width[3] = std::max(0.0f, gm.outline_color_width[3] * ovr.scalar_params[2]);
+            }
+            if ((mask & AETHER_MAT_OVR_RT_SHADOW_MASK) != 0U) {
+                if ((ovr.rt_shadow_mask & 0x1u) != 0U) {
+                    gm.extra_slots[2] |= AETHER_MAT_FLAG_RECEIVES_HAIR_SHADOW;
+                } else {
+                    gm.extra_slots[2] &= ~AETHER_MAT_FLAG_RECEIVES_HAIR_SHADOW;
+                }
+            }
+            if ((mask & AETHER_MAT_OVR_EMISSIVE) != 0U) {
+                const float em = std::max(0.0f, ovr.dynamic_params[0]);
+                gm.emission_and_shift[0] = std::max(gm.emission_and_shift[0], 0.25f) * em;
+                gm.emission_and_shift[1] = std::max(gm.emission_and_shift[1], 0.25f) * em;
+                gm.emission_and_shift[2] = std::max(gm.emission_and_shift[2], 0.25f) * em;
+                grade.dynamic_params[0] = em;
+            }
+            if ((mask & AETHER_MAT_OVR_BLUSH_ALPHA) != 0U) {
+                const float blush = std::clamp(ovr.dynamic_params[1], 0.0f, 1.0f);
+                grade.dynamic_params[1] = blush;
+                gm.shade_color[0] = std::clamp(gm.shade_color[0] + 0.18f * blush, 0.0f, 2.0f);
+                gm.shade_color[1] = std::clamp(gm.shade_color[1] * (1.0f - 0.10f * blush), 0.0f, 2.0f);
+            }
+            if ((mask & AETHER_MAT_OVR_RIM_BOOST) != 0U) {
+                const float rb = std::clamp(ovr.dynamic_params[2], 0.0f, 4.0f);
+                grade.dynamic_params[2] = rb;
+                gm.rim_color_power[0] = std::clamp(gm.rim_color_power[0] * (1.0f + rb), 0.0f, 4.0f);
+                gm.rim_color_power[1] = std::clamp(gm.rim_color_power[1] * (1.0f + rb), 0.0f, 4.0f);
+                gm.rim_color_power[2] = std::clamp(gm.rim_color_power[2] * (1.0f + rb), 0.0f, 4.0f);
+            }
+            if ((ovr.source_flags & 1U) != 0U) {
+                for (int k = 0; k < 4; ++k) {
+                    grade.uv_scale_offset[k] = ovr.uv_scale_offset[k];
+                    grade.grade_hsbc[k] = ovr.grade_hsbc[k];
+                    grade.grade_tint[k] = ovr.grade_tint[k];
+                }
+                grade.dynamic_params[3] = 1.0f;
+            }
         }
     }
 }

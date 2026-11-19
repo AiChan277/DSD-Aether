@@ -1051,6 +1051,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         };
 
         // Mark non-color normal/mask texture usage flags
@@ -1300,6 +1301,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         });
     }
 
@@ -1859,5 +1861,6 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
         spring_chains,
         colliders,
         textures,
+        pmx_aux: None,
     })
 }

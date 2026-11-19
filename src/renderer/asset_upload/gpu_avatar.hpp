@@ -2,6 +2,7 @@
 
 #include "aether_ffi_contract.h"
 #include "animation/live2d_params.hpp"
+#include "animation/pmx_physics.hpp"
 #include "core/expected.hpp"
 #include "rhi/rhi_device.hpp"
 
@@ -12,6 +13,11 @@
 #include <vector>
 
 namespace aether::renderer {
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 
 struct GpuUploadStats {
     double open_query_ms{0.0};
@@ -43,6 +49,18 @@ struct StagedAvatarUpload {
     double fill_ms{0.0};
     bool pointer_identity_verified{false};
     std::string source_path;
+
+    AetherPmxAuxHeader pmx_aux_header{};
+    std::vector<AetherPmxSdefVertex> pmx_sdef_vertices;
+    std::vector<AetherPmxBoneExt> pmx_bone_exts;
+    std::vector<AetherPmxIkLink> pmx_ik_links;
+    std::vector<AetherPmxMorphChannelDesc> pmx_morph_channels;
+    std::vector<AetherPmxGroupMorphChild> pmx_group_children;
+    std::vector<AetherPmxUvMorphDelta> pmx_uv_morphs;
+    std::vector<AetherPmxMaterialMorphDelta> pmx_mat_morphs;
+    std::vector<AetherPmxBoneMorphOffset> pmx_bone_morphs;
+    std::vector<AetherPmxRigidBodyDesc> pmx_rigid_bodies;
+    std::vector<AetherPmxConstraint6DofDesc> pmx_constraints_6dof;
 
     void release() noexcept;
 };
@@ -125,6 +143,34 @@ struct GpuAvatar {
     // Calibrated linear RGB of lower-cheek / chin Face skin sampled once on upload (w = 1.0 when valid).
     std::array<float, 4> face_skin_ref_linear{0.85f, 0.68f, 0.58f, 0.0f};
 
+    // Phase 3: Native PMX 2.0/2.1 auxiliary data (SDEF, Bone Ext, CCD-IK, Morphs, 60 Hz Physics)
+    AetherPmxAuxHeader pmx_aux_header{};
+    std::vector<AetherPmxSdefVertex> pmx_sdef_vertices;
+    std::vector<AetherPmxBoneExt> pmx_bone_exts;
+    std::vector<AetherPmxIkLink> pmx_ik_links;
+    std::vector<AetherPmxMorphChannelDesc> pmx_morph_channels;
+    std::vector<AetherPmxGroupMorphChild> pmx_group_children;
+    std::vector<AetherPmxUvMorphDelta> pmx_uv_morphs;
+    std::vector<AetherPmxMaterialMorphDelta> pmx_mat_morphs;
+    std::vector<AetherPmxBoneMorphOffset> pmx_bone_morphs;
+    std::vector<AetherPmxRigidBodyDesc> pmx_rigid_bodies;
+    std::vector<AetherPmxConstraint6DofDesc> pmx_constraints_6dof;
+
+    rhi::RhiBuffer pmx_sdef_buf{};
+    std::array<rhi::RhiBuffer, kPoseSlotCount> dynamic_uv_delta_bufs{};
+    std::array<rhi::RhiBuffer, kPoseSlotCount> dynamic_joint_mat_bufs{};
+
+    std::vector<std::array<float, 2>> uv_deltas_scratch;
+    std::vector<float> pmx_channel_weights_scratch;
+    std::vector<AetherNprMaterial> morphed_materials_scratch;
+    std::vector<float> pmx_local_t_scratch;
+    std::vector<float> pmx_local_r_scratch;
+    std::vector<float> pmx_local_s_scratch;
+    std::vector<float> pmx_world_mats_scratch;
+    std::vector<float> pmx_rest_world_mats;
+    std::vector<float> pmx_rest_inv_mats;
+    animation::PmxSkeletonAndPhysicsSolver pmx_solver;
+
     ~GpuAvatar() { destroy(); }
     GpuAvatar() = default;
     GpuAvatar(const GpuAvatar&) = delete;
@@ -151,5 +197,9 @@ struct GpuAvatar {
  */
 [[nodiscard]] Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
                                                                         std::unique_ptr<StagedAvatarUpload> staged);
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 } // namespace aether::renderer

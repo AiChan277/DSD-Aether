@@ -138,6 +138,9 @@ struct FrameRenderRequest {
     bool external_is_foreign{false};
     // Optional CPU-readback path: tightly packed RGBA8 rows copied into the image before the blit.
     VkBuffer external_staging_buffer{VK_NULL_HANDLE};
+
+    // Phase 3: Non-destructive Node Graph Material & Texture Overrides
+    const AetherMaterialOverrideBuffer* material_overrides{nullptr};
 };
 
 /** Column-major view-projection used by every pass (shared with the DirectX 11 backend). */
@@ -274,6 +277,7 @@ class FrameGraph {
     const GpuAvatar* bound_avatar_{nullptr};
     rhi::RhiBuffer skinned_vertices_buf_{};
     rhi::RhiBuffer material_buf_{};
+    rhi::RhiBuffer material_grade_buf_{};
     rhi::RhiBuffer submesh_draw_buf_{};
     rhi::RhiImage fallback_white_tex_{};
     uint32_t fallback_white_slot_{UINT32_MAX};
@@ -283,6 +287,8 @@ class FrameGraph {
     uint32_t avatar_face_sdf_slot_{UINT32_MAX};
     std::vector<GpuSubmeshDraw> cached_submeshes_{};
     std::vector<GpuMaterial> cached_materials_{};
+    std::vector<GpuMaterial> active_materials_scratch_{};
+    std::vector<GpuMaterialGrade> active_grades_scratch_{};
     struct TemporalHistoryBank {
         GpuMat4 prev_view_proj{};
         bool have_prev_view_proj{false};

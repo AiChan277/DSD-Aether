@@ -46,6 +46,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     uint m0 = raw_m0 & 0x3FFu;
     bool skin0 = ((raw_m0 & 0x3000u) != 0u);
     float crease_w = float((raw_m0 >> 16u) & 0xFFu) / 255.0;
+    float edge_scale0 = ((raw_m0 & 0x4000u) != 0u) ? 0.0 : 1.0;
     float disguise_keep = 1.0 - crease_w * saturate(fg.eye_catchlight_params.z);
     // Mask crease ink cleanly off flat face planes (`gb_misc.y` = sdf_mask) so cheeks/nose stay 2D clean
     float face_mask = saturate(aether_load(gb_misc_slot, p).y);
@@ -115,7 +116,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float n_edge = max(smoothstep(0.65, 1.32, n_sobel + dog_n * 0.25 * dog_boost), max_n_ang * 0.80) *
                    plane_keep * disguise_keep;
     float z_edge = smoothstep(0.055, 0.145, z_sobel + dog_z * 0.04 * dog_boost) * plane_keep * dist_taper;
-    float max_edge = max(n_edge * 0.85, max(z_edge, max_mat_edge));
+    float max_edge = max(n_edge * 0.85, max(z_edge, max_mat_edge)) * edge_scale0;
     if (all_neighbors_skin) {
         // Zero skin-to-skin ink lines inside head/jaw/neck skin surfaces
         max_edge = 0.0;

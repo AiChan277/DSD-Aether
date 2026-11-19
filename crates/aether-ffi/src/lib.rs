@@ -145,6 +145,53 @@ unsafe extern "C" {
         out_readout: *mut AetherGraphTelemetryReadout,
     ) -> AetherStatus;
 
+    /// Evaluates active plan including non-destructive `MaterialOverrideBuffer` without heap allocs. `[T2]`
+    pub fn aether_host_evaluate_active_ex(
+        host: AetherHostHandle,
+        inputs: *const AetherGraphInputs,
+        circadian_hour: f32,
+        out_pose: *mut AetherGraphOutputs,
+        out_mats: *mut AetherMaterialOverrideBuffer,
+    ) -> AetherStatus;
+
+    /// Evaluates a standalone compiled plan's material/texture nodes into `out_mats` cleanly. `[T2]`
+    pub fn aether_graph_evaluate_materials(
+        plan: AetherPlanHandle,
+        inputs: *const AetherGraphInputs,
+        circadian_hour: f32,
+        out_mats: *mut AetherMaterialOverrideBuffer,
+    ) -> AetherStatus;
+
+    /// Publishes parsed avatar model metadata (material slot names, format) to the node compiler. `[ui]`
+    pub fn aether_host_set_model_metadata_json(
+        host: AetherHostHandle,
+        json_utf8: *const c_char,
+    ) -> AetherStatus;
+
+    /// Queries PMX 2.0/2.1 extended stream counts (`SDEF`, `Append`, `IK`, `Material/UV Morph`, `RigidBody/6-DOF`). `[loader]`
+    pub fn aether_loader_query_pmx_aux(
+        loader: AetherLoaderHandle,
+        out_hdr: *mut AetherPmxAuxHeader,
+    ) -> AetherStatus;
+
+    /// Copies PMX 2.0/2.1 extended streams zero-copy into caller-owned C++ slices. `[loader]`
+    pub fn aether_loader_fill_pmx_aux(
+        loader: AetherLoaderHandle,
+        out_slices: *const AetherPmxAuxSlices,
+    ) -> AetherStatus;
+
+    /// Decodes a local texture file (`.png/.jpg/.tga/.bmp/.dds/.ktx2/.spa/.sph`) into RGBA8. `[loader]`
+    pub fn aether_texture_decode_file(
+        path_utf8: *const c_char,
+        srgb: u32,
+        out_width: *mut u32,
+        out_height: *mut u32,
+        out_format: *mut u32,
+        out_rgba: *mut u8,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> AetherStatus;
+
     /// Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`
     pub fn aether_ffi_layout_table_json(out_len: *mut usize) -> *const u8;
 }

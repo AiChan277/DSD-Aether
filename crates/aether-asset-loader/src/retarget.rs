@@ -243,6 +243,33 @@ pub fn normalise_avatar_pose(
                 node.hit_radius *= scale;
             }
         }
+        if let Some(ref mut aux) = avatar.pmx_aux {
+            for sd in &mut aux.sdef_vertices {
+                for k in 0..3 {
+                    sd.c[k] *= scale;
+                    sd.r0[k] *= scale;
+                    sd.r1[k] *= scale;
+                }
+            }
+            for bm in &mut aux.bone_morphs {
+                for val in &mut bm.translation {
+                    *val *= scale;
+                }
+            }
+            for rb in &mut aux.rigid_bodies {
+                for k in 0..3 {
+                    rb.pos_ms[k] *= scale;
+                    rb.size[k] *= scale;
+                }
+            }
+            for jc in &mut aux.constraints_6dof {
+                for k in 0..3 {
+                    jc.pos_ms[k] *= scale;
+                    jc.pos_min[k] *= scale;
+                    jc.pos_max[k] *= scale;
+                }
+            }
+        }
         (min_p, max_p) = compute_aabb(&avatar.vertices);
     }
 
@@ -276,6 +303,21 @@ pub fn normalise_avatar_pose(
             }
             if let Some(ref mut ibm) = j.inverse_bind_matrix {
                 ibm[7] += floor_y;
+            }
+        }
+        if let Some(ref mut aux) = avatar.pmx_aux {
+            for sd in &mut aux.sdef_vertices {
+                if (sd.flags & 1) != 0 {
+                    sd.c[1] -= floor_y;
+                    sd.r0[1] -= floor_y;
+                    sd.r1[1] -= floor_y;
+                }
+            }
+            for rb in &mut aux.rigid_bodies {
+                rb.pos_ms[1] -= floor_y;
+            }
+            for jc in &mut aux.constraints_6dof {
+                jc.pos_ms[1] -= floor_y;
             }
         }
         min_p[1] -= floor_y;
@@ -413,7 +455,11 @@ fn compute_aabb(vertices: &[crate::ir::RawVertex]) -> ([f32; 3], [f32; 3]) {
     (min_p, max_p)
 }
 
-fn map_preset_to_slots(name: &str, centroid_x: f32, has_per_eye_blink: bool) -> Vec<(u32, f32)> {
+pub(crate) fn map_preset_to_slots(
+    name: &str,
+    centroid_x: f32,
+    has_per_eye_blink: bool,
+) -> Vec<(u32, f32)> {
     const ARKIT_LOWER: [&str; 52] = [
         "eyeblinkleft",
         "eyelookdownleft",

@@ -1,0 +1,15 @@
+[package]
+name = "aether-asset-pmx"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aether-ffi = { path = "../aether-ffi" }
+encoding_rs.workspace = true
+glam.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

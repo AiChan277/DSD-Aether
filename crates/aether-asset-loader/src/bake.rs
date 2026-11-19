@@ -914,6 +914,7 @@ mod tests {
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         }
     }
 
@@ -977,6 +978,7 @@ mod tests {
             spring_chains: vec![],
             colliders: vec![],
             textures: vec![],
+            pmx_aux: None,
         };
         let matched = HumanoidMatchResult {
             humanoid_to_joint: [0xFFFF; 55],

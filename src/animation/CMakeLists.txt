@@ -4,6 +4,7 @@ add_library(aether_animation STATIC
     visibility_first.cpp
     hand_collision.cpp
     ik_solvers.cpp
+    pmx_physics.cpp
     spring_bone.cpp
     expression_mixer.cpp
     sim_engine.cpp

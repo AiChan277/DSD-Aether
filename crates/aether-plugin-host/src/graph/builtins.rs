@@ -48,6 +48,12 @@ pub enum NodeKind {
     PropAttach,
     OscOut,
     WsOut,
+    // Model, Material & Texture Management (§6.2)
+    ModelSource,
+    MaterialSlotOverride,
+    TextureAsset,
+    TextureGrade,
+    DynamicMaterialDriver,
     // External Plugins (WASM / Native latched bridge)
     WasmPlugin,
 }
@@ -110,6 +116,16 @@ pub fn classify_node_type(type_id: &str) -> Option<NodeKind> {
         "aether.output.prop_attach" | "prop_attach" => Some(NodeKind::PropAttach),
         "aether.output.osc_out" | "osc_out" => Some(NodeKind::OscOut),
         "aether.output.ws_out" | "ws_out" => Some(NodeKind::WsOut),
+
+        "aether.model.source" | "model_source" => Some(NodeKind::ModelSource),
+        "aether.material.slot_override" | "material_slot_override" => {
+            Some(NodeKind::MaterialSlotOverride)
+        }
+        "aether.texture.asset" | "texture_asset" => Some(NodeKind::TextureAsset),
+        "aether.texture.grade" | "texture_grade" => Some(NodeKind::TextureGrade),
+        "aether.material.dynamic_driver" | "dynamic_material_driver" => {
+            Some(NodeKind::DynamicMaterialDriver)
+        }
 
         _ if base == "aether.plugin.wasm" || base.starts_with("plugin.") => {
             Some(NodeKind::WasmPlugin)
@@ -332,6 +348,45 @@ pub fn resolve_ports(kind: NodeKind, node: &GraphNode) -> Vec<ResolvedPort> {
                 p_in("trigger", ValueType::Event),
             ]
         }
+
+        NodeKind::ModelSource => vec![
+            p_out("skeleton_pose", ValueType::Pose),
+            p_out("morph_bus", ValueType::ExprSet),
+            p_out("material_table", ValueType::MaterialTable),
+            p_out("material_count", ValueType::Float),
+        ],
+        NodeKind::MaterialSlotOverride => vec![
+            p_in("material_table", ValueType::MaterialTable),
+            p_in("texture", ValueType::TextureHandle),
+            p_in("shade_shift", ValueType::Float),
+            p_in("sss_fringe", ValueType::Float),
+            p_in("outline_scale", ValueType::Float),
+            p_in("dynamic_driver", ValueType::MaterialOverride),
+            p_out("override_out", ValueType::MaterialOverride),
+            p_out("slot_index", ValueType::Float),
+        ],
+        NodeKind::TextureAsset => vec![
+            p_out("texture", ValueType::TextureHandle),
+            p_out("ready", ValueType::Bool),
+        ],
+        NodeKind::TextureGrade => vec![
+            p_in("texture", ValueType::TextureHandle),
+            p_in("hue_shift", ValueType::Float),
+            p_in("saturation", ValueType::Float),
+            p_in("brightness", ValueType::Float),
+            p_in("contrast", ValueType::Float),
+            p_in("tint", ValueType::Color),
+            p_out("texture", ValueType::TextureHandle),
+        ],
+        NodeKind::DynamicMaterialDriver => vec![
+            p_in("signal_in", ValueType::Float),
+            p_in("audio_rms", ValueType::Float),
+            p_in("expression_weight", ValueType::Float),
+            p_in("circadian_clock", ValueType::Float),
+            p_in("material_table", ValueType::MaterialTable),
+            p_out("driver_out", ValueType::MaterialOverride),
+            p_out("driven_value", ValueType::Float),
+        ],
 
         NodeKind::WasmPlugin => {
             if !node.ports.is_empty() {

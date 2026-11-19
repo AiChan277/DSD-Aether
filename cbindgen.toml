@@ -67,6 +67,21 @@ include = [
     "AetherExpressionBindingDesc",
     "AetherTextureDesc",
     "AetherStudioLightGpu",
+    "AetherTextureHandle",
+    "AetherMaterialOverrideEntry",
+    "AetherMaterialOverrideBuffer",
+    "AetherPmxAuxHeader",
+    "AetherPmxSdefVertex",
+    "AetherPmxBoneExt",
+    "AetherPmxIkLink",
+    "AetherPmxMorphChannelDesc",
+    "AetherPmxGroupMorphChild",
+    "AetherPmxUvMorphDelta",
+    "AetherPmxMaterialMorphDelta",
+    "AetherPmxBoneMorphOffset",
+    "AetherPmxRigidBodyDesc",
+    "AetherPmxConstraint6DofDesc",
+    "AetherPmxAuxSlices",
 ]
 
 [parse]

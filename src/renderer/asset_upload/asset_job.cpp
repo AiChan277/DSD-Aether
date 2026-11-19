@@ -190,6 +190,48 @@ void AssetJob::worker_main(rhi::RhiDevice* rhi, std::string path_utf8, uint32_t 
         return;
     }
 
+    // Query and fill optional PMX 2.0/2.1 auxiliary data (SDEF, Bone Ext, CCD-IK, Morphs, Physics).
+    if (aether_loader_query_pmx_aux(loader, &staged->pmx_aux_header) == AETHER_OK &&
+        staged->pmx_aux_header.is_pmx != 0U) {
+        const auto& ph = staged->pmx_aux_header;
+        staged->pmx_sdef_vertices.resize(ph.sdef_vertex_count);
+        staged->pmx_bone_exts.resize(ph.bone_ext_count);
+        staged->pmx_ik_links.resize(ph.ik_link_count);
+        staged->pmx_morph_channels.resize(ph.morph_channel_count);
+        staged->pmx_group_children.resize(ph.group_child_count);
+        staged->pmx_uv_morphs.resize(ph.uv_morph_count);
+        staged->pmx_mat_morphs.resize(ph.mat_morph_count);
+        staged->pmx_bone_morphs.resize(ph.bone_morph_count);
+        staged->pmx_rigid_bodies.resize(ph.rigid_body_count);
+        staged->pmx_constraints_6dof.resize(ph.constraint_6dof_count);
+
+        AetherPmxAuxSlices pmx_slices{};
+        pmx_slices.struct_size = sizeof(AetherPmxAuxSlices);
+        pmx_slices.sdef_vertices = staged->pmx_sdef_vertices.empty() ? nullptr : staged->pmx_sdef_vertices.data();
+        pmx_slices.sdef_vertex_cap = ph.sdef_vertex_count;
+        pmx_slices.bone_exts = staged->pmx_bone_exts.empty() ? nullptr : staged->pmx_bone_exts.data();
+        pmx_slices.bone_ext_cap = ph.bone_ext_count;
+        pmx_slices.ik_links = staged->pmx_ik_links.empty() ? nullptr : staged->pmx_ik_links.data();
+        pmx_slices.ik_link_cap = ph.ik_link_count;
+        pmx_slices.morph_channels = staged->pmx_morph_channels.empty() ? nullptr : staged->pmx_morph_channels.data();
+        pmx_slices.morph_channel_cap = ph.morph_channel_count;
+        pmx_slices.group_children = staged->pmx_group_children.empty() ? nullptr : staged->pmx_group_children.data();
+        pmx_slices.group_child_cap = ph.group_child_count;
+        pmx_slices.uv_morphs = staged->pmx_uv_morphs.empty() ? nullptr : staged->pmx_uv_morphs.data();
+        pmx_slices.uv_morph_cap = ph.uv_morph_count;
+        pmx_slices.mat_morphs = staged->pmx_mat_morphs.empty() ? nullptr : staged->pmx_mat_morphs.data();
+        pmx_slices.mat_morph_cap = ph.mat_morph_count;
+        pmx_slices.bone_morphs = staged->pmx_bone_morphs.empty() ? nullptr : staged->pmx_bone_morphs.data();
+        pmx_slices.bone_morph_cap = ph.bone_morph_count;
+        pmx_slices.rigid_bodies = staged->pmx_rigid_bodies.empty() ? nullptr : staged->pmx_rigid_bodies.data();
+        pmx_slices.rigid_body_cap = ph.rigid_body_count;
+        pmx_slices.constraints_6dof =
+            staged->pmx_constraints_6dof.empty() ? nullptr : staged->pmx_constraints_6dof.data();
+        pmx_slices.constraint_6dof_cap = ph.constraint_6dof_count;
+
+        (void)aether_loader_fill_pmx_aux(loader, &pmx_slices);
+    }
+
     close_loader();
 
     // Verify REQ-FFI-010 zero-copy pointer identity for every populated stream.

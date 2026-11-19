@@ -188,7 +188,40 @@ struct GpuFrameGlobals {
     uint64_t reservoir_prev_bda;
     uint2 studio_aux_u32;
     float4 stage_camera_params; // x=is_orthographic, y=ortho_height, z=stage_diag_mode, w=stage_fast_panning
+    uint64_t joint_mats_bda;
+    uint64_t pmx_sdef_bda;
+    uint64_t skin_buf_bda;
+    uint64_t uv_delta_bda;
+    uint64_t material_grade_bda;
+    uint64_t _phase3_pad_bda;
     GpuLight lights[8];
+};
+
+struct GpuPmxSdef {
+    float3 c;
+    uint flags;
+    float3 r0;
+    float _pad0;
+    float3 r1;
+    float _pad1;
+};
+
+struct GpuVertexSkin {
+    uint4 joints_packed;
+    uint4 weights_packed;
+};
+
+struct GpuJointMat3x4 {
+    float4 row0;
+    float4 row1;
+    float4 row2;
+};
+
+struct GpuMaterialGrade {
+    float4 uv_scale_offset; // [scale_x, scale_y, offset_x, offset_y]
+    float4 grade_hsbc;      // [hue_shift_deg, saturation, brightness, contrast]
+    float4 grade_tint;      // [tint_r, tint_g, tint_b, tint_strength]
+    float4 dynamic_params;  // [emissive_intensity, blush_alpha, rim_boost, flags]
 };
 
 #ifdef __TARGET_SPIRV__

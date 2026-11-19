@@ -47,11 +47,14 @@ enum ImageKind {
     Bmp,
     Tga,
     Dds,
+    Ktx2,
 }
 
 fn detect_image_kind(bytes: &[u8]) -> Option<ImageKind> {
     if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
         Some(ImageKind::Png)
+    } else if bytes.len() >= 12 && &bytes[..12] == b"\xABKTX 20\xBB\r\n\x1A\n" {
+        Some(ImageKind::Ktx2)
     } else if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
         Some(ImageKind::Jpeg)
     } else if bytes.len() >= 26 && &bytes[..2] == b"BM" {
@@ -114,6 +117,14 @@ fn probe_dims_from_header(bytes: &[u8]) -> Result<Option<(u32, u32)>, LoaderErro
         ImageKind::Dds => {
             let h = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
             let w = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+            (w, h)
+        }
+        ImageKind::Ktx2 => {
+            if bytes.len() < 80 {
+                return Ok(None);
+            }
+            let w = u32::from_le_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+            let h = u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]).max(1);
             (w, h)
         }
     };
@@ -534,13 +545,156 @@ fn decode_tga_into(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool 
     false
 }
 
+fn decode_rgb565(c: u16) -> [u8; 3] {
+    let r = (((c >> 11) & 0x1F) as u32 * 255 + 15) / 31;
+    let g = (((c >> 5) & 0x3F) as u32 * 255 + 31) / 63;
+    let b = ((c & 0x1F) as u32 * 255 + 15) / 31;
+    [r as u8, g as u8, b as u8]
+}
+
+fn decode_bc1_or_bc3_blocks(
+    blocks: &[u8],
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    is_bc3: bool,
+) -> bool {
+    let w = width as usize;
+    let h = height as usize;
+    let bx_cnt = w.div_ceil(4);
+    let by_cnt = h.div_ceil(4);
+    let blk_sz = if is_bc3 { 16 } else { 8 };
+    if blocks.len() < bx_cnt * by_cnt * blk_sz || dst.len() < w * h * 4 {
+        return false;
+    }
+    for by in 0..by_cnt {
+        for bx in 0..bx_cnt {
+            let b_off = (by * bx_cnt + bx) * blk_sz;
+            let blk = &blocks[b_off..b_off + blk_sz];
+            let mut alphas = [255u8; 16];
+            let c_slice = if is_bc3 {
+                let a0 = blk[0];
+                let a1 = blk[1];
+                let mut a_pal = [0u8; 8];
+                a_pal[0] = a0;
+                a_pal[1] = a1;
+                if a0 > a1 {
+                    for k in 1..=6u32 {
+                        a_pal[(k + 1) as usize] =
+                            (((7 - k) * u32::from(a0) + k * u32::from(a1) + 3) / 7) as u8;
+                    }
+                } else {
+                    for k in 1..=4u32 {
+                        a_pal[(k + 1) as usize] =
+                            (((5 - k) * u32::from(a0) + k * u32::from(a1) + 2) / 5) as u8;
+                    }
+                    a_pal[6] = 0;
+                    a_pal[7] = 255;
+                }
+                let mut a_bits = 0u64;
+                for i in 0..6 {
+                    a_bits |= u64::from(blk[2 + i]) << (i * 8);
+                }
+                for (i, slot) in alphas.iter_mut().enumerate() {
+                    let idx = ((a_bits >> (i * 3)) & 0x7) as usize;
+                    *slot = a_pal[idx];
+                }
+                &blk[8..16]
+            } else {
+                &blk[0..8]
+            };
+
+            let c0_u16 = u16::from_le_bytes([c_slice[0], c_slice[1]]);
+            let c1_u16 = u16::from_le_bytes([c_slice[2], c_slice[3]]);
+            let rgb0 = decode_rgb565(c0_u16);
+            let rgb1 = decode_rgb565(c1_u16);
+            let mut c_pal = [[0u8; 4]; 4];
+            c_pal[0] = [rgb0[0], rgb0[1], rgb0[2], 255];
+            c_pal[1] = [rgb1[0], rgb1[1], rgb1[2], 255];
+            if c0_u16 > c1_u16 || is_bc3 {
+                for ch in 0..3 {
+                    c_pal[2][ch] =
+                        ((2 * u32::from(rgb0[ch]) + u32::from(rgb1[ch]) + 1) / 3) as u8;
+                    c_pal[3][ch] =
+                        ((u32::from(rgb0[ch]) + 2 * u32::from(rgb1[ch]) + 1) / 3) as u8;
+                }
+                c_pal[2][3] = 255;
+                c_pal[3][3] = 255;
+            } else {
+                for ch in 0..3 {
+                    c_pal[2][ch] = u8::midpoint(rgb0[ch], rgb1[ch]);
+                }
+                c_pal[2][3] = 255;
+                c_pal[3] = [0, 0, 0, 0];
+            }
+            let lut = u32::from_le_bytes([c_slice[4], c_slice[5], c_slice[6], c_slice[7]]);
+            for py in 0..4 {
+                let y = by * 4 + py;
+                if y >= h {
+                    continue;
+                }
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    if x >= w {
+                        continue;
+                    }
+                    let t_i = py * 4 + px;
+                    let c_idx = ((lut >> (t_i * 2)) & 0x3) as usize;
+                    let mut rgba = c_pal[c_idx];
+                    if is_bc3 {
+                        rgba[3] = alphas[t_i];
+                    }
+                    let out_off = (y * w + x) * 4;
+                    dst[out_off..out_off + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+    true
+}
+
 fn decode_dds_into(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool {
     if src.len() < 128 || &src[..4] != b"DDS " {
         return false;
     }
     let pf_flags = u32::from_le_bytes([src[80], src[81], src[82], src[83]]);
+    let fourcc = &src[84..88];
     let bpp = u32::from_le_bytes([src[88], src[89], src[90], src[91]]);
     let r_mask = u32::from_le_bytes([src[92], src[93], src[94], src[95]]);
+    if (pf_flags & 0x04) != 0 {
+        let data_off = if fourcc == b"DX10" { 148 } else { 128 };
+        let Some(blocks) = src.get(data_off..) else {
+            return false;
+        };
+        if fourcc == b"DXT1" {
+            return decode_bc1_or_bc3_blocks(blocks, dst, width, height, false);
+        }
+        if fourcc == b"DXT5" || fourcc == b"DXT3" {
+            return decode_bc1_or_bc3_blocks(blocks, dst, width, height, true);
+        }
+        if fourcc == b"DX10" && src.len() >= 148 {
+            let dxgi_fmt = u32::from_le_bytes([src[128], src[129], src[130], src[131]]);
+            // DXGI_FORMAT_R8G8B8A8_UNORM (28) / SRGB (29) / B8G8R8A8 (87 / 91)
+            let px_count = (width as usize) * (height as usize);
+            if matches!(dxgi_fmt, 28 | 29 | 87 | 91) && blocks.len() >= px_count * 4 {
+                if matches!(dxgi_fmt, 87 | 91) {
+                    for (i, out) in dst[..px_count * 4].chunks_exact_mut(4).enumerate() {
+                        let s = &blocks[i * 4..i * 4 + 4];
+                        out.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+                    }
+                } else {
+                    dst[..px_count * 4].copy_from_slice(&blocks[..px_count * 4]);
+                }
+                return true;
+            }
+            if matches!(dxgi_fmt, 71 | 72) {
+                return decode_bc1_or_bc3_blocks(blocks, dst, width, height, false);
+            }
+            if matches!(dxgi_fmt, 77 | 78) {
+                return decode_bc1_or_bc3_blocks(blocks, dst, width, height, true);
+            }
+        }
+    }
     // Support uncompressed 32-bit RGB/RGBA/BGRA payloads (`DDPF_RGB = 0x40`)
     if (pf_flags & 0x40) == 0 || bpp != 32 {
         return false;
@@ -564,6 +718,50 @@ fn decode_dds_into(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool 
     true
 }
 
+fn decode_ktx2_into(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool {
+    if src.len() < 104 || &src[..12] != b"\xABKTX 20\xBB\r\n\x1A\n" {
+        return false;
+    }
+    let vk_format = u32::from_le_bytes([src[12], src[13], src[14], src[15]]);
+    let supercomp = u32::from_le_bytes([src[44], src[45], src[46], src[47]]);
+    if supercomp != 0 {
+        return false;
+    }
+    // Level 0 index entry starts at byte 80: byteOffset (u64), byteLength (u64), uncompressedByteLength (u64)
+    let lvl_off = usize::try_from(u64::from_le_bytes([
+        src[80], src[81], src[82], src[83], src[84], src[85], src[86], src[87],
+    ]))
+    .unwrap_or(0);
+    let lvl_len = usize::try_from(u64::from_le_bytes([
+        src[88], src[89], src[90], src[91], src[92], src[93], src[94], src[95],
+    ]))
+    .unwrap_or(0);
+    let Some(payload) = src.get(lvl_off..lvl_off.saturating_add(lvl_len)) else {
+        return false;
+    };
+    let px_count = (width as usize) * (height as usize);
+    // VK_FORMAT_R8G8B8A8_UNORM (37) / SRGB (43) / B8G8R8A8_UNORM (44) / SRGB (50)
+    if matches!(vk_format, 37 | 43 | 0) && payload.len() >= px_count * 4 {
+        dst[..px_count * 4].copy_from_slice(&payload[..px_count * 4]);
+        return true;
+    }
+    if matches!(vk_format, 44 | 50) && payload.len() >= px_count * 4 {
+        for (i, out) in dst[..px_count * 4].chunks_exact_mut(4).enumerate() {
+            let s = &payload[i * 4..i * 4 + 4];
+            out.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+        }
+        return true;
+    }
+    // VK_FORMAT_BC1_RGB/RGBA (131..134), VK_FORMAT_BC3 (137..138)
+    if (131..=134).contains(&vk_format) {
+        return decode_bc1_or_bc3_blocks(payload, dst, width, height, false);
+    }
+    if matches!(vk_format, 137 | 138) {
+        return decode_bc1_or_bc3_blocks(payload, dst, width, height, true);
+    }
+    false
+}
+
 fn decode_raw_bytes_into(tex: &RawTextureDesc, src: &[u8], dst: &mut [u8]) -> bool {
     match detect_image_kind(src) {
         Some(ImageKind::Png) => decode_png_into(src, dst, tex.width, tex.height),
@@ -571,8 +769,54 @@ fn decode_raw_bytes_into(tex: &RawTextureDesc, src: &[u8], dst: &mut [u8]) -> bo
         Some(ImageKind::Bmp) => decode_bmp_into(src, dst, tex.width, tex.height),
         Some(ImageKind::Tga) => decode_tga_into(src, dst, tex.width, tex.height),
         Some(ImageKind::Dds) => decode_dds_into(src, dst, tex.width, tex.height),
+        Some(ImageKind::Ktx2) => decode_ktx2_into(src, dst, tex.width, tex.height),
         None => false,
     }
+}
+
+/// Decodes a standalone local texture file (`.png/.jpg/.tga/.bmp/.dds/.ktx2/.spa/.sph`) into RGBA8.
+pub fn decode_image_file_rgba(
+    path: &Path,
+    srgb: bool,
+) -> Result<(u32, u32, u32, Vec<u8>), LoaderError> {
+    let meta = fs::metadata(path).map_err(|_| LoaderError::Io("failed to stat texture file"))?;
+    if !meta.is_file() || meta.len() == 0 {
+        return Err(LoaderError::Io("texture path is not a non-empty file"));
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(LoaderError::LimitExceeded("texture file exceeds size cap"));
+    }
+    let bytes = fs::read(path).map_err(|_| LoaderError::Io("failed to read texture file"))?;
+    let (w, h) = probe_dims_from_header(&bytes)?
+        .ok_or(LoaderError::Parse("unsupported or corrupted texture header"))?;
+    let byte_len = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(LoaderError::LimitExceeded("texture RGBA buffer overflow"))?;
+    let mut rgba = vec![0u8; byte_len];
+    let dummy_desc = RawTextureDesc {
+        name: String::new(),
+        source: RawTextureSource::Missing,
+        width: w,
+        height: h,
+        srgb,
+        usage_flags: aether_ffi::AETHER_TEX_USAGE_COLOR,
+        content_hash_lo: 0,
+        rgba_byte_len: byte_len as u64,
+        cached_bc7_path: None,
+        cached_bc7_byte_len: 0,
+        pixel_offset: 0,
+        pixel_size: byte_len as u64,
+        final_format: if srgb {
+            AETHER_TEX_FORMAT_RGBA8_SRGB
+        } else {
+            AETHER_TEX_FORMAT_RGBA8_UNORM
+        },
+    };
+    if !decode_raw_bytes_into(&dummy_desc, &bytes, &mut rgba) {
+        return Err(LoaderError::Parse("failed to decode texture pixels"));
+    }
+    Ok((w, h, dummy_desc.final_format, rgba))
 }
 
 /// Decodes all textures directly into disjoint sub-slices of C++-lent `TEXTURE_PIXELS`

@@ -360,3 +360,130 @@ pub const AETHER_LIGHT_CHANNEL_BODY: u32 = 1u32 << 2;
 pub const AETHER_LIGHT_CHANNEL_CATCHLIGHT: u32 = 1u32 << 3;
 /// Default light channel mask enabling all channels (`0x0F`).
 pub const AETHER_LIGHT_CHANNEL_ALL: u32 = 0x0Fu32;
+
+/// Host command kind: push parsed VRM/PMX material & bone metadata JSON (`payload_utf8`).
+pub const AETHER_HOST_CMD_SET_MODEL_METADATA_JSON: u32 = 11;
+
+/// Compact live pin summary value kind: parsed model material table (`[count, hash, 0, 0]`).
+pub const AETHER_PIN_VALUE_MAT_TABLE: u8 = 11;
+/// Compact live pin summary value kind: material override handle (`[slot_idx, override_mask, profile, 0]`).
+pub const AETHER_PIN_VALUE_MAT_OVERRIDE: u8 = 12;
+/// Compact live pin summary value kind: 64-bit texture handle (`[lo_u32, hi_u32, srgb, grade_active]`).
+pub const AETHER_PIN_VALUE_TEX_HANDLE: u8 = 13;
+
+/// Maximum per-frame non-destructive material override records emitted by the node graph.
+pub const AETHER_MAX_MATERIAL_OVERRIDES: usize = 64;
+/// Number of overrideable texture slots per material (`Albedo, ShadeTex, FaceSDF, Normal, Roughness, Emissive`).
+pub const AETHER_TEX_SLOT_COUNT: usize = 6;
+/// Sentinel 64-bit [`AetherTextureHandle`] flag marking a live `Spout2` input stream.
+pub const AETHER_TEX_HANDLE_SPOUT_BIT: u64 = 1u64 << 63;
+
+/// Preserve existing auto-classified / authored material shader profile.
+pub const AETHER_MAT_PROFILE_KEEP: u32 = 0xFFFF_FFFF;
+/// Shader profile: `2.5D Skin SDF`.
+pub const AETHER_MAT_PROFILE_SKIN_SDF: u32 = 0;
+/// Shader profile: `Dual-Lobe Hair`.
+pub const AETHER_MAT_PROFILE_DUAL_LOBE_HAIR: u32 = 1;
+/// Shader profile: `Micro-PBR Cloth`.
+pub const AETHER_MAT_PROFILE_MICRO_PBR_CLOTH: u32 = 2;
+/// Shader profile: `Eye Caustic`.
+pub const AETHER_MAT_PROFILE_EYE_CAUSTIC: u32 = 3;
+/// Shader profile: `Metallic` (GGX + stepped specular).
+pub const AETHER_MAT_PROFILE_METALLIC: u32 = 4;
+/// Shader profile: `Glass` (translucent Fresnel highlight).
+pub const AETHER_MAT_PROFILE_GLASS: u32 = 5;
+/// Shader profile: `Emissive` (self-lit HDR glow).
+pub const AETHER_MAT_PROFILE_EMISSIVE: u32 = 6;
+
+/// Texture slot target: Base Albedo (`0`).
+pub const AETHER_TEX_SLOT_ALBEDO: u32 = 0;
+/// Texture slot target: `MToon` Shade Texture (`1`).
+pub const AETHER_TEX_SLOT_SHADE: u32 = 1;
+/// Texture slot target: Face SDF Shadow Threshold (`2`).
+pub const AETHER_TEX_SLOT_FACE_SDF: u32 = 2;
+/// Texture slot target: Tangent-Space Normal Map (`3`).
+pub const AETHER_TEX_SLOT_NORMAL: u32 = 3;
+/// Texture slot target: Micro-PBR Roughness / Sphere Map (`4`).
+pub const AETHER_TEX_SLOT_ROUGHNESS: u32 = 4;
+/// Texture slot target: Emissive Mask (`5`).
+pub const AETHER_TEX_SLOT_EMISSIVE: u32 = 5;
+
+/// `AetherMaterialOverrideEntry.override_mask` bit: Shader Profile.
+pub const AETHER_MAT_OVR_PROFILE: u32 = 1u32 << 0;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Shade Color.
+pub const AETHER_MAT_OVR_SHADE_COLOR: u32 = 1u32 << 1;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Shade Shift.
+pub const AETHER_MAT_OVR_SHADE_SHIFT: u32 = 1u32 << 2;
+/// `AetherMaterialOverrideEntry.override_mask` bit: SSS Fringe.
+pub const AETHER_MAT_OVR_SSS_FRINGE: u32 = 1u32 << 3;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Outline Scale.
+pub const AETHER_MAT_OVR_OUTLINE_SCALE: u32 = 1u32 << 4;
+/// `AetherMaterialOverrideEntry.override_mask` bit: RT Shadow Mask.
+pub const AETHER_MAT_OVR_RT_SHADOW_MASK: u32 = 1u32 << 5;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Emissive Intensity multiplier/boost.
+pub const AETHER_MAT_OVR_EMISSIVE: u32 = 1u32 << 6;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Blush Alpha overlay.
+pub const AETHER_MAT_OVR_BLUSH_ALPHA: u32 = 1u32 << 7;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Rim Boost multiplier.
+pub const AETHER_MAT_OVR_RIM_BOOST: u32 = 1u32 << 8;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Texture Handle slot overrides.
+pub const AETHER_MAT_OVR_TEXTURE: u32 = 1u32 << 9;
+/// `AetherMaterialOverrideEntry.override_mask` bit: Real-time GPU `TextureGrade` HSV/Brightness/Contrast/Tint/UV.
+pub const AETHER_MAT_OVR_GRADE: u32 = 1u32 << 10;
+
+/// Dynamic material driver signal source: live Audio RMS envelope (`[0, 1]`).
+pub const AETHER_DYN_SIG_AUDIO_RMS: u32 = 0;
+/// Dynamic material driver signal source: `ARKit` / `Live2D` Expression Weight (`[0, 1]`).
+pub const AETHER_DYN_SIG_EXPRESSION: u32 = 1;
+/// Dynamic material driver signal source: Circadian Clock normalized factor (`[0, 1]`).
+pub const AETHER_DYN_SIG_CIRCADIAN: u32 = 2;
+/// Dynamic material driver signal source: Connected `signal_in` pin.
+pub const AETHER_DYN_SIG_PIN: u32 = 3;
+
+/// Dynamic material driver target: `Emissive Intensity`.
+pub const AETHER_DYN_TGT_EMISSIVE_INTENSITY: u32 = 0;
+/// Dynamic material driver target: `Blush Alpha`.
+pub const AETHER_DYN_TGT_BLUSH_ALPHA: u32 = 1;
+/// Dynamic material driver target: `Rim Boost`.
+pub const AETHER_DYN_TGT_RIM_BOOST: u32 = 2;
+
+/// `AetherNprMaterial.flags` bit 12: Eye/Iris material classification.
+pub const AETHER_MAT_FLAG_EYE_IRIS: u32 = 1u32 << 12;
+/// `AetherNprMaterial.flags` bit 13: Body/Neck skin material classification.
+pub const AETHER_MAT_FLAG_BODY_SKIN: u32 = 1u32 << 13;
+/// `AetherNprMaterial.flags` bit 16: Explicit shader profile tag present in bits `17..19`.
+pub const AETHER_MAT_FLAG_HAS_PROFILE: u32 = 1u32 << 16;
+/// Shift for encoded `AETHER_MAT_PROFILE_*` inside `AetherNprMaterial.flags` bits `17..19`.
+pub const AETHER_MAT_FLAG_PROFILE_SHIFT: u32 = 17;
+
+/// PMX bone append flag: rotational append (`付与回転`, `0x0100`).
+pub const AETHER_PMX_APPEND_ROT: u32 = 1u32 << 0;
+/// PMX bone append flag: translational append (`付与移動`, `0x0200`).
+pub const AETHER_PMX_APPEND_MOVE: u32 = 1u32 << 1;
+/// PMX bone append flag: local parent append source (`0x0080`).
+pub const AETHER_PMX_APPEND_LOCAL: u32 = 1u32 << 2;
+
+/// PMX morph type discriminator matching binary spec (`0=Group, 1=Vertex, 2=Bone, 3=UV, 8=Material`).
+pub const AETHER_PMX_MORPH_GROUP: u32 = 0;
+/// PMX vertex position morph.
+pub const AETHER_PMX_MORPH_VERTEX: u32 = 1;
+/// PMX bone translation + rotation morph.
+pub const AETHER_PMX_MORPH_BONE: u32 = 2;
+/// PMX primary/additional UV coordinate morph.
+pub const AETHER_PMX_MORPH_UV: u32 = 3;
+/// PMX material color/alpha/emissive/edge morph.
+pub const AETHER_PMX_MORPH_MATERIAL: u32 = 8;
+
+/// PMX `RigidBody` physics mode: bone-following kinematic (`0`).
+pub const AETHER_PMX_RB_KINEMATIC: u32 = 0;
+/// PMX `RigidBody` physics mode: pure dynamic physics (`1`).
+pub const AETHER_PMX_RB_DYNAMIC: u32 = 1;
+/// PMX `RigidBody` physics mode: dynamic physics aligned to bone pivot (`2`).
+pub const AETHER_PMX_RB_DYNAMIC_BONE: u32 = 2;
+
+/// PMX `RigidBody` collision shape: sphere (`0`).
+pub const AETHER_PMX_SHAPE_SPHERE: u32 = 0;
+/// PMX `RigidBody` collision shape: box (`1`).
+pub const AETHER_PMX_SHAPE_BOX: u32 = 1;
+/// PMX `RigidBody` collision shape: capsule (`2`).
+pub const AETHER_PMX_SHAPE_CAPSULE: u32 = 2;

@@ -24,6 +24,11 @@
 
 namespace aether::app {
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 struct SkinningSnapshot {
     aether::animation::SkinningFrame frame{};
     AetherGraphOutputs outputs{};
@@ -42,7 +47,12 @@ struct SkinningSnapshot {
         spring_segments{};
     std::array<float, 3> hair_velocity_ws{0.0f, 0.0f, 0.0f};
     uint32_t reserved_pad2_{0};
+    AetherMaterialOverrideBuffer material_overrides{};
 };
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 struct TrackingHudSnapshot {
     bool enabled{false};

@@ -1,26 +1,37 @@
-//! Safe pure-Rust bounds-checked PMX 2.0/2.1 and PMD 1.0 (Shift-JIS) parser (`§6.2`).
+//! Safe pure-Rust bounds-checked PMX 2.0/2.1 (`aether-asset-pmx`) and PMD 1.0 (Shift-JIS) adapter (`§6.2`).
 //!
 //! Converts MMD left-handed coordinates & clockwise winding into AETHER right-handed Y-up metres
-//! (`z = -z`, triangle winding reversed, `pos * 0.08`) and extracts Bullet rigid bodies & constraints.
+//! (`z = -z`, triangle winding reversed, `pos * 0.08`) and extracts `SDEF`, `Append`, `CCD-IK`,
+//! all 5 morph types (`Group`, `Vertex`, `Bone`, `UV`, `Material`), Ray-MMD material classification,
+//! and Bullet `RigidBody` + `6-DOF Spring Joint` constraints.
 
 use std::path::Path;
 
+use aether_asset_pmx::{
+    MMD_TO_METRES, PmxError, PmxMorphData, PmxWeightType, parse_pmx_bytes, pmx_fnv1a_lower,
+};
 use aether_ffi::{
     AETHER_ALPHA_MODE_OPAQUE, AETHER_COLLIDER_SHAPE_CAPSULE, AETHER_COLLIDER_SHAPE_SPHERE,
-    AETHER_SOURCE_FORMAT_PMD, AETHER_SOURCE_FORMAT_PMX,
+    AETHER_INVALID_INDEX, AETHER_PMX_MORPH_BONE, AETHER_PMX_MORPH_GROUP, AETHER_PMX_MORPH_MATERIAL,
+    AETHER_PMX_MORPH_UV, AETHER_PMX_MORPH_VERTEX, AETHER_SOURCE_FORMAT_PMD,
+    AETHER_SOURCE_FORMAT_PMX, AetherPmxBoneExt, AetherPmxBoneMorphOffset,
+    AetherPmxConstraint6DofDesc, AetherPmxGroupMorphChild, AetherPmxIkLink,
+    AetherPmxMaterialMorphDelta, AetherPmxMorphChannelDesc, AetherPmxRigidBodyDesc,
+    AetherPmxSdefVertex, AetherPmxUvMorphDelta,
 };
 use encoding_rs::SHIFT_JIS;
 
 use crate::LoaderError;
 use crate::ir::{
     ParsedAvatar, RawCollider, RawExprPreset, RawJoint, RawMaterial, RawMorphDeltaItem,
-    RawMorphTarget, RawSpringChain, RawSpringNode, RawSubmesh, RawTextureDesc, RawTextureSource,
-    RawVertex, SourceUnitMetadata,
+    RawMorphTarget, RawPmxAux, RawSpringChain, RawSpringNode, RawSubmesh, RawTextureDesc,
+    RawTextureSource, RawVertex, SourceUnitMetadata,
 };
 use crate::limits::{
     MAX_COLLIDERS, MAX_MATERIALS, MAX_MORPH_DELTAS, check_bone_count, check_index_count,
     check_morph_count, check_vertex_count,
 };
+use crate::retarget::map_preset_to_slots;
 
 struct Cursor<'a> {
     data: &'a [u8],
@@ -54,19 +65,9 @@ impl<'a> Cursor<'a> {
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
-    fn i16_le(&mut self) -> Result<i16, LoaderError> {
-        let b = self.take(2)?;
-        Ok(i16::from_le_bytes([b[0], b[1]]))
-    }
-
     fn u32_le(&mut self) -> Result<u32, LoaderError> {
         let b = self.take(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    fn i32_le(&mut self) -> Result<i32, LoaderError> {
-        let b = self.take(4)?;
-        Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     fn f32_le(&mut self) -> Result<f32, LoaderError> {
@@ -94,42 +95,6 @@ impl<'a> Cursor<'a> {
             self.f32_le()?,
         ])
     }
-
-    fn pmx_text(&mut self, encoding: u8) -> Result<String, LoaderError> {
-        let byte_len = usize::try_from(self.i32_le()?.max(0))
-            .map_err(|_| LoaderError::Parse("pmx text negative len"))?;
-        if byte_len > 1024 * 1024 {
-            return Err(LoaderError::LimitExceeded("pmx string > 1 MiB"));
-        }
-        let bytes = self.take(byte_len)?;
-        if encoding == 1 {
-            Ok(String::from_utf8_lossy(bytes).into_owned())
-        } else {
-            let mut u16s = Vec::with_capacity(bytes.len() / 2);
-            for chunk in bytes.chunks_exact(2) {
-                u16s.push(u16::from_le_bytes([chunk[0], chunk[1]]));
-            }
-            Ok(String::from_utf16_lossy(&u16s))
-        }
-    }
-
-    fn pmx_signed_idx(&mut self, size: u8) -> Result<i32, LoaderError> {
-        match size {
-            1 => Ok(i32::from(self.u8()? as i8)),
-            2 => Ok(i32::from(self.i16_le()?)),
-            4 => self.i32_le(),
-            _ => Err(LoaderError::Parse("invalid pmx index byte size")),
-        }
-    }
-
-    fn pmx_unsigned_idx(&mut self, size: u8) -> Result<u32, LoaderError> {
-        match size {
-            1 => Ok(u32::from(self.u8()?)),
-            2 => Ok(u32::from(self.u16_le()?)),
-            4 => self.u32_le(),
-            _ => Err(LoaderError::Parse("invalid pmx vertex index byte size")),
-        }
-    }
 }
 
 fn decode_sjis_cstr(raw: &[u8]) -> String {
@@ -153,157 +118,65 @@ fn flip_z(v: [f32; 3]) -> [f32; 3] {
     [v[0], v[1], -v[2]]
 }
 
-const MMD_TO_METRES: f32 = 0.08;
-
-struct RawRb {
-    bone: i32,
-    group: u8,
-    shape: u8,
-    size: [f32; 3],
-    pos: [f32; 3],
-    ang_damp: f32,
-    phys_mode: u8,
-}
-
 fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> {
-    let mut cur = Cursor::new(data);
-    let sig = cur.take(4)?;
-    if sig != b"PMX " {
-        return Err(LoaderError::Parse("bad PMX magic"));
-    }
-    let version = cur.f32_le()?;
-    if !(1.9..=2.2).contains(&version) {
-        return Err(LoaderError::Parse("unsupported PMX version"));
-    }
-    let globals_len = usize::from(cur.u8()?);
-    if !(8..=32).contains(&globals_len) {
-        return Err(LoaderError::Parse("invalid PMX globals length"));
-    }
-    let globals = cur.take(globals_len)?;
-    let enc = globals[0];
-    let add_uv4 = usize::from(globals[1].min(4));
-    let v_idx_sz = globals[2];
-    let tex_idx_sz = globals[3];
-    let mat_idx_sz = globals[4];
-    let bone_idx_sz = globals[5];
-    let morph_idx_sz = globals[6];
-    let rb_idx_sz = globals[7];
+    let doc = parse_pmx_bytes(data).map_err(|e| match e {
+        PmxError::Parse(msg) => LoaderError::Parse(msg),
+        PmxError::LimitExceeded(msg) => LoaderError::LimitExceeded(msg),
+    })?;
 
-    // Model info
-    let _name_jp = cur.pmx_text(enc)?;
-    let _name_en = cur.pmx_text(enc)?;
-    let _comment_jp = cur.pmx_text(enc)?;
-    let _comment_en = cur.pmx_text(enc)?;
+    check_vertex_count(doc.vertices.len())?;
+    check_index_count(doc.indices.len())?;
+    check_bone_count(doc.bones.len())?;
+    check_morph_count(doc.morphs.len())?;
+    if doc.materials.len() > MAX_MATERIALS || doc.texture_paths.len() > MAX_MATERIALS {
+        return Err(LoaderError::LimitExceeded("PMX material/texture count > 1024"));
+    }
 
-    // Vertices
-    let vert_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative vertex count"))?;
-    check_vertex_count(vert_count)?;
-    let mut vertices = Vec::with_capacity(vert_count);
-
-    for _ in 0..vert_count {
-        let p = flip_z(cur.vec3()?);
-        let n = flip_z(cur.vec3()?);
-        let uv0 = cur.vec2()?;
-        let mut uv1 = [0.0, 0.0];
-        for k in 0..add_uv4 {
-            let v4 = cur.vec4()?;
-            if k == 0 {
-                uv1 = [v4[0], v4[1]];
-            }
-        }
-        let wt_type = cur.u8()?;
+    let mut vertices = Vec::with_capacity(doc.vertices.len());
+    let mut sdef_vertices = Vec::with_capacity(doc.vertices.len());
+    let mut any_sdef = false;
+    for pv in &doc.vertices {
         let mut joints = [0u16; 8];
         let mut weights = [0.0f32; 8];
-        match wt_type {
-            0 => {
-                // BDEF1
-                let b0 = cur.pmx_signed_idx(bone_idx_sz)?.max(0) as u16;
-                joints[0] = b0;
-                weights[0] = 1.0;
-            }
-            1 | 3 => {
-                // BDEF2 / SDEF
-                let b0 = cur.pmx_signed_idx(bone_idx_sz)?.max(0) as u16;
-                let b1 = cur.pmx_signed_idx(bone_idx_sz)?.max(0) as u16;
-                let w0 = cur.f32_le()?;
-                if wt_type == 3 {
-                    let _c = cur.vec3()?;
-                    let _r0 = cur.vec3()?;
-                    let _r1 = cur.vec3()?;
-                }
-                joints[0] = b0;
-                joints[1] = b1;
-                weights[0] = w0;
-                weights[1] = 1.0 - w0;
-            }
-            2 | 4 => {
-                // BDEF4 / QDEF
-                for slot in &mut joints[..4] {
-                    *slot = cur.pmx_signed_idx(bone_idx_sz)?.max(0) as u16;
-                }
-                for slot in &mut weights[..4] {
-                    *slot = cur.f32_le()?;
-                }
-            }
-            _ => return Err(LoaderError::Parse("unsupported PMX weight deform type")),
+        joints[..4].copy_from_slice(&pv.joints);
+        weights[..4].copy_from_slice(&pv.weights);
+        let is_sdef = pv.weight_type == PmxWeightType::Sdef;
+        if is_sdef {
+            any_sdef = true;
         }
-        let edge_scale = cur.f32_le()?;
+        sdef_vertices.push(AetherPmxSdefVertex {
+            c: pv.sdef_c_m,
+            flags: u32::from(is_sdef),
+            r0: pv.sdef_r0_m,
+            _pad0: 0,
+            r1: pv.sdef_r1_m,
+            _pad1: 0,
+        });
         vertices.push(RawVertex {
-            position: [
-                p[0] * MMD_TO_METRES,
-                p[1] * MMD_TO_METRES,
-                p[2] * MMD_TO_METRES,
-            ],
-            normal: n,
-            uv0,
-            uv1,
+            position: pv.position_m,
+            normal: pv.normal,
+            uv0: pv.uv0,
+            uv1: pv.uv1,
             color: [255, 255, 255, 255],
             joints,
             weights,
-            edge_scale: edge_scale.clamp(0.0, 4.0),
+            edge_scale: pv.edge_scale,
             flatten_override: -1.0,
         });
     }
-
-    // Surfaces (reverse triangle winding i0, i2, i1 for LH -> RH flip)
-    let index_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative surface count"))?;
-    check_index_count(index_count)?;
-    if index_count % 3 != 0 {
-        return Err(LoaderError::Parse("PMX index count not multiple of 3"));
-    }
-    let mut raw_indices = Vec::with_capacity(index_count);
-    for tri in 0..(index_count / 3) {
-        let i0 = cur.pmx_unsigned_idx(v_idx_sz)?;
-        let i1 = cur.pmx_unsigned_idx(v_idx_sz)?;
-        let i2 = cur.pmx_unsigned_idx(v_idx_sz)?;
-        if (i0 as usize) >= vert_count || (i1 as usize) >= vert_count || (i2 as usize) >= vert_count
-        {
-            return Err(LoaderError::Parse("PMX vertex index out of bounds"));
-        }
-        let _ = tri;
-        raw_indices.push(i0);
-        raw_indices.push(i2);
-        raw_indices.push(i1);
+    if !any_sdef {
+        sdef_vertices.clear();
     }
 
-    // Textures
-    let tex_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative texture count"))?;
-    if tex_count > MAX_MATERIALS {
-        return Err(LoaderError::LimitExceeded("PMX texture count > cap"));
-    }
+    let tex_count = doc.texture_paths.len();
     let mut textures = Vec::with_capacity(tex_count);
-    for idx in 0..tex_count {
-        let rel = cur.pmx_text(enc)?;
-        let cleaned = rel.replace('\\', "/");
-        let path = base_dir.join(&cleaned);
+    for (idx, cleaned) in doc.texture_paths.iter().enumerate() {
+        let path = base_dir.join(cleaned);
         textures.push(RawTextureDesc {
             name: if cleaned.is_empty() {
                 format!("pmx_tex_{idx}")
             } else {
-                cleaned
+                cleaned.clone()
             },
             source: if path.is_file() {
                 RawTextureSource::ExternalFile(path)
@@ -324,95 +197,88 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         });
     }
 
-    // Materials -> build 1 submesh per material consuming `surface_count` indices
-    let mat_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative material count"))?;
-    if mat_count > MAX_MATERIALS {
-        return Err(LoaderError::LimitExceeded("PMX material count > 1024"));
-    }
-    let mut materials = Vec::with_capacity(mat_count);
-    let mut submeshes = Vec::with_capacity(mat_count);
+    let mut materials = Vec::with_capacity(doc.materials.len());
+    let mut submeshes = Vec::with_capacity(doc.materials.len());
     let mut idx_cursor = 0usize;
-
-    for m_idx in 0..mat_count {
-        let name_jp = cur.pmx_text(enc)?;
-        let name_en = cur.pmx_text(enc)?;
-        let name = if name_en.is_empty() { name_jp } else { name_en };
-        let diffuse = cur.vec4()?;
-        let _spec = cur.vec3()?;
-        let _spec_pow = cur.f32_le()?;
-        let _ambient = cur.vec3()?;
-        let draw_flags = cur.u8()?;
-        let edge_color = cur.vec4()?;
-        let edge_size = cur.f32_le()?;
-        let tex_idx = cur.pmx_signed_idx(tex_idx_sz)?;
-        let sphere_tex = cur.pmx_signed_idx(tex_idx_sz)?;
-        let sphere_mode = cur.u8()?;
-        let toon_flag = cur.u8()?;
-        if toon_flag == 0 {
-            let _ = cur.pmx_signed_idx(tex_idx_sz)?;
+    let to_u32 = |v: i32| -> Option<u32> {
+        if v >= 0 && (v as usize) < tex_count {
+            Some(v as u32)
         } else {
-            let _ = cur.u8()?;
+            None
         }
-        let _memo = cur.pmx_text(enc)?;
-        let surf_cnt = usize::try_from(cur.i32_le()?.max(0))
-            .map_err(|_| LoaderError::Parse("negative material surface count"))?;
-        let end_idx = idx_cursor.saturating_add(surf_cnt).min(raw_indices.len());
-        let sub_indices = raw_indices[idx_cursor..end_idx].to_vec();
+    };
+
+    for (m_idx, pm) in doc.materials.iter().enumerate() {
+        let name = if pm.name_en.is_empty() {
+            pm.name_jp.clone()
+        } else {
+            pm.name_en.clone()
+        };
+        let end_idx = idx_cursor
+            .saturating_add(pm.surface_count)
+            .min(doc.indices.len());
+        let sub_indices = doc.indices[idx_cursor..end_idx].to_vec();
         idx_cursor = end_idx;
 
-        let to_u32 = |v: i32| -> Option<u32> {
-            if v >= 0 && (v as usize) < tex_count {
-                Some(v as u32)
-            } else {
-                None
-            }
+        let cls = pm.classification;
+        let emissive = if cls.is_emissive {
+            [
+                pm.ambient[0].max(pm.diffuse[0]) * 1.25,
+                pm.ambient[1].max(pm.diffuse[1]) * 1.25,
+                pm.ambient[2].max(pm.diffuse[2]) * 1.25,
+            ]
+        } else {
+            [0.0, 0.0, 0.0]
         };
 
         materials.push(RawMaterial {
             name: name.clone(),
-            base_color: diffuse,
+            base_color: pm.diffuse,
             explicit_shade_color: None,
             rim_color: [0.0, 0.0, 0.0],
             rim_lighting_mix: 0.0,
-            rim_fresnel_power: 4.0,
+            rim_fresnel_power: if cls.is_glass { 2.5 } else { 4.0 },
             rim_lift: 0.0,
-            outline_color: [edge_color[0], edge_color[1], edge_color[2]],
+            outline_color: [pm.edge_color[0], pm.edge_color[1], pm.edge_color[2]],
             outline_lighting_mix: 0.25,
-            outline_width: if (draw_flags & 0x10) != 0 {
-                (edge_size * 0.002).clamp(0.0, 0.02)
+            outline_width: if (pm.draw_flags & 0x10) != 0 {
+                (pm.edge_size * 0.002).clamp(0.0, 0.02)
             } else {
                 0.0
             },
             outline_screen_space: false,
-            emissive: [0.0, 0.0, 0.0],
+            emissive,
             matcap_color: [1.0, 1.0, 1.0],
-            matcap_add_mix: if sphere_mode == 2 { 0.0 } else { 1.0 },
-            matcap_strength: if sphere_mode == 0 { 0.0 } else { 0.6 },
+            matcap_add_mix: if pm.sphere_mode == 2 { 0.0 } else { 1.0 },
+            matcap_strength: if pm.sphere_mode == 0 { 0.0 } else { 0.6 },
             gi_equalization: 0.15,
             shading_shift: -0.05,
             shading_toony: 0.85,
             uv_scroll: [0.0, 0.0],
             uv_rotation: 0.0,
-            alpha_mode: if diffuse[3] < 0.99 {
+            alpha_mode: if pm.diffuse[3] < 0.99 {
                 aether_ffi::AETHER_ALPHA_MODE_BLEND
             } else {
                 AETHER_ALPHA_MODE_OPAQUE
             },
             alpha_cutoff: 0.5,
-            double_sided: (draw_flags & 0x01) != 0,
+            double_sided: (pm.draw_flags & 0x01) != 0,
             unlit: false,
             has_vrm_mtoon: false,
             render_queue_offset: 0,
             flatten_override: None,
-            tex_base: to_u32(tex_idx),
-            tex_shade: None,
+            tex_base: to_u32(pm.tex_idx),
+            tex_shade: if pm.toon_flag == 0 {
+                to_u32(pm.toon_tex_or_builtin)
+            } else {
+                None
+            },
             tex_shading_shift: None,
             tex_normal: None,
             tex_emissive: None,
             tex_rim: None,
-            tex_matcap: if sphere_mode > 0 {
-                to_u32(sphere_tex)
+            tex_matcap: if pm.sphere_mode > 0 {
+                to_u32(pm.sphere_tex)
             } else {
                 None
             },
@@ -420,84 +286,30 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: Some(cls.shader_profile),
         });
 
-        let lower = name.to_ascii_lowercase();
         submeshes.push(RawSubmesh {
             name,
             indices: sub_indices,
             material_index: m_idx as u32,
-            is_eye_or_brow_hint: lower.contains("eye")
-                || lower.contains("brow")
-                || lower.contains("lash")
-                || lower.contains("目")
-                || lower.contains("眉"),
+            is_eye_or_brow_hint: cls.is_eye_or_brow,
         });
     }
 
-    // Bones (world position -> converted to local offset relative to parent after collecting all)
-    let bone_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative bone count"))?;
-    check_bone_count(bone_count)?;
+    let bone_count = doc.bones.len();
     let mut world_pos = Vec::with_capacity(bone_count);
     let mut joints = Vec::with_capacity(bone_count);
+    let mut bone_exts = Vec::with_capacity(bone_count);
+    let mut ik_links = Vec::new();
 
-    for ord in 0..bone_count {
-        let name_jp = cur.pmx_text(enc)?;
-        let name_en = cur.pmx_text(enc)?;
-        let wpos = flip_z(cur.vec3()?);
-        let scaled_w = [
-            wpos[0] * MMD_TO_METRES,
-            wpos[1] * MMD_TO_METRES,
-            wpos[2] * MMD_TO_METRES,
-        ];
-        let parent_i32 = cur.pmx_signed_idx(bone_idx_sz)?;
-        let parent = if parent_i32 >= 0 && (parent_i32 as usize) < bone_count {
-            Some(parent_i32 as usize)
-        } else {
-            None
-        };
-        let _layer = cur.i32_le()?;
-        let flags = cur.u16_le()?;
-        if (flags & 0x0001) != 0 {
-            let _ = cur.pmx_signed_idx(bone_idx_sz)?;
-        } else {
-            let _ = cur.vec3()?;
-        }
-        if (flags & 0x0100) != 0 || (flags & 0x0200) != 0 {
-            let _ = cur.pmx_signed_idx(bone_idx_sz)?;
-            let _ = cur.f32_le()?;
-        }
-        if (flags & 0x0400) != 0 {
-            let _ = cur.vec3()?;
-        }
-        if (flags & 0x0800) != 0 {
-            let _ = cur.vec3()?;
-            let _ = cur.vec3()?;
-        }
-        if (flags & 0x2000) != 0 {
-            let _ = cur.i32_le()?;
-        }
-        if (flags & 0x0020) != 0 {
-            let _target = cur.pmx_signed_idx(bone_idx_sz)?;
-            let _loops = cur.i32_le()?;
-            let _lim = cur.f32_le()?;
-            let link_cnt = usize::try_from(cur.i32_le()?.max(0)).unwrap_or(0).min(128);
-            for _ in 0..link_cnt {
-                let _link_bone = cur.pmx_signed_idx(bone_idx_sz)?;
-                let has_lim = cur.u8()?;
-                if has_lim == 1 {
-                    let _lo = cur.vec3()?;
-                    let _hi = cur.vec3()?;
-                }
-            }
-        }
-
+    for (ord, pb) in doc.bones.iter().enumerate() {
+        let scaled_w = pb.world_pos_m;
         world_pos.push(scaled_w);
-        let name = if name_jp.is_empty() {
-            name_en.clone()
+        let name = if pb.name_jp.is_empty() {
+            pb.name_en.clone()
         } else {
-            name_jp
+            pb.name_jp.clone()
         };
         let inv_bind = [
             1.0,
@@ -519,14 +331,36 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         ];
         joints.push(RawJoint {
             name,
-            alt_name: name_en,
-            parent,
+            alt_name: pb.name_en.clone(),
+            parent: pb.parent,
             local_translation: scaled_w,
             local_rotation: [0.0, 0.0, 0.0, 1.0],
             local_scale: [1.0, 1.0, 1.0],
             inverse_bind_matrix: Some(inv_bind),
             explicit_humanoid: None,
             ordinal: ord,
+        });
+
+        let ik_off = ik_links.len() as u32;
+        for lnk in &pb.ik_links {
+            ik_links.push(AetherPmxIkLink {
+                bone_index: lnk.bone_index,
+                has_limit: u32::from(lnk.has_limit),
+                limit_min_rad: lnk.limit_min_rad,
+                limit_max_rad: lnk.limit_max_rad,
+            });
+        }
+        bone_exts.push(AetherPmxBoneExt {
+            append_parent: pb.append_parent.map_or(-1, |idx| idx as i32),
+            append_ratio: pb.append_ratio,
+            append_flags: pb.append_flags,
+            ik_target: pb.ik_target.map_or(-1, |idx| idx as i32),
+            ik_loops: pb.ik_loops,
+            ik_limit_rad: pb.ik_limit_rad,
+            ik_link_offset: ik_off,
+            ik_link_count: pb.ik_links.len() as u32,
+            transform_level: pb.transform_level,
+            _pad: [0; 3],
         });
     }
     for i in 0..joints.len() {
@@ -539,249 +373,288 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         }
     }
 
-    // Morphs
-    let morph_count = usize::try_from(cur.i32_le()?.max(0))
-        .map_err(|_| LoaderError::Parse("negative morph count"))?;
-    check_morph_count(morph_count)?;
-    let mut morphs = Vec::with_capacity(morph_count);
-    let mut expr_presets = Vec::with_capacity(morph_count);
+    let mut morphs = Vec::new();
+    let mut expr_presets = Vec::new();
+    let mut pmx_to_vertex_morph = vec![None::<usize>; doc.morphs.len()];
+    let mut morph_channels = Vec::with_capacity(doc.morphs.len());
+    let mut group_children = Vec::new();
+    let mut uv_morphs = Vec::new();
+    let mut mat_morphs = Vec::new();
+    let mut bone_morphs = Vec::new();
     let mut total_deltas = 0usize;
 
-    for _ in 0..morph_count {
-        let name_jp = cur.pmx_text(enc)?;
-        let name_en = cur.pmx_text(enc)?;
-        let _panel = cur.u8()?;
-        let morph_type = cur.u8()?;
-        let off_cnt = usize::try_from(cur.i32_le()?.max(0))
-            .map_err(|_| LoaderError::Parse("negative morph offset count"))?;
-        let mut deltas = Vec::new();
-        let mut sum_x = 0.0f32;
+    for (pm_idx, pm) in doc.morphs.iter().enumerate() {
+        let mname = if pm.name_jp.is_empty() {
+            pm.name_en.clone()
+        } else {
+            pm.name_jp.clone()
+        };
+        let mut centroid_x = 0.0f32;
+        let mut v_morph_idx = AETHER_INVALID_INDEX;
+        let child_off = group_children.len() as u32;
+        let mut child_cnt = 0u32;
+        let bone_off = bone_morphs.len() as u32;
+        let mut bone_cnt = 0u32;
+        let uv_off = uv_morphs.len() as u32;
+        let mut uv_cnt = 0u32;
+        let mat_off = mat_morphs.len() as u32;
+        let mut mat_cnt = 0u32;
 
-        match morph_type {
-            1 => {
-                // Vertex morph
-                total_deltas = total_deltas.saturating_add(off_cnt);
+        let morph_kind = match &pm.data {
+            PmxMorphData::Group(children) => {
+                for &(c_idx, w) in children {
+                    group_children.push(AetherPmxGroupMorphChild {
+                        child_morph_index: c_idx as u32,
+                        weight: w,
+                        _pad: [0; 2],
+                    });
+                    child_cnt += 1;
+                }
+                AETHER_PMX_MORPH_GROUP
+            }
+            PmxMorphData::Vertex(v_deltas) => {
+                total_deltas = total_deltas.saturating_add(v_deltas.len());
                 if total_deltas > MAX_MORPH_DELTAS {
                     return Err(LoaderError::LimitExceeded("PMX morph deltas exceed 16M"));
                 }
-                deltas.reserve(off_cnt.min(vert_count));
-                for _ in 0..off_cnt {
-                    let v_idx = cur.pmx_unsigned_idx(v_idx_sz)?;
-                    let dp = flip_z(cur.vec3()?);
-                    if (v_idx as usize) < vert_count {
-                        sum_x += vertices[v_idx as usize].position[0];
-                        deltas.push(RawMorphDeltaItem {
-                            vertex_index: v_idx,
-                            d_pos: [
-                                dp[0] * MMD_TO_METRES,
-                                dp[1] * MMD_TO_METRES,
-                                dp[2] * MMD_TO_METRES,
-                            ],
-                            d_norm: [0.0, 0.0, 0.0],
+                if !v_deltas.is_empty() {
+                    let mut deltas = Vec::with_capacity(v_deltas.len());
+                    let mut sum_x = 0.0f32;
+                    for &(vi, d_pos) in v_deltas {
+                        if (vi as usize) < vertices.len() {
+                            sum_x += vertices[vi as usize].position[0];
+                            deltas.push(RawMorphDeltaItem {
+                                vertex_index: vi,
+                                d_pos,
+                                d_norm: [0.0, 0.0, 0.0],
+                            });
+                        }
+                    }
+                    if !deltas.is_empty() {
+                        centroid_x = sum_x / (deltas.len() as f32);
+                        let m_idx = morphs.len();
+                        pmx_to_vertex_morph[pm_idx] = Some(m_idx);
+                        v_morph_idx = m_idx as u32;
+                        morphs.push(RawMorphTarget {
+                            name: mname.clone(),
+                            deltas,
+                            centroid_x,
+                        });
+                        expr_presets.push(RawExprPreset {
+                            name: mname.clone(),
+                            morph_binds: vec![(m_idx, 1.0)],
                         });
                     }
                 }
+                AETHER_PMX_MORPH_VERTEX
             }
-            0 => {
-                for _ in 0..off_cnt {
-                    let _ = cur.pmx_signed_idx(morph_idx_sz)?;
-                    let _ = cur.f32_le()?;
+            PmxMorphData::Bone(b_offs) => {
+                for bo in b_offs {
+                    bone_morphs.push(AetherPmxBoneMorphOffset {
+                        bone_index: bo.bone_index,
+                        _pad0: 0,
+                        translation: bo.translation_m,
+                        rotation_quat: bo.rotation_quat,
+                        _pad1: 0,
+                    });
+                    bone_cnt += 1;
                 }
+                AETHER_PMX_MORPH_BONE
             }
-            2 => {
-                for _ in 0..off_cnt {
-                    let _ = cur.pmx_signed_idx(bone_idx_sz)?;
-                    let _ = cur.vec3()?;
-                    let _ = cur.vec4()?;
+            PmxMorphData::Uv(uv_offs) => {
+                for &(vi, duv) in uv_offs {
+                    uv_morphs.push(AetherPmxUvMorphDelta {
+                        vertex_index: vi,
+                        _pad0: 0,
+                        duv,
+                    });
+                    uv_cnt += 1;
                 }
+                AETHER_PMX_MORPH_UV
             }
-            3..=7 => {
-                for _ in 0..off_cnt {
-                    let _ = cur.pmx_unsigned_idx(v_idx_sz)?;
-                    let _ = cur.vec4()?;
+            PmxMorphData::Material(m_offs) => {
+                for mo in m_offs {
+                    mat_morphs.push(AetherPmxMaterialMorphDelta {
+                        material_index: mo.material_index,
+                        op_mode: u32::from(mo.op_mode),
+                        spec_pow: mo.spec_pow,
+                        edge_size: mo.edge_size,
+                        diffuse: mo.diffuse,
+                        specular: [mo.specular[0], mo.specular[1], mo.specular[2], 1.0],
+                        ambient: [mo.ambient[0], mo.ambient[1], mo.ambient[2], 1.0],
+                        edge_color: mo.edge_color,
+                        tex_tint: mo.tex_tint,
+                        sphere_tint: mo.sphere_tint,
+                        toon_tint: mo.toon_tint,
+                    });
+                    mat_cnt += 1;
                 }
+                AETHER_PMX_MORPH_MATERIAL
             }
-            8 => {
-                for _ in 0..off_cnt {
-                    let _ = cur.pmx_signed_idx(mat_idx_sz)?;
-                    let _ = cur.u8()?;
-                    cur.take(108)?;
-                }
-            }
-            _ => return Err(LoaderError::Parse("unknown PMX morph type")),
-        }
+            PmxMorphData::Other => u32::from(pm.morph_type),
+        };
 
-        if morph_type == 1 && !deltas.is_empty() {
-            let centroid_x = sum_x / (deltas.len() as f32);
-            let mname = if name_jp.is_empty() { name_en } else { name_jp };
-            let m_idx = morphs.len();
-            morphs.push(RawMorphTarget {
-                name: mname.clone(),
-                deltas,
-                centroid_x,
-            });
-            expr_presets.push(RawExprPreset {
-                name: mname,
-                morph_binds: vec![(m_idx, 1.0)],
-            });
-        }
+        let mapped_slots = map_preset_to_slots(&mname, centroid_x, false);
+        let appendix_b_slot = mapped_slots
+            .first()
+            .map_or(AETHER_INVALID_INDEX, |&(slot, _)| slot);
+
+        morph_channels.push(AetherPmxMorphChannelDesc {
+            morph_kind,
+            appendix_b_slot,
+            vertex_morph_index: v_morph_idx,
+            name_hash: pmx_fnv1a_lower(&mname),
+            child_offset: child_off,
+            child_count: child_cnt,
+            bone_offset: bone_off,
+            bone_count: bone_cnt,
+            uv_offset: uv_off,
+            uv_count: uv_cnt,
+            mat_offset: mat_off,
+            mat_count: mat_cnt,
+        });
     }
 
-    // Display frames (skip cleanly)
-    if let Ok(frame_cnt) = cur.i32_le() {
-        let fc = usize::try_from(frame_cnt.max(0)).unwrap_or(0).min(1024);
-        for _ in 0..fc {
-            let _ = cur.pmx_text(enc)?;
-            let _ = cur.pmx_text(enc)?;
-            let _ = cur.u8()?;
-            let ec = usize::try_from(cur.i32_le().unwrap_or(0).max(0))
-                .unwrap_or(0)
-                .min(4096);
-            for _ in 0..ec {
-                let kind = cur.u8()?;
-                if kind == 0 {
-                    let _ = cur.pmx_signed_idx(bone_idx_sz)?;
+    for pm in &doc.morphs {
+        if let PmxMorphData::Group(children) = &pm.data {
+            let mut binds = Vec::new();
+            for &(c_idx, w) in children {
+                if let Some(Some(vm_idx)) = pmx_to_vertex_morph.get(c_idx) {
+                    binds.push((*vm_idx, w));
+                }
+            }
+            if !binds.is_empty() {
+                let mname = if pm.name_jp.is_empty() {
+                    pm.name_en.clone()
                 } else {
-                    let _ = cur.pmx_signed_idx(morph_idx_sz)?;
-                }
-            }
-        }
-    }
-
-    // Rigid bodies & Bullet joints (§6.6)
-    let mut rbs = Vec::new();
-    let mut colliders = Vec::new();
-    let mut warnings_mask = 0u32;
-
-    if let Ok(rb_cnt_i32) = cur.i32_le() {
-        let rb_cnt = usize::try_from(rb_cnt_i32.max(0))
-            .unwrap_or(0)
-            .min(MAX_COLLIDERS * 4);
-        for _ in 0..rb_cnt {
-            let _njp = cur.pmx_text(enc)?;
-            let _nen = cur.pmx_text(enc)?;
-            let bone = cur.pmx_signed_idx(bone_idx_sz)?;
-            let group = cur.u8()?;
-            let _mask = cur.u16_le()?;
-            let shape = cur.u8()?;
-            let size = cur.vec3()?;
-            let pos = flip_z(cur.vec3()?);
-            let _rot = cur.vec3()?;
-            let _mass = cur.f32_le()?;
-            let _lin_damp = cur.f32_le()?;
-            let ang_damp = cur.f32_le()?;
-            let _rest = cur.f32_le()?;
-            let _fric = cur.f32_le()?;
-            let phys_mode = cur.u8()?;
-            if phys_mode == 0
-                && bone >= 0
-                && (bone as usize) < joints.len()
-                && colliders.len() < MAX_COLLIDERS
-            {
-                let b_idx = bone as usize;
-                let w = world_pos[b_idx];
-                let off = [
-                    pos[0] * MMD_TO_METRES - w[0],
-                    pos[1] * MMD_TO_METRES - w[1],
-                    pos[2] * MMD_TO_METRES - w[2],
-                ];
-                let radius = (size[0] * MMD_TO_METRES).max(0.01);
-                colliders.push(RawCollider {
-                    joint_index: b_idx,
-                    group_bit: u32::from(group & 31),
-                    shape_kind: if shape == 2 {
-                        AETHER_COLLIDER_SHAPE_CAPSULE
-                    } else {
-                        AETHER_COLLIDER_SHAPE_SPHERE
-                    },
-                    radius,
-                    offset: off,
-                    tail: [off[0], off[1] - size[1] * 0.5 * MMD_TO_METRES, off[2]],
+                    pm.name_jp.clone()
+                };
+                expr_presets.push(RawExprPreset {
+                    name: mname,
+                    morph_binds: binds,
                 });
             }
-            rbs.push(RawRb {
-                bone,
-                group,
-                shape,
-                size,
-                pos,
-                ang_damp,
-                phys_mode,
+        }
+    }
+
+    let mut colliders = Vec::new();
+    let mut rigid_bodies = Vec::with_capacity(doc.rigid_bodies.len());
+    let mut warnings_mask = 0u32;
+
+    for rb in &doc.rigid_bodies {
+        if rb.phys_mode == 0
+            && rb.bone_index >= 0
+            && (rb.bone_index as usize) < joints.len()
+            && colliders.len() < MAX_COLLIDERS
+        {
+            let b_idx = rb.bone_index as usize;
+            let w = world_pos[b_idx];
+            let off = [
+                rb.pos_m[0] - w[0],
+                rb.pos_m[1] - w[1],
+                rb.pos_m[2] - w[2],
+            ];
+            let radius = rb.size_m[0].max(0.01);
+            colliders.push(RawCollider {
+                joint_index: b_idx,
+                group_bit: u32::from(rb.group_index & 31),
+                shape_kind: if rb.shape_kind == 2 {
+                    AETHER_COLLIDER_SHAPE_CAPSULE
+                } else {
+                    AETHER_COLLIDER_SHAPE_SPHERE
+                },
+                radius,
+                offset: off,
+                tail: [off[0], off[1] - rb.size_m[1] * 0.5, off[2]],
             });
+        }
+        rigid_bodies.push(AetherPmxRigidBodyDesc {
+            bone_index: rb.bone_index,
+            group_index: u32::from(rb.group_index),
+            collision_mask: u32::from(rb.collision_mask),
+            shape_kind: u32::from(rb.shape_kind),
+            phys_mode: u32::from(rb.phys_mode),
+            _pad0: 0,
+            size: rb.size_m,
+            mass: rb.mass,
+            pos_ms: rb.pos_m,
+            linear_damping: rb.linear_damping,
+            rot_euler_rh: rb.rot_euler_rh,
+            angular_damping: rb.angular_damping,
+            restitution: rb.restitution,
+            friction: rb.friction,
+        });
+    }
+
+    let mut constraints_6dof = Vec::with_capacity(doc.constraints.len());
+    let mut children_adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); doc.rigid_bodies.len()];
+    let mut parent_count = vec![0usize; doc.rigid_bodies.len()];
+    for jc in &doc.constraints {
+        constraints_6dof.push(AetherPmxConstraint6DofDesc {
+            rb_a: jc.rb_a,
+            rb_b: jc.rb_b,
+            spring_pos: jc.spring_pos,
+            spring_rot: jc.spring_rot,
+            pos_ms: jc.pos_m,
+            rot_euler_rh: jc.rot_euler_rh,
+            pos_min: jc.pos_min_m,
+            pos_max: jc.pos_max_m,
+            rot_min: jc.rot_min_rad,
+            rot_max: jc.rot_max_rad,
+            _pad: [0; 2],
+        });
+
+        if jc.rb_a >= 0
+            && jc.rb_b >= 0
+            && (jc.rb_a as usize) < doc.rigid_bodies.len()
+            && (jc.rb_b as usize) < doc.rigid_bodies.len()
+        {
+            let a = jc.rb_a as usize;
+            let b = jc.rb_b as usize;
+            let k_rot =
+                (jc.spring_rot[0].abs() + jc.spring_rot[1].abs() + jc.spring_rot[2].abs()) / 3.0;
+            if doc.rigid_bodies[b].phys_mode > 0 {
+                if parent_count[b] > 0 {
+                    warnings_mask |= aether_ffi::AETHER_WARN_MMD_CROSS_CHAIN;
+                } else {
+                    children_adj[a].push((b, k_rot));
+                    parent_count[b] += 1;
+                }
+            } else if doc.rigid_bodies[a].phys_mode > 0 {
+                warnings_mask |= aether_ffi::AETHER_WARN_MMD_CROSS_CHAIN;
+            }
         }
     }
 
     let mut spring_chains = Vec::new();
-    if let Ok(jnt_cnt_i32) = cur.i32_le() {
-        let jnt_cnt = usize::try_from(jnt_cnt_i32.max(0)).unwrap_or(0).min(4096);
-        // Partition MMD dynamic constraints into tree chains (§6.6)
-        let mut children_adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); rbs.len()];
-        let mut parent_count = vec![0usize; rbs.len()];
-
-        for _ in 0..jnt_cnt {
-            let _njp = cur.pmx_text(enc)?;
-            let _nen = cur.pmx_text(enc)?;
-            let _jtype = cur.u8()?;
-            let rb_a = cur.pmx_signed_idx(rb_idx_sz)?;
-            let rb_b = cur.pmx_signed_idx(rb_idx_sz)?;
-            let _pos = cur.vec3()?;
-            let _rot = cur.vec3()?;
-            let _pmin = cur.vec3()?;
-            let _pmax = cur.vec3()?;
-            let _rmin = cur.vec3()?;
-            let _rmax = cur.vec3()?;
-            let _spos = cur.vec3()?;
-            let srot = cur.vec3()?;
-
-            if rb_a >= 0 && rb_b >= 0 && (rb_a as usize) < rbs.len() && (rb_b as usize) < rbs.len()
-            {
-                let a = rb_a as usize;
-                let b = rb_b as usize;
-                let k_rot = (srot[0].abs() + srot[1].abs() + srot[2].abs()) / 3.0;
-                if rbs[b].phys_mode > 0 {
-                    if parent_count[b] > 0 {
-                        warnings_mask |= aether_ffi::AETHER_WARN_MMD_CROSS_CHAIN;
-                    } else {
-                        children_adj[a].push((b, k_rot));
-                        parent_count[b] += 1;
-                    }
-                } else if rbs[a].phys_mode > 0 {
-                    warnings_mask |= aether_ffi::AETHER_WARN_MMD_CROSS_CHAIN;
-                }
-            }
-        }
-
-        // Start a spring chain from every kinematic RB that feeds dynamic children (or dynamic root)
-        for root_rb in 0..rbs.len() {
-            if rbs[root_rb].phys_mode == 0 && !children_adj[root_rb].is_empty() {
-                for &(first_dyn, first_k) in &children_adj[root_rb] {
-                    let mut chain_nodes = Vec::new();
-                    let mut stack = vec![(first_dyn, first_k)];
-                    while let Some((rb_i, k_rot)) = stack.pop() {
-                        let rb = &rbs[rb_i];
-                        if rb.bone >= 0 && (rb.bone as usize) < joints.len() {
-                            let _ = (rb.group, rb.shape, rb.pos);
-                            chain_nodes.push(RawSpringNode {
-                                joint_index: rb.bone as usize,
-                                hit_radius: (rb.size[0] * MMD_TO_METRES).clamp(0.01, 0.25),
-                                stiffness: (k_rot / 100.0).clamp(0.05, 4.0),
-                                drag_force: rb.ang_damp.clamp(0.0, 1.0),
-                                gravity_power: 1.0,
-                                gravity_dir: [0.0, -1.0, 0.0],
-                                from_mmd: true,
-                            });
-                        }
-                        for &(nxt, nk) in &children_adj[rb_i] {
-                            stack.push((nxt, nk));
-                        }
-                    }
-                    if !chain_nodes.is_empty() {
-                        spring_chains.push(RawSpringChain {
-                            joints: chain_nodes,
-                            center_joint: None,
-                            collider_group_mask: 0xFFFF,
+    for root_rb in 0..doc.rigid_bodies.len() {
+        if doc.rigid_bodies[root_rb].phys_mode == 0 && !children_adj[root_rb].is_empty() {
+            for &(first_dyn, first_k) in &children_adj[root_rb] {
+                let mut chain_nodes = Vec::new();
+                let mut stack = vec![(first_dyn, first_k)];
+                while let Some((rb_i, k_rot)) = stack.pop() {
+                    let rb = &doc.rigid_bodies[rb_i];
+                    if rb.bone_index >= 0 && (rb.bone_index as usize) < joints.len() {
+                        chain_nodes.push(RawSpringNode {
+                            joint_index: rb.bone_index as usize,
+                            hit_radius: rb.size_m[0].clamp(0.01, 0.25),
+                            stiffness: (k_rot / 100.0).clamp(0.05, 4.0),
+                            drag_force: rb.angular_damping.clamp(0.0, 1.0),
+                            gravity_power: 1.0,
+                            gravity_dir: [0.0, -1.0, 0.0],
+                            from_mmd: true,
                         });
                     }
+                    for &(nxt, nk) in &children_adj[rb_i] {
+                        stack.push((nxt, nk));
+                    }
+                }
+                if !chain_nodes.is_empty() {
+                    spring_chains.push(RawSpringChain {
+                        joints: chain_nodes,
+                        center_joint: None,
+                        collider_group_mask: 0xFFFF,
+                    });
                 }
             }
         }
@@ -806,6 +679,18 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         spring_chains,
         colliders,
         textures,
+        pmx_aux: Some(RawPmxAux {
+            sdef_vertices,
+            bone_exts,
+            ik_links,
+            morph_channels,
+            group_children,
+            uv_morphs,
+            mat_morphs,
+            bone_morphs,
+            rigid_bodies,
+            constraints_6dof,
+        }),
     })
 }
 
@@ -966,6 +851,7 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             tex_uv_mask: None,
             tex_ramp: None,
             tex_sdf_face: None,
+            shader_profile: None,
         });
         submeshes.push(RawSubmesh {
             name,
@@ -1099,5 +985,6 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         spring_chains: Vec::new(),
         colliders: Vec::new(),
         textures,
+        pmx_aux: None,
     })
 }

@@ -1893,6 +1893,33 @@ int run_application(const AppLaunchOptions& opts) {
                     retire_avatar(std::move(current_avatar));
                     current_avatar = std::move(up_res.value());
                     last_loaded_avatar_path = current_avatar->source_path;
+                    if (plugin_host != nullptr && current_avatar != nullptr) {
+                        std::string meta_json = "{\"format\":1,\"materials\":[";
+                        for (size_t mi = 0; mi < current_avatar->materials.size(); ++mi) {
+                            if (mi > 0) {
+                                meta_json += ',';
+                            }
+                            std::string_view sv{};
+                            const uint32_t off = current_avatar->materials[mi].name_offset;
+                            if (off < current_avatar->strings.size()) {
+                                sv = std::string_view(current_avatar->strings).substr(off);
+                                const size_t nul = sv.find('\0');
+                                if (nul != std::string_view::npos) {
+                                    sv = sv.substr(0, nul);
+                                }
+                            }
+                            meta_json += '"';
+                            for (char ch : sv) {
+                                if (ch == '"' || ch == '\\') {
+                                    meta_json += '\\';
+                                }
+                                meta_json += ch;
+                            }
+                            meta_json += '"';
+                        }
+                        meta_json += "]}";
+                        (void)aether_host_set_model_metadata_json(plugin_host, meta_json.c_str());
+                    }
                     bool vk_bound = true;
                     if (auto b_rc = npr_renderer.bind_avatar(current_avatar.get()); !b_rc) {
                         vk_bound = false;
@@ -2525,6 +2552,7 @@ int run_application(const AppLaunchOptions& opts) {
                 render_req.spring_collider_count = skin_snap.spring_collider_count;
                 render_req.spring_segments = skin_snap.spring_segments.data();
                 render_req.spring_segment_count = skin_snap.spring_segment_count;
+                render_req.material_overrides = &skin_snap.material_overrides;
             }
             if (active_backend == renderer::RenderBackend::DirectX11 && current_avatar != nullptr) {
                 render_req.rt_enabled = false;

@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 use aether_ffi::{
     AETHER_HOST_CMD_GRANT_PLUGIN_CONSENT, AETHER_HOST_CMD_PROJECT_UPDATE_JSON,
     AETHER_HOST_CMD_PUBLISH_TELEMETRY, AETHER_HOST_CMD_RELOAD_PLUGINS,
-    AETHER_HOST_CMD_SET_EXTERNAL_PARAM, AETHER_HOST_CMD_SET_GRAPH_JSON, AETHER_HOST_CMD_SET_ON_AIR,
+    AETHER_HOST_CMD_SET_EXTERNAL_PARAM, AETHER_HOST_CMD_SET_GRAPH_JSON,
+    AETHER_HOST_CMD_SET_MODEL_METADATA_JSON, AETHER_HOST_CMD_SET_ON_AIR,
     AETHER_HOST_CMD_SET_WS_ENABLED, AETHER_HOST_CMD_TRIGGER_EXPRESSION,
     AETHER_HOST_CMD_UNLOAD_PLUGIN, AETHER_HOST_EVT_GRAPH_BUDGET_WARN,
     AETHER_HOST_EVT_GRAPH_COMPILE_ERR, AETHER_HOST_EVT_GRAPH_COMPILED,
@@ -42,7 +43,7 @@ use aether_ffi::{
     AETHER_HOST_EVT_PLUGIN_LOADED, AETHER_HOST_EVT_PLUGIN_TRAP, AETHER_HOST_EVT_PROJECT_LOADED,
     AETHER_HOST_EVT_PROJECT_SAVED, AETHER_HOST_FLAG_OSC_BIND_ANY, AETHER_HOST_FLAG_WS_ENABLED,
     AetherGraphOutputs, AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand,
-    AetherHostConfig, AetherHostEvent,
+    AetherHostConfig, AetherHostEvent, AetherMaterialOverrideBuffer,
 };
 use futures_util::future::{Either, select};
 use serde::Serialize;
@@ -94,6 +95,7 @@ struct HostRuntimeMeta<'a> {
 
 enum ActorMsg {
     SetGraphJson(String),
+    SetModelMetadataJson(String),
     ProjectUpdateJson(String),
     LoadProject(PathBuf),
     SaveProject(PathBuf),
@@ -106,6 +108,8 @@ enum ActorMsg {
 struct WorkerState {
     bundle: ProjectBundle,
     dirty: bool,
+    model_material_slots: Vec<String>,
+    model_format: u32,
     plugins_dir: Option<PathBuf>,
     plugins: WasmPluginRuntime,
     latched_bindings: Vec<graph::LatchedBinding>,
@@ -227,6 +231,8 @@ impl PluginHost {
         let mut state = WorkerState {
             bundle: default_bundle,
             dirty: false,
+            model_material_slots: Vec::new(),
+            model_format: 0,
             plugins_dir,
             plugins: wasm_rt,
             latched_bindings: Vec::new(),
@@ -400,7 +406,12 @@ impl PluginHost {
                             match m {
                                 ActorMsg::SetGraphJson(json_str) => {
                                     match parse_graph_json(json_str.as_bytes()) {
-                                        Ok(doc) => {
+                                        Ok(mut doc) => {
+                                            inject_model_metadata_into_graph(
+                                                &mut doc,
+                                                &state.model_material_slots,
+                                                state.model_format,
+                                            );
                                             state.bundle.graph = doc;
                                             state.dirty = true;
                                             // §7.1: 50 ms debounced recompile (`REQ-PLG-001 <= 100 ms`).
@@ -419,6 +430,38 @@ impl PluginHost {
                                                 &e.to_string(),
                                             );
                                         }
+                                    }
+                                }
+                                ActorMsg::SetModelMetadataJson(json_str) => {
+                                    if let Ok(val) =
+                                        serde_json::from_str::<serde_json::Value>(&json_str)
+                                    {
+                                        if let Some(fmt) = val
+                                            .get("format")
+                                            .and_then(serde_json::Value::as_u64)
+                                        {
+                                            state.model_format = u32::try_from(fmt).unwrap_or(0);
+                                        }
+                                        if let Some(arr) = val
+                                            .get("materials")
+                                            .and_then(serde_json::Value::as_array)
+                                        {
+                                            state.model_material_slots = arr
+                                                .iter()
+                                                .filter_map(serde_json::Value::as_str)
+                                                .take(64)
+                                                .map(str::to_owned)
+                                                .collect();
+                                        }
+                                        inject_model_metadata_into_graph(
+                                            &mut state.bundle.graph,
+                                            &state.model_material_slots,
+                                            state.model_format,
+                                        );
+                                        compile_deadline = Some(
+                                            tokio::time::Instant::now()
+                                                + Duration::from_millis(20),
+                                        );
                                     }
                                 }
                                 ActorMsg::ProjectUpdateJson(json_str) => {
@@ -775,6 +818,10 @@ impl PluginHost {
                     plugin_id: payload.to_owned(),
                 })
                 .map_err(|e| HostError::Internal(format!("command queue full: {e}"))),
+            AETHER_HOST_CMD_SET_MODEL_METADATA_JSON => self
+                .cmd_tx
+                .try_send(ActorMsg::SetModelMetadataJson(payload.to_owned()))
+                .map_err(|e| HostError::Internal(format!("command queue full: {e}"))),
             _ => Err(HostError::InvalidArg(format!(
                 "unknown AetherHostCommand kind {}",
                 cmd.kind
@@ -799,6 +846,17 @@ impl PluginHost {
         inputs: &SafeGraphInputs<'_>,
         outputs: &mut AetherGraphOutputs,
     ) -> Result<(), HostError> {
+        self.evaluate_active_ex(inputs, 12.0, outputs, None)
+    }
+
+    /// Wait-free, allocation-free T2 evaluation of pose/expressions and non-destructive `AetherMaterialOverrideBuffer`.
+    pub fn evaluate_active_ex(
+        &self,
+        inputs: &SafeGraphInputs<'_>,
+        circadian_hour: f32,
+        outputs: &mut AetherGraphOutputs,
+        out_mats: Option<&mut AetherMaterialOverrideBuffer>,
+    ) -> Result<(), HostError> {
         let pending_hotkeys = self.params.take_pending_hotkeys();
         let ctx = HostEvalContext {
             params: &self.params,
@@ -807,7 +865,15 @@ impl PluginHost {
         };
         let (warn_raised, eval_us) = self
             .exchange
-            .with_active_plan(|plan| plan.evaluate_with_host(inputs, Some(&ctx), outputs))
+            .with_active_plan(|plan| {
+                plan.evaluate_with_host_and_materials(
+                    inputs,
+                    Some(&ctx),
+                    circadian_hour,
+                    outputs,
+                    out_mats,
+                )
+            })
             .map_err(|m| HostError::Internal(m.to_owned()))?;
         if warn_raised {
             self.events.push(
@@ -819,6 +885,13 @@ impl PluginHost {
             );
         }
         Ok(())
+    }
+
+    /// Enqueues parsed avatar model metadata JSON (`{"format": u32, "materials": ["..."]}`) for `ModelSourceNode`.
+    pub fn set_model_metadata_json(&self, json_str: &str) -> Result<(), HostError> {
+        self.cmd_tx
+            .try_send(ActorMsg::SetModelMetadataJson(json_str.to_owned()))
+            .map_err(|e| HostError::Internal(format!("command queue full: {e}")))
     }
 
     /// Copies normalized project, graph, plugins, and runtime state JSON into `out` (`ADR-0014`).
@@ -1065,6 +1138,39 @@ fn serialize_snapshot(
         },
     };
     serde_json::to_vec(&view).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+fn inject_model_metadata_into_graph(
+    doc: &mut GraphDocument,
+    slots: &[String],
+    model_format: u32,
+) {
+    if slots.is_empty() && model_format == 0 {
+        return;
+    }
+    for node in &mut doc.nodes {
+        let base = node.type_id.split('@').next().unwrap_or(&node.type_id);
+        if matches!(base, "aether.model.source" | "model_source") {
+            if !slots.is_empty() && !node.params.contains_key("material_slots") {
+                node.params.insert(
+                    "material_slots".to_owned(),
+                    serde_json::Value::Array(
+                        slots
+                            .iter()
+                            .cloned()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+            if model_format != 0 && !node.params.contains_key("model_format") {
+                node.params.insert(
+                    "model_format".to_owned(),
+                    serde_json::Value::from(model_format),
+                );
+            }
+        }
+    }
 }
 
 fn publish_snapshot(
