@@ -255,8 +255,14 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
         keymap.chord(ActionId::ModeLiveStudio).c_str());
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::ModeRigging, "mode.rig", "Switch Mode: Rigging",
         keymap.chord(ActionId::ModeRigging).c_str());
+    add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::ModeLighting, "mode.lighting", "Switch Mode: Lighting",
+        keymap.chord(ActionId::ModeLighting).c_str());
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::ModeNodes, "mode.nodes", "Switch Mode: Nodes",
         keymap.chord(ActionId::ModeNodes).c_str());
+    add(PaletteCategory::Actions, PaletteCommandTag::ToggleLightingQuadView, "lighting.quad_view",
+        "Lighting Stage: Toggle Quad View", keymap.chord(ActionId::LightingQuadView).c_str());
+    add(PaletteCategory::Actions, PaletteCommandTag::ToggleLightingPilotLight, "lighting.pilot_light",
+        "Lighting Stage: Toggle Pilot Selected Light", keymap.chord(ActionId::LightingPilotLight).c_str());
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::ResetLayout, "panel.reset_layout",
         "Reset Workspace Dock Layout", "");
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenWizard, "panel.wizard",

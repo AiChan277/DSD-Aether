@@ -90,6 +90,25 @@ struct FrameRenderRequest {
     std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
     float avatar_rot_y_deg{0.0f};
     float avatar_scale{1.0f};
+
+    // Dual-viewport isolation & schematic-only Stage overlay controls (Phase 2)
+    RenderViewKind view_kind{RenderViewKind::Broadcast};
+    StageDiagnosticMode stage_diag_mode{StageDiagnosticMode::Lit};
+    bool show_stage_schematic{false}; // Honored ONLY when view_kind == RenderViewKind::LightingStage
+    bool preview_25d_flatten{true};   // Broadcast forces ON; LightingStage defaults OFF unless toggled
+    bool stage_fast_panning{false};
+    bool show_stage_grid{true};
+    int32_t selected_studio_light_idx{-1};
+    bool has_studio_frustum{false};
+    PreviewCamera studio_camera{};
+    float studio_frustum_aspect{16.0f / 9.0f};
+    bool skip_skin_and_blas{false};
+    enum class StageOutputSlot : uint8_t {
+        MainStage = 0,
+        QuadTop = 1,
+        QuadRight = 2,
+    };
+    StageOutputSlot stage_output_slot{StageOutputSlot::MainStage};
     const animation::SpringColliderOverlay* spring_colliders{nullptr};
     uint32_t spring_collider_count{0};
     const animation::SpringSegmentOverlay* spring_segments{nullptr};
@@ -135,6 +154,12 @@ struct FrameGraphOutputs {
     VkImage nv12_uv_image{VK_NULL_HANDLE};
     VkImage viewport_image{VK_NULL_HANDLE};
     VkImageView viewport_view{VK_NULL_HANDLE};
+    VkImage stage_viewport_image{VK_NULL_HANDLE};
+    VkImageView stage_viewport_view{VK_NULL_HANDLE};
+    VkImage quad_top_image{VK_NULL_HANDLE};
+    VkImageView quad_top_view{VK_NULL_HANDLE};
+    VkImage quad_right_image{VK_NULL_HANDLE};
+    VkImageView quad_right_view{VK_NULL_HANDLE};
     VkImage orbit_orb_image{VK_NULL_HANDLE};
     VkImageView orbit_orb_view{VK_NULL_HANDLE};
     VkImage rt_shadow_raw_image{VK_NULL_HANDLE};
@@ -258,8 +283,19 @@ class FrameGraph {
     uint32_t avatar_face_sdf_slot_{UINT32_MAX};
     std::vector<GpuSubmeshDraw> cached_submeshes_{};
     std::vector<GpuMaterial> cached_materials_{};
-    GpuMat4 prev_view_proj_{};
-    bool have_prev_view_proj_{false};
+    struct TemporalHistoryBank {
+        GpuMat4 prev_view_proj{};
+        bool have_prev_view_proj{false};
+        RegisteredImage prev_depth{};
+        RegisteredImage prev_normal{};
+        RegisteredImage prev_rt_shadow{};
+        RegisteredImage prev_rim_occ{};
+        RegisteredImage prev_bounce{};
+        std::array<rhi::RhiBuffer, 2> reservoir_bufs{};
+    };
+    std::array<TemporalHistoryBank, 2> history_{}; // [0] = BroadcastView, [1] = LightingStageView
+    std::array<float, 3> last_pivot_ws_{0.0f, 1.32f, 0.0f};
+    std::array<float, 3> last_eye_ws_{0.0f, 1.48f, 2.20f};
     uint32_t last_output_slot_{0};
 
     // Size-dependent offscreen targets
@@ -282,7 +318,6 @@ class FrameGraph {
     RegisteredImage bounce_denoised_{};
     RegisteredImage aov_backscatter_{};
     RegisteredImage aov_cornea_spec_{};
-    std::array<rhi::RhiBuffer, 2> reservoir_bufs_{};
     RegisteredImage crease_mask_{};
     RegisteredImage hdr_scene_{};
     std::array<RegisteredImage, kBloomMipCount> bloom_mips_{};
@@ -301,12 +336,9 @@ class FrameGraph {
     RegisteredImage out_nv12_uv_{};
     std::array<OutputSlotTargets, kOutputRingSlots> out_ring_{};
     RegisteredImage viewport_out_{};
-
-    RegisteredImage prev_depth_{};
-    RegisteredImage prev_normal_{};
-    RegisteredImage prev_rt_shadow_{};
-    RegisteredImage prev_rim_occ_{};
-    RegisteredImage prev_bounce_{};
+    RegisteredImage stage_viewport_out_{};
+    RegisteredImage quad_top_out_{};
+    RegisteredImage quad_right_out_{};
 
     // Static targets
     RegisteredImage orbit_orb_out_{};
@@ -344,12 +376,14 @@ class FrameGraph {
     VkPipeline pso_encode_nv12_{VK_NULL_HANDLE};
     VkPipeline pso_viewport_compose_{VK_NULL_HANDLE};
     VkPipeline pso_heatmap_{VK_NULL_HANDLE};
+    VkPipeline pso_stage_schematic_{VK_NULL_HANDLE};
 
     std::vector<uint32_t> opaque_draw_indices_{};
     std::vector<uint32_t> cutout_draw_indices_{};
     std::vector<uint32_t> transparent_draw_indices_{};
-    std::array<GpuHeatmapBone, 4096> heatmap_scratch_{};
-    std::array<int64_t, 27> shader_mtimes_{};
+    std::vector<GpuHeatmapBone> heatmap_scratch_{};
+    std::vector<GpuStageOverlayElem> stage_overlay_scratch_{};
+    std::array<int64_t, 32> shader_mtimes_{};
     uint64_t last_rt_pose_hash_{0};
     uint64_t last_rt_as_update_us_{0};
     const GpuAvatar* last_rt_avatar_{nullptr};

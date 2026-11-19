@@ -209,6 +209,22 @@ ray_query = false
 max_push_constants = 128
 
 [[shader]]
+id = "stage_schematic_vs"
+file = "aether_viewport_compose.slang"
+entry = "vs_stage_schematic"
+stage = "vertex"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
+id = "stage_schematic_fs"
+file = "aether_viewport_compose.slang"
+entry = "ps_stage_schematic"
+stage = "fragment"
+ray_query = false
+max_push_constants = 128
+
+[[shader]]
 id = "sdf_bake"
 file = "aether_sdf_bake.slang"
 entry = "cs_main"

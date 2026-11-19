@@ -311,9 +311,12 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
             g_con *= float3(1.0 + warm_shift * 0.12, 1.0, 1.0 - warm_shift * 0.12);
             unpre = lerp(unpre, g_con, master_w);
         }
-        float3 mapped = (fg.post_params.z > 0.5) ? agx_tonemap_soft(unpre) : saturate(unpre);
+        bool is_false_color_diag = (uint(fg.stage_camera_params.z) == 2u);
+        float3 mapped = is_false_color_diag
+                            ? eval_false_color_el_zone(dot(unpre, float3(0.2126, 0.7152, 0.0722)))
+                            : ((fg.post_params.z > 0.5) ? agx_tonemap_soft(unpre) : saturate(unpre));
         // Task 6B: Optional subtle 2D anime paper / cel warmth grading curve
-        if (filter_pro && ((fg.state_u32.w & 8u) != 0u) && fg.filter_pro_params.z > 0.001) {
+        if (!is_false_color_diag && filter_pro && ((fg.state_u32.w & 8u) != 0u) && fg.filter_pro_params.z > 0.001) {
             float warm_w = saturate(fg.filter_pro_params.z);
             float3 cel_warm = mapped * float3(1.03, 1.005, 0.96) + float3(0.012, 0.008, 0.004) * (1.0 - mapped);
             mapped = saturate(lerp(mapped, cel_warm, warm_w));

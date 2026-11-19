@@ -36,6 +36,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     uint center_m = 0u;
     float2 mv = float2(0.0, 0.0);
     bool is_path_trace = false;
+    bool fast_pan = false;
     float2 vp_size = float2(float(w), float(h));
     int2 max_gp = max_p;
     float2 gb_scale = float2(1.0, 1.0);
@@ -47,6 +48,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         gb_mat_slot = fg.gbuffer_ids[0].z;
         depth_slot = fg.gbuffer_extra_ids[0].x;
         is_path_trace = ((fg.state_u32.w & 0xC00u) == 0x800u);
+        fast_pan = (fg.stage_camera_params.w > 0.5);
         vp_size = max(fg.viewport_size.xy, float2(1.0, 1.0));
         max_gp = max(int2(vp_size) - 1, int2(0, 0));
         gb_scale = vp_size / float2(float(w), float(h));
@@ -118,9 +120,9 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float4 box_min = max(mu - gamma * std_dev, float4(0.0, 0.0, 0.0, 0.0));
     float4 box_max = mu + gamma * std_dev;
 
-    // 3) Motion-vector reprojected temporal accumulation (alpha = 0.10 nominal in PT, disocclusion guarded)
+    // 3) Motion-vector reprojected temporal accumulation (bypassed during Stage fast camera pan)
     float4 out_val = filtered;
-    if (has_hist) {
+    if (has_hist && !fast_pan) {
         float2 uv = (float2(tid.xy) + 0.5) / float2(float(w), float(h));
         float2 prev_uv = uv - mv;
         if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {

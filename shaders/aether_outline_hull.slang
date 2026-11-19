@@ -30,7 +30,8 @@ HullVsOut vs_main(uint vid : SV_VertexID) {
 
     float3 tan_w = normalize_safe(v.tangent_crease.xyz, float3(0.0, 0.0, 1.0));
     float3 view_tan = normalize_safe(mul_col3(fg.view, tan_w), float3(0.0, 0.0, 1.0));
-    float w_pos = max(clip.w, 1e-4);
+    float w_pos = (fg.stage_camera_params.x > 0.5) ? clamp(fg.stage_camera_params.y * 0.65, 0.35, 3.0)
+                                                 : max(clip.w, 1e-4);
 
     if (screen_mode) {
         // Screen-space thickness with w^0.65 / w = w^-0.35 attenuation across 0.5-3.0 m

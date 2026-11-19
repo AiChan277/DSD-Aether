@@ -120,3 +120,102 @@ float4 ps_heatmap(HeatmapVsOut i) : SV_Target0 {
     }
     return i.color;
 }
+
+struct GpuStageOverlayElem {
+    float4 p0_ws;
+    float4 p1_ws;
+    float4 p2_ws;
+    float4 color_and_mode;
+};
+
+struct StageSchematicVsOut {
+    float4 clip_pos : SV_Position;
+    float4 color : TEXCOORD0;
+    float dash_coord : TEXCOORD1;
+    nointerpolation uint mode : TEXCOORD2;
+};
+
+// Pass 13C: Pure Schematic-Only Lighting Overlay (`LightingStageView` exclusive, zero leak to BroadcastView).
+[shader("vertex")]
+StageSchematicVsOut vs_stage_schematic(uint vid : SV_VertexID) {
+    StageSchematicVsOut o = {};
+    GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
+    uint elem_idx = vid / 6u;
+    uint corner_idx = vid % 6u;
+    GpuStageOverlayElem e = AETHER_LOAD(GpuStageOverlayElem, g_Pc.draw_data_bda, elem_idx);
+
+    uint mode = uint(e.color_and_mode.w + 0.5);
+    o.mode = mode;
+
+    if (mode >= 2u) {
+        if (corner_idx >= 3u) {
+            o.clip_pos = float4(0.0, 0.0, 2.0, 1.0);
+            o.color = float4(0.0, 0.0, 0.0, 0.0);
+            return o;
+        }
+        float3 wp = (corner_idx == 0u) ? e.p0_ws.xyz : ((corner_idx == 1u) ? e.p1_ws.xyz : e.p2_ws.xyz);
+        float4 c = mul_col(fg.view_proj, float4(wp, 1.0));
+        if (c.w <= 0.02) {
+            o.clip_pos = float4(0.0, 0.0, 2.0, 1.0);
+            o.color = float4(0.0, 0.0, 0.0, 0.0);
+            return o;
+        }
+        o.clip_pos = float4(c.xy, 0.5 * c.w, c.w);
+        o.color = float4(linear_to_srgb(e.color_and_mode.rgb), e.p2_ws.w);
+        o.dash_coord = 0.0;
+        return o;
+    }
+
+    float3 w0 = e.p0_ws.xyz;
+    float3 w1 = e.p1_ws.xyz;
+    float4 c0 = mul_col(fg.view_proj, float4(w0, 1.0));
+    float4 c1 = mul_col(fg.view_proj, float4(w1, 1.0));
+    if (c0.w <= 0.05 && c1.w <= 0.05) {
+        o.clip_pos = float4(0.0, 0.0, 2.0, 1.0);
+        o.color = float4(0.0, 0.0, 0.0, 0.0);
+        return o;
+    }
+    if (c0.w < 0.05) {
+        float t = saturate((0.05 - c0.w) / max(c1.w - c0.w, 1e-5));
+        c0 = lerp(c0, c1, t);
+        w0 = lerp(w0, w1, t);
+    } else if (c1.w < 0.05) {
+        float t = saturate((0.05 - c1.w) / max(c0.w - c1.w, 1e-5));
+        c1 = lerp(c1, c0, t);
+        w1 = lerp(w1, w0, t);
+    }
+
+    static const float2 kLineQuad[6] = {
+        float2(0.0, -0.5), float2(1.0, -0.5), float2(1.0, 0.5),
+        float2(0.0, -0.5), float2(1.0, 0.5),  float2(0.0, 0.5),
+    };
+    float2 q = kLineQuad[corner_idx];
+    float2 ndc0 = c0.xy / c0.w;
+    float2 ndc1 = c1.xy / c1.w;
+    float2 px_delta = (ndc1 - ndc0) * fg.viewport_size.xy * 0.5;
+    float px_len = length(px_delta);
+    float2 px_dir = (px_len > 1e-3) ? (px_delta / px_len) : float2(1.0, 0.0);
+    float2 px_perp = float2(-px_dir.y, px_dir.x);
+    float line_w_px = max(e.p0_ws.w, 1.0);
+    float2 ndc_off = px_perp * (q.y * line_w_px * 2.0 * fg.viewport_size.zw);
+    float2 ndc_pos = lerp(ndc0, ndc1, q.x) + ndc_off;
+    float cw = lerp(c0.w, c1.w, q.x);
+
+    o.clip_pos = float4(ndc_pos * cw, 0.5 * cw, cw);
+    o.color = float4(linear_to_srgb(e.color_and_mode.rgb), e.p2_ws.w);
+    o.dash_coord = q.x * length(w1 - w0) * max(e.p1_ws.w, 0.0);
+    return o;
+}
+
+[shader("fragment")]
+float4 ps_stage_schematic(StageSchematicVsOut i) : SV_Target0 {
+    if (i.color.a <= 0.002) {
+        discard;
+    }
+    if (i.mode == 1u) {
+        if (frac(i.dash_coord) > 0.55) {
+            discard;
+        }
+    }
+    return float4(i.color.rgb * i.color.a, i.color.a);
+}

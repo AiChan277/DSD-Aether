@@ -94,6 +94,14 @@ struct alignas(16) GpuHeatmapBone {
 };
 static_assert(sizeof(GpuHeatmapBone) == 32);
 
+struct alignas(16) GpuStageOverlayElem {
+    float p0_ws[4]{};          // xyz = world start, w = line width px / aux
+    float p1_ws[4]{};          // xyz = world end, w = dash frequency
+    float p2_ws[4]{};          // xyz = world tri vertex 2 (when mode >= 1.5), w = alpha/fade
+    float color_and_mode[4]{}; // rgb = sRGB/linear color, w = 0:solid line, 1:dashed line, 2:translucent quad tri
+};
+static_assert(sizeof(GpuStageOverlayElem) == 64);
+
 struct alignas(16) GpuFrameGlobals {
     GpuMat4 view{};
     GpuMat4 proj{};
@@ -160,6 +168,8 @@ struct alignas(16) GpuFrameGlobals {
     uint64_t reservoir_curr_bda{0};
     uint64_t reservoir_prev_bda{0};
     uint32_t studio_aux_u32[2]{0u, 0u};
+    // x = is_orthographic (0/1), y = ortho_height (m), z = stage_diag_mode (0=Lit, 1=Clay 18% Gray, 2=False Color), w = reserved
+    float stage_camera_params[4]{0.0f, 2.20f, 0.0f, 0.0f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

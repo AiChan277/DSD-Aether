@@ -40,7 +40,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    float z0 = abs(fg.proj.col3.z / max(abs(d0 + fg.proj.col2.z), 1e-5));
+    float z0 = abs(depth_to_view_z(fg, d0));
     float3 n0 = oct_decode(aether_load(gb_n_slot, p).xy);
     uint raw_m0 = aether_uload(gb_mat_slot, p).x;
     uint m0 = raw_m0 & 0x3FFu;
@@ -70,7 +70,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         for (int dx = -1; dx <= 1; ++dx) {
             int2 np = clamp(p + int2(dx, dy), int2(0, 0), max_p);
             float d1 = aether_load(depth_slot, np).x;
-            float z1 = (d1 >= 0.99998) ? (z0 + 0.5) : abs(fg.proj.col3.z / max(abs(d1 + fg.proj.col2.z), 1e-5));
+            float z1 = (d1 >= 0.99998) ? (z0 + 0.5) : abs(depth_to_view_z(fg, d1));
             float3 n1 = (d1 >= 0.99998) ? n0 : oct_decode(aether_load(gb_n_slot, np).xy);
             uint raw_m1 = aether_uload(gb_mat_slot, np).x;
             uint m1 = raw_m1 & 0x3FFu;

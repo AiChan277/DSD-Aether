@@ -544,6 +544,12 @@ AETHER-2.5D builds on excellent work by others, each under its own license:
 
 ---
 
+## Future Roadmap
+
+- **3D Props Scene Graph & Spatial Accessories**: Interactive 3D prop assets (desks, microphones, hand-held items, room/stage sets) attached to avatar bones or world anchors via a unified Scene Hierarchy Outliner & Gizmo transform workflow (`Deferred from Phase 2` so Lighting Stage schematics remain clean and lightweight with zero heavy 3D fixture meshes).
+
+---
+
 ## Citing this work
 
 If you refer to AETHER-2.5D in academic writing, please cite the accompanying paper:

@@ -71,8 +71,12 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     };
     const Mat4Vec3 target{cam.target_x, cam.target_y, cam.target_z};
     const Mat4Vec3 f = normalize3({target.x - out_eye.x, target.y - out_eye.y, target.z - out_eye.z});
-    const Mat4Vec3 world_up{0.0f, 1.0f, 0.0f};
-    const Mat4Vec3 s = normalize3(cross3(f, world_up));
+    Mat4Vec3 up_ref{0.0f, 1.0f, 0.0f};
+    if (std::abs(f.y) > 0.985f) {
+        const float sign_y = (f.y < 0.0f) ? -1.0f : 1.0f;
+        up_ref = {sign_y * sy, 0.0f, sign_y * cy};
+    }
+    const Mat4Vec3 s = normalize3(cross3(f, up_ref));
     const Mat4Vec3 u = cross3(s, f);
 
     out_view.col0[0] = s.x;
@@ -111,26 +115,45 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
 
     const float near_p = 0.05f;
     const float far_p = 60.0f;
-    const float fovy = std::clamp(cam.fovy_rad, 0.1f, 2.5f);
-    const float fy = 1.0f / std::tan(fovy * 0.5f);
-    const float fx = fy / std::max(aspect, 0.1f);
-    const float a = -far_p / (far_p - near_p);
-    const float b = -(far_p * near_p) / (far_p - near_p);
+    if (cam.is_orthographic) {
+        const float half_h = std::max(0.05f, cam.ortho_height * 0.5f);
+        const float half_w = half_h * std::max(aspect, 0.1f);
+        out_proj = {};
+        out_proj.col0[0] = 1.0f / half_w;
+        out_proj.col1[1] = 1.0f / half_h;
+        out_proj.col2[2] = -1.0f / (far_p - near_p);
+        out_proj.col3[2] = -near_p / (far_p - near_p);
+        out_proj.col3[3] = 1.0f;
 
-    out_proj = {};
-    out_proj.col0[0] = fx;
-    out_proj.col1[1] = fy;
-    out_proj.col2[2] = a;
-    out_proj.col2[3] = -1.0f;
-    out_proj.col3[2] = b;
-    out_proj.col3[3] = 0.0f;
+        out_inv_proj = {};
+        out_inv_proj.col0[0] = half_w;
+        out_inv_proj.col1[1] = half_h;
+        out_inv_proj.col2[2] = -(far_p - near_p);
+        out_inv_proj.col3[2] = -near_p;
+        out_inv_proj.col3[3] = 1.0f;
+    } else {
+        const float fovy = std::clamp(cam.fovy_rad, 0.1f, 2.5f);
+        const float fy = 1.0f / std::tan(fovy * 0.5f);
+        const float fx = fy / std::max(aspect, 0.1f);
+        const float a = -far_p / (far_p - near_p);
+        const float b = -(far_p * near_p) / (far_p - near_p);
 
-    out_inv_proj = {};
-    out_inv_proj.col0[0] = 1.0f / fx;
-    out_inv_proj.col1[1] = 1.0f / fy;
-    out_inv_proj.col2[3] = 1.0f / b;
-    out_inv_proj.col3[2] = -1.0f;
-    out_inv_proj.col3[3] = -a / b;
+        out_proj = {};
+        out_proj.col0[0] = fx;
+        out_proj.col1[1] = fy;
+        out_proj.col2[2] = a;
+        out_proj.col2[3] = -1.0f;
+        out_proj.col3[2] = b;
+        out_proj.col3[3] = 0.0f;
+
+        out_inv_proj = {};
+        out_inv_proj.col0[0] = 1.0f / fx;
+        out_inv_proj.col1[1] = 1.0f / fy;
+        out_inv_proj.col2[2] = 0.0f;
+        out_inv_proj.col2[3] = 1.0f / b;
+        out_inv_proj.col3[2] = -1.0f;
+        out_inv_proj.col3[3] = a / b;
+    }
 
     out_vp = mul_mat4(out_proj, out_view);
 }
@@ -229,6 +252,10 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     const float pivot_vz =
         fg.view.col0[2] * pivot_ws.x + fg.view.col1[2] * pivot_ws.y + fg.view.col2[2] * pivot_ws.z + fg.view.col3[2];
 
+    const bool is_stage = (req.view_kind == RenderViewKind::LightingStage);
+    const float eff_flatness = (!is_stage || req.preview_25d_flatten) ? rig.global_live2d_flatness : 0.0f;
+    const StageDiagnosticMode eff_diag = is_stage ? req.stage_diag_mode : StageDiagnosticMode::Lit;
+
     fg.viewport_size[0] = static_cast<float>(w);
     fg.viewport_size[1] = static_cast<float>(h);
     fg.viewport_size[2] = 1.0f / static_cast<float>(w);
@@ -236,7 +263,11 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     fg.head_pivot_view_and_flatness[0] = pivot_vx;
     fg.head_pivot_view_and_flatness[1] = pivot_vy;
     fg.head_pivot_view_and_flatness[2] = pivot_vz;
-    fg.head_pivot_view_and_flatness[3] = rig.global_live2d_flatness;
+    fg.head_pivot_view_and_flatness[3] = eff_flatness;
+    fg.stage_camera_params[0] = req.camera.is_orthographic ? 1.0f : 0.0f;
+    fg.stage_camera_params[1] = std::max(0.05f, req.camera.ortho_height);
+    fg.stage_camera_params[2] = static_cast<float>(static_cast<uint8_t>(eff_diag));
+    fg.stage_camera_params[3] = 0.0f;
 
     fg.head_fwd_world[0] = av_sin;
     fg.head_fwd_world[1] = 0.0f;

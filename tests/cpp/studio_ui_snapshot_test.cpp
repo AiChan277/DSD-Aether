@@ -324,7 +324,10 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         const struct {
             StudioMode mode;
             const char* tag;
-        } modes[] = {{StudioMode::LiveStudio, "live"}, {StudioMode::Rigging, "rigging"}, {StudioMode::Nodes, "nodes"}};
+        } modes[] = {{StudioMode::LiveStudio, "live"},
+                     {StudioMode::Rigging, "rigging"},
+                     {StudioMode::Lighting, "lighting"},
+                     {StudioMode::Nodes, "nodes"}};
         for (const auto& m : modes) {
             ws.switch_mode(m.mode);
             for (int f = 0; f < 12; ++f) {
@@ -332,6 +335,16 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
             }
             std::snprintf(name, sizeof(name), "studio_%s_%d.png", m.tag, static_cast<int>(dpi * 100.0f));
             save_snapshot(name, w, h);
+        }
+
+        if (dpi == 1.0f) {
+            ws.switch_mode(StudioMode::Lighting);
+            ws.lighting_stage().toggle_quad_view();
+            for (int f = 0; f < 6; ++f) {
+                rig.frame(ws);
+            }
+            save_snapshot("studio_lighting_quad_100.png", w, h);
+            ws.lighting_stage().toggle_quad_view();
         }
 
         // 100% DPI: also capture interactive Move 3D Gizmo + Wireframe/Colliders in Live mode,

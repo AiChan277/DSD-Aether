@@ -32,6 +32,7 @@ enum class SelectionKind : uint8_t {
     Node = 9,
     Plugin = 10,
     OutputDest = 11,
+    StudioLight = 12,
 };
 
 struct UiSelection {

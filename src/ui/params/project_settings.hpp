@@ -25,6 +25,7 @@ enum class ActionId : uint16_t {
     OpenPalette = 0,
     ModeLiveStudio,
     ModeRigging,
+    ModeLighting,
     ModeNodes,
     ProjectNew,
     ProjectOpen,
@@ -89,6 +90,9 @@ enum class ActionId : uint16_t {
     OutlinerHide,
     OutlinerUnhideAll,
     OutlinerDelete,
+
+    LightingQuadView,
+    LightingPilotLight,
 
     Count,
 };

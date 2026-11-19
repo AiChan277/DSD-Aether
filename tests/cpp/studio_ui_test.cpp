@@ -1265,3 +1265,157 @@ TEST_CASE("Viewport HUD collapse/close, Light Orb collision shift, Camera Preset
     CHECK(actions.viewport.request_set_hand_tracking);
     CHECK(actions.viewport.target_hand_tracking_enabled);
 }
+
+TEST_CASE("Phase 2 Lighting Tab: 16-light Mixer, Rigs JSON roundtrip, 7 Stage Cameras & Ctrl+Alt+Q Quad View",
+          "[ui][phase2][lighting]") {
+    using namespace aether::renderer;
+    using namespace aether::ui;
+
+    const aether::RuntimePaths paths = aether::discover_runtime_paths();
+    const auto repo_root = std::filesystem::path(paths.assets_dir).parent_path();
+    const auto cfg_rigs = repo_root / "config" / "lighting_rigs.json";
+    REQUIRE(std::filesystem::is_regular_file(cfg_rigs));
+
+    // 1. Validate shipped config/lighting_rigs.json loads all 5 built-in presets cleanly
+    {
+        std::vector<StudioRigPresetRecord> presets;
+        REQUIRE(load_lighting_rigs_json(cfg_rigs, presets));
+        REQUIRE(presets.size() >= 5U);
+        CHECK(std::string(presets[0].name.data()) == "Three-Point Broadcast");
+        CHECK(std::string(presets[1].name.data()) == "Dramatic Rim Split");
+        CHECK(presets[1].rig.studio_lights[1].passive_flag == PassiveFlagMode::NegativeFillBlack);
+        CHECK(std::string(presets[2].name.data()) == "Shinkai Golden Hour");
+        CHECK(presets[3].rig.studio_lights[0].fixture == StudioFixtureProfile::BroadcastRing);
+        CHECK(std::string(presets[4].name.data()) == "Neon Cyberpunk Dual-Color");
+
+        std::error_code ec;
+        const auto tmp_dir =
+            std::filesystem::temp_directory_path(ec) /
+            ("aether_rigs_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(tmp_dir, ec);
+        const auto save_path = tmp_dir / "custom_rigs.json";
+        LightingRig mod_rig = presets[0].rig;
+        const int added_idx = add_studio_light(mod_rig, StudioFixtureProfile::EllipsoidalLeko);
+        REQUIRE(added_idx >= 4);
+        mod_rig.studio_lights[static_cast<size_t>(added_idx)].gobo = StudioGoboPattern::AnimeClassroomSlats;
+        mod_rig.studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled = true;
+        REQUIRE(save_or_update_lighting_rig_preset(save_path, "QA Gobo Rig", mod_rig));
+
+        std::vector<StudioRigPresetRecord> reloaded;
+        REQUIRE(load_lighting_rigs_json(save_path, reloaded));
+        REQUIRE(reloaded.size() == 6U);
+        CHECK(std::string(reloaded.back().name.data()) == "QA Gobo Rig");
+        CHECK(reloaded.back().rig.studio_lights[static_cast<size_t>(added_idx)].gobo ==
+              StudioGoboPattern::AnimeClassroomSlats);
+        CHECK(reloaded.back().rig.studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled);
+        std::filesystem::remove_all(tmp_dir, ec);
+    }
+
+    // 2. Dynamic add/duplicate/remove up to 16 studio lights + Passive Flags
+    {
+        LightingRig rig = LightingRig::default_three_point();
+        ensure_studio_lights_initialized(rig);
+        REQUIRE(rig.use_studio_lights);
+        REQUIRE(rig.studio_light_count == 4U);
+        const int flag_idx = add_passive_flag(rig, PassiveFlagMode::NegativeFillBlack);
+        REQUIRE(flag_idx == 4);
+        const int dup_idx = duplicate_studio_light(rig, 0U);
+        REQUIRE(dup_idx == 5);
+        CHECK(remove_studio_light(rig, static_cast<uint32_t>(dup_idx)));
+        while (rig.studio_light_count < kMaxStudioLights) {
+            CHECK(add_studio_light(rig, StudioFixtureProfile::RectSoftbox) >= 0);
+        }
+        CHECK(rig.studio_light_count == kMaxStudioLights);
+        CHECK(add_studio_light(rig, StudioFixtureProfile::RectSoftbox) == -1);
+    }
+
+    // 3. Dedicated Lighting Tab renders cleanly with zero steady-state allocations and handles Ctrl+Alt+Q / Pilot
+    aether::rhi::RhiDeviceConfig rhi_cfg{};
+    rhi_cfg.enable_validation = false;
+    rhi_cfg.require_validation = false;
+    rhi_cfg.headless = true;
+    auto rhi_res = aether::rhi::RhiDevice::create(rhi_cfg);
+    REQUIRE(rhi_res.has_value());
+
+    aether::ui::ScopedUiRig rig{};
+    rig.rhi = rhi_res.value();
+    REQUIRE(rig.arena.init(16ULL * 1024ULL * 1024ULL));
+    REQUIRE(aether::ui::install_imgui_arena(rig.arena));
+    ImGui::CreateContext();
+    rig.imgui_init = true;
+    ImPlot::CreateContext();
+    rig.implot_init = true;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1600.0f, 900.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigInputTrickleEventQueue = false;
+
+    aether::HardwareInventory hw{};
+    rig.ws.init(paths, hw, 1.0f, nullptr, false);
+    rig.ws_init = true;
+    rig.ws.viewport_panel().set_persist_presets(false);
+
+    unsigned char* tex_pixels = nullptr;
+    int tex_w = 0;
+    int tex_h = 0;
+    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
+    io.Fonts->SetTexID(static_cast<ImTextureID>(1));
+
+    aether::TelemetrySnapshot telem{};
+    telem.render_fps = 60.0f;
+    DevShellInputEcho echo{};
+    DevShellAvatarView avatar{};
+    avatar.has_avatar = true;
+    avatar.has_camera = true;
+    avatar.bone_head_y = 1.46f;
+    avatar.bone_chest_y = 1.20f;
+    DevShellTrackingView tracking{};
+    DevShellRenderView render_view{};
+    DevShellOutputView output_view{};
+    StudioActions actions{};
+
+    rig.ws.switch_mode(StudioMode::Lighting);
+    CHECK(rig.ws.mode() == StudioMode::Lighting);
+    for (int f = 0; f < 10; ++f) {
+        actions.reset_per_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(static_cast<double>(f) / 60.0, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking,
+                      render_view, output_view, actions);
+        ImGui::Render();
+    }
+    CHECK(actions.viewport.request_stage_render);
+    CHECK(actions.viewport.stage_show_schematic);
+    CHECK_FALSE(actions.viewport.stage_preview_25d_flatten);
+    CHECK_FALSE(actions.viewport.stage_quad_view);
+
+    // Hotkey Ctrl+Alt+Q toggles Quad View
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddKeyEvent(ImGuiMod_Alt, true);
+    io.AddKeyEvent(ImGuiKey_Q, true);
+    actions.reset_per_frame();
+    ImGui::NewFrame();
+    rig.ws.render(0.25, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    io.AddKeyEvent(ImGuiKey_Q, false);
+    io.AddKeyEvent(ImGuiMod_Alt, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    CHECK(actions.viewport.stage_quad_view);
+    CHECK(actions.viewport.quad_top_camera.is_orthographic);
+    CHECK(actions.viewport.quad_right_camera.is_orthographic);
+
+    // Hotkey Ctrl+Alt+P toggles Pilot Light
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    io.AddKeyEvent(ImGuiMod_Alt, true);
+    io.AddKeyEvent(ImGuiKey_P, true);
+    actions.reset_per_frame();
+    ImGui::NewFrame();
+    rig.ws.render(0.28, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+    ImGui::Render();
+    io.AddKeyEvent(ImGuiKey_P, false);
+    io.AddKeyEvent(ImGuiMod_Alt, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    CHECK(rig.ws.lighting_stage().pilot_light_active());
+}

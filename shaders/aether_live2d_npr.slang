@@ -99,8 +99,9 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
 
     uint mat_flags = mat.extra_slots.z;
     uint debug_view = fg.state_u32.z;
+    bool is_clay_diag = (uint(fg.stage_camera_params.z) == 1u);
     if (debug_view == 1u) {
-        return float4(lit_rgba.rgb * alpha, alpha);
+        return float4((is_clay_diag ? float3(0.18, 0.18, 0.18) : lit_rgba.rgb) * alpha, alpha);
     }
     if (debug_view == 5u) {
         return float4(0.18, 0.06, 0.02, 0.25);
@@ -110,10 +111,13 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     if (mat.extra_slots.y != 0xFFFFFFFFu) {
         emissive_map = aether_sample(mat.extra_slots.y, kSamplerLinearClamp, i.uv).rgb;
     }
-    float3 emissive_term = mat.emission_and_shift.rgb * emissive_map;
+    float3 emissive_term = is_clay_diag ? float3(0.0, 0.0, 0.0) : (mat.emission_and_shift.rgb * emissive_map);
+    if (is_clay_diag) {
+        lit_rgba.rgb = float3(0.18, 0.18, 0.18);
+    }
 
     // Unlit MToon materials preserve exact analytical emissive + base premul composite
-    if ((mat_flags & 32u) != 0u) {
+    if ((mat_flags & 32u) != 0u && !is_clay_diag) {
         float3 hdr_rgb = (lit_rgba.rgb + emissive_term) * alpha;
         return float4(hdr_rgb, alpha);
     }
@@ -162,7 +166,7 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         }
     }
 
-    float3 view_v = normalize_safe(fg.camera_pos_world.xyz - i.world_pos, float3(0.0, 0.0, 1.0));
+    float3 view_v = compute_effective_view_dir(fg, i.world_pos);
     float norm_flat_k = is_skin_pixel ? face_norm_flatten : 0.0;
     float3 n_lit_base = is_skin_pixel ? unified_skin_n : shade_n;
     if (is_face) {
@@ -174,10 +178,10 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
 
     // Sample authentic MToon _ShadeTexture * _ShadeColor
     float3 tex_shade_mul = aether_sample(mat.tex_slots.y, kSamplerLinearClamp, i.uv).rgb;
-    float3 shade_col = mat.shade_color.rgb * tex_shade_mul;
+    float3 shade_col = is_clay_diag ? float3(0.065, 0.065, 0.065) : (mat.shade_color.rgb * tex_shade_mul);
 
     // VRoid baked upper-neck texture shadow compensation (strictly gated on upper-neck skin chroma)
-    if (is_body_skin && neck_skin_w > 0.001 && fg.face_skin_ref_rgb.w > 0.5) {
+    if (!is_clay_diag && is_body_skin && neck_skin_w > 0.001 && fg.face_skin_ref_rgb.w > 0.5) {
         float3 face_ref = fg.face_skin_ref_rgb.rgb;
         float ref_luma = max(luminance(face_ref), 1e-4);
         float px_luma = max(luminance(lit_rgba.rgb), 1e-4);
@@ -524,8 +528,8 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         float rim_px = clamp(fg.filter_pro_params.w, 2.0, 4.5);
         int2 rim_p = clamp(pix_i + int2(round(light_scr * rim_px)), int2(0, 0), max_vp);
         float d_off = aether_load(depth_slot, rim_p).x;
-        float z_cur = abs(fg.proj.col3.z / max(abs(i.clip_pos.z + fg.proj.col2.z), 1e-5));
-        float z_off = (d_off >= 0.99998) ? (z_cur + 2.0) : abs(fg.proj.col3.z / max(abs(d_off + fg.proj.col2.z), 1e-5));
+        float z_cur = abs(depth_to_view_z(fg, i.clip_pos.z));
+        float z_off = (d_off >= 0.99998) ? (z_cur + 2.0) : abs(depth_to_view_z(fg, d_off));
         float rel_jump = (z_off - z_cur) / max(z_cur, 0.15);
         depth_edge_rim = smoothstep(0.016, 0.052, rel_jump);
     }
@@ -667,8 +671,10 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         }
     }
 
-    float3 hdr = direct_term + rim_term + micro_pbr_term + matcap_term + catchlight_term + angel_term +
-                 backscatter_term + emissive_term;
+    float3 hdr = is_clay_diag
+                     ? (direct_term + rim_term * 0.35 + micro_pbr_term * 0.25)
+                     : (direct_term + rim_term + micro_pbr_term + matcap_term + catchlight_term + angel_term +
+                        backscatter_term + emissive_term);
     return float4(hdr * alpha, alpha);
 }
 

@@ -57,13 +57,10 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
     bool is_face_px = (rt_class == 0u) || ((packed_mat & 0x1000u) != 0u) || (misc.y > 0.5);
     bool is_body_skin_px = ((packed_mat & 0x2000u) != 0u) && !is_face_px;
 
-    float true_view_z = -fg.camera_pos_world.w;
-    if (hw_depth + fg.proj.col2.z < 0.0) {
-        true_view_z = -fg.proj.col3.z / (hw_depth + fg.proj.col2.z);
-    }
+    float true_view_z = depth_to_view_z(fg, hw_depth);
     float2 uv = (float2(tid.xy) + 0.5) * fg.viewport_size.zw;
     float3 view_pos = reconstruct_view_pos_from_zflat(
-        fg.proj, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
+        fg, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
     float neck_w = is_body_skin_px ? compute_neck_seam_blend(world_pos, fg) : 0.0;

@@ -25,6 +25,7 @@ enum class PaletteCommandTag : uint16_t {
     None = 0,
     ModeLiveStudio,
     ModeRigging,
+    ModeLighting,
     ModeNodes,
     ProjectNew,
     ProjectOpen,
@@ -52,6 +53,8 @@ enum class PaletteCommandTag : uint16_t {
     ToggleWsControl,
     ToggleTrackingHud,
     ToggleHandTracking,
+    ToggleLightingQuadView,
+    ToggleLightingPilotLight,
 };
 
 struct PaletteEntry {

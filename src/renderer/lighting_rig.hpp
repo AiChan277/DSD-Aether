@@ -356,4 +356,26 @@ inline void apply_lighting_fixture_preset(LightingRig& rig, LightingFixturePrese
     }
 }
 
+/** Named studio lighting rig preset record for JSON serialization (`config/lighting_rigs.json`). */
+struct StudioRigPresetRecord {
+    std::array<char, 64> name{};
+    LightingRig rig{};
+};
+
+/** Fills `out_presets` with the 5 built-in complete studio lighting rig presets. */
+void builtin_studio_rig_presets(std::array<StudioRigPresetRecord, 5>& out_presets,
+                                const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+
+/** Loads studio lighting presets from a JSON file (`config/lighting_rigs.json`). */
+[[nodiscard]] bool load_lighting_rigs_json(const std::filesystem::path& path,
+                                           std::vector<StudioRigPresetRecord>& out_presets) noexcept;
+
+/** Writes a list of studio lighting presets to a JSON file (`config/lighting_rigs.json`). */
+[[nodiscard]] bool save_lighting_rigs_json(const std::filesystem::path& path,
+                                           std::span<const StudioRigPresetRecord> presets) noexcept;
+
+/** Updates or inserts a named preset inside `path` cleanly. */
+[[nodiscard]] bool save_or_update_lighting_rig_preset(const std::filesystem::path& path, const char* preset_name,
+                                                      const LightingRig& rig) noexcept;
+
 } // namespace aether::renderer

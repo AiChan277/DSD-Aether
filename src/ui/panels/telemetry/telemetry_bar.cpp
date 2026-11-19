@@ -256,9 +256,9 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             ImGui::EndMenu();
         }
 
-        // Centered 3-Mode Selector (§12.4)
+        // Centered 4-Mode Selector (Live Studio | Rigging | Lighting | Nodes)
         const float avail = ImGui::GetContentRegionAvail().x;
-        const float cluster_w = 300.0f * scale;
+        const float cluster_w = 408.0f * scale;
         if (avail > cluster_w + 260.0f * scale) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - cluster_w - 240.0f * scale) * 0.45f);
         }
@@ -292,6 +292,8 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
         mode_tab(StudioMode::LiveStudio, tr("Live Studio"));
         ImGui::SameLine(0.0f, 4.0f * scale);
         mode_tab(StudioMode::Rigging, tr("Rigging"));
+        ImGui::SameLine(0.0f, 4.0f * scale);
+        mode_tab(StudioMode::Lighting, tr("Lighting"));
         ImGui::SameLine(0.0f, 4.0f * scale);
         mode_tab(StudioMode::Nodes, tr("Nodes"));
 

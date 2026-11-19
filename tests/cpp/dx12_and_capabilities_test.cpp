@@ -24,6 +24,7 @@
 #include "rhi/d3d12_device.hpp"
 #include "rhi/rhi_device.hpp"
 #include "rhi/rhi_swapchain.hpp"
+#include "synthetic_avatar_helper.hpp"
 #include "test_png_io.hpp"
 #include "tracking/npu_postprocess.hpp"
 
@@ -1338,5 +1339,260 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
     }
 
     d3d12->destroy();
+    rhi->destroy();
+}
+
+TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gray & False Color EL-Zone",
+          "[dx12][phase2][lighting_stage]") {
+    using namespace aether::renderer;
+
+    aether::rhi::RhiDeviceConfig rcfg{};
+    rcfg.enable_validation = false;
+    rcfg.require_validation = false;
+    rcfg.headless = true;
+    auto vk_res = aether::rhi::RhiDevice::create(rcfg);
+    if (!vk_res) {
+        SUCCEED("Skipped DX12 Phase 2 test: Vulkan helper unavailable");
+        return;
+    }
+    auto rhi = std::unique_ptr<aether::rhi::RhiDevice>(vk_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = rhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = rhi->gpu_info().luid;
+    auto d3d12_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d12_res) {
+        rhi->destroy();
+        SUCCEED("Skipped DX12 Phase 2 test: D3D12 unavailable");
+        return;
+    }
+    auto d3d12 = std::unique_ptr<aether::rhi::D3D12Device>(d3d12_res.value());
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.92f, 0.35f, 0.25f); // Saturated coral-red material
+    mat.toon_params[0] = 0.0f;
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.55f, 0.70f, 0.0f};
+    const float p1[3] = {0.55f, 0.70f, 0.0f};
+    const float p2[3] = {0.55f, 1.85f, 0.0f};
+    const float p3[3] = {-0.55f, 1.85f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.92f, 0.35f, 0.25f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kTestW = 256u;
+    constexpr uint32_t kTestH = 256u;
+    Dx12FrameGraph dx_fg;
+    REQUIRE(dx_fg.init(*d3d12, kTestW, kTestH, 65536u, false).has_value());
+    REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+    // Place 6 huge front softboxes + barn doors + honeycomb directly in front of the avatar
+    LightingRig rig = LightingRig::default_three_point();
+    rig.use_studio_lights = true;
+    rig.studio_light_count = 6;
+    for (uint32_t i = 0; i < 6u; ++i) {
+        configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
+        rig.studio_lights[i].use_orbit_angles = false;
+        rig.studio_lights[i].position_ws = {-0.75f + 0.30f * static_cast<float>(i), 1.30f, 0.90f};
+        rig.studio_lights[i].target_ws = {0.0f, 1.30f, 0.0f};
+        rig.studio_lights[i].aim_lock = false;
+        rig.studio_lights[i].width_or_outer_m = 0.85f;
+        rig.studio_lights[i].height_or_inner_m = 0.85f;
+        rig.studio_lights[i].grid_enabled = true;
+        rig.studio_lights[i].barn_doors_enabled = true;
+        rig.studio_lights[i].intensity_ev100 = (i == 0u) ? 1.0f : 0.12f;
+    }
+
+    const PreviewCamera studio_cam = make_stage_camera_preset(StageCameraView::FreePerspective, {0.0f, 1.30f, 0.0f});
+    PreviewCamera bcast_cam = studio_cam;
+    bcast_cam.yaw_rad = 0.0f;
+    bcast_cam.pitch_rad = 0.0f;
+    bcast_cam.distance = 2.4f;
+
+    auto run_dx = [&](RenderViewKind kind, const PreviewCamera& cam, StageDiagnosticMode dm, bool req_schem,
+                      uint8_t mode, uint64_t fidx, std::vector<uint8_t>& out_rgba, std::vector<uint8_t>& out_bgra) {
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.studio_camera = bcast_cam;
+        req.has_studio_frustum = true;
+        req.studio_frustum_aspect = 1.0f;
+        req.view_kind = kind;
+        req.stage_diag_mode = dm;
+        req.show_stage_schematic = req_schem;
+        req.show_stage_grid = true;
+        req.preview_25d_flatten = true;
+        req.lighting_mode = mode;
+        req.rt_enabled = (mode > 0u) && d3d12->dxr_supported();
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.frame_index = fidx;
+        req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::kD3D12FrameCount);
+        REQUIRE(dx_fg.render_frame(req, true).has_value());
+        out_rgba.assign(static_cast<size_t>(kTestW) * kTestH * 4u, 0u);
+        out_bgra.assign(static_cast<size_t>(kTestW) * kTestH * 4u, 0u);
+        REQUIRE(dx_fg.readback_rgba8(out_rgba));
+        REQUIRE(dx_fg.readback_bgra8(out_bgra));
+    };
+
+    std::vector<uint8_t> bcast_rgba_0, bcast_bgra_0;
+    std::vector<uint8_t> bcast_adv_rgba, bcast_adv_bgra;
+    std::vector<uint8_t> stage_lit_rgba, stage_lit_bgra;
+    std::vector<uint8_t> stage_clay_rgba, stage_clay_bgra;
+    std::vector<uint8_t> stage_fc_rgba, stage_fc_bgra;
+    std::vector<uint8_t> stage_ortho_top_rgba, stage_ortho_top_bgra;
+    std::vector<uint8_t> bcast_after_rgba, bcast_after_bgra;
+
+    // 1. Clean BroadcastView baseline (mode 0 for bit-exact repeatability across cold/warm frames)
+    run_dx(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, 0u, 1u, bcast_rgba_0, bcast_bgra_0);
+
+    // 2. Adversarial BroadcastView with show_stage_schematic = true MUST NOT draw schematics (0 bytes leaked!)
+    run_dx(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, true, 0u, 1u, bcast_adv_rgba,
+           bcast_adv_bgra);
+    CHECK(std::memcmp(bcast_rgba_0.data(), bcast_adv_rgba.data(), bcast_rgba_0.size()) == 0);
+    CHECK(std::memcmp(bcast_bgra_0.data(), bcast_adv_bgra.data(), bcast_bgra_0.size()) == 0);
+
+    // 3. LightingStageView draws rich schematics onto out_rgba8_, while out_bgra8_ (Spout2) stays 100% clean Broadcast!
+    run_dx(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Lit, true, 1u, 1u, stage_lit_rgba,
+           stage_lit_bgra);
+    CHECK(std::memcmp(bcast_bgra_0.data(), stage_lit_bgra.data(), bcast_bgra_0.size()) == 0);
+
+    uint32_t stage_diff_px = 0u;
+    for (size_t i = 0; i < stage_lit_rgba.size(); i += 4u) {
+        if (std::abs(int(stage_lit_rgba[i + 0]) - int(bcast_rgba_0[i + 0])) > 12 ||
+            std::abs(int(stage_lit_rgba[i + 1]) - int(bcast_rgba_0[i + 1])) > 12 ||
+            std::abs(int(stage_lit_rgba[i + 2]) - int(bcast_rgba_0[i + 2])) > 12) {
+            ++stage_diff_px;
+        }
+    }
+    INFO("DX12 Stage schematic diff pixels vs clean Broadcast: " << stage_diff_px);
+    CHECK(stage_diff_px > 600u);
+
+    // 4. Clay (18% Gray) drops chromatic spread on saturated coral surface, False Color renders EL-Zone stops, OrthoTop works
+    run_dx(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Clay, false, 1u, 2u, stage_clay_rgba,
+           stage_clay_bgra);
+    run_dx(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::FalseColor, false, 1u, 3u, stage_fc_rgba,
+           stage_fc_bgra);
+    const PreviewCamera top_cam = make_stage_camera_preset(StageCameraView::OrthoTop, {0.0f, 1.30f, 0.0f}, 3.2f);
+    run_dx(RenderViewKind::LightingStage, top_cam, StageDiagnosticMode::Lit, true, 1u, 4u, stage_ortho_top_rgba,
+           stage_ortho_top_bgra);
+
+    // Center pixel at (kTestW/2, kTestH/2): Lit is saturated coral (|R-B| > 60); Clay albedo is 18% gray under warm key
+    const size_t center_i = (static_cast<size_t>(kTestH / 2u) * kTestW + (kTestW / 2u)) * 4u;
+    const int lit_chroma =
+        std::abs(static_cast<int>(bcast_rgba_0[center_i]) - static_cast<int>(bcast_rgba_0[center_i + 2]));
+    const int clay_chroma =
+        std::abs(static_cast<int>(stage_clay_rgba[center_i]) - static_cast<int>(stage_clay_rgba[center_i + 2]));
+    INFO("DX12 Center Lit RGB=(" << int(bcast_rgba_0[center_i]) << "," << int(bcast_rgba_0[center_i + 1]) << ","
+                                 << int(bcast_rgba_0[center_i + 2]) << ") Clay RGB=("
+                                 << int(stage_clay_rgba[center_i]) << "," << int(stage_clay_rgba[center_i + 1]) << ","
+                                 << int(stage_clay_rgba[center_i + 2]) << ") FC RGB=("
+                                 << int(stage_fc_rgba[center_i]) << "," << int(stage_fc_rgba[center_i + 1]) << ","
+                                 << int(stage_fc_rgba[center_i + 2]) << ")");
+    CHECK(lit_chroma > 60);
+    CHECK(clay_chroma <= 35);
+    CHECK(clay_chroma * 3 < lit_chroma);
+    CHECK(std::memcmp(stage_fc_rgba.data(), stage_clay_rgba.data(), stage_fc_rgba.size()) != 0);
+
+    // 5. After Stage Clay / Ortho / False Color frames, returning to BroadcastView keeps Broadcast temporal bank untouched!
+    run_dx(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, 0u, 1u, bcast_after_rgba,
+           bcast_after_bgra);
+    CHECK(std::memcmp(bcast_rgba_0.data(), bcast_after_rgba.data(), bcast_rgba_0.size()) == 0);
+
+    dx_fg.destroy();
+    avatar->destroy();
+    d3d12->destroy();
+    rhi->destroy();
+}
+
+TEST_CASE("Phase 2 Visual Capture on 8590.vrm: Clean Broadcast vs Stage Persp / Top Ortho / Clay / EL-Zone",
+          "[dx12][phase2][visual]") {
+    using namespace aether::renderer;
+    const auto vrm_path = find_user_vrm_path();
+    if (vrm_path.empty()) {
+        SUCCEED("Skipped 8590.vrm visual capture: VRM not present");
+        return;
+    }
+    auto rhi_res = aether::rhi::RhiDevice::create(aether::rhi::RhiDeviceConfig{false, false, true, true});
+    if (!rhi_res) {
+        SUCCEED("Skipped visual capture: Vulkan unavailable");
+        return;
+    }
+    auto rhi = std::unique_ptr<aether::rhi::RhiDevice>(rhi_res.value());
+    auto avatar = load_avatar_file(*rhi, vrm_path);
+    REQUIRE(avatar != nullptr);
+
+    constexpr uint32_t kSnapW = 512u;
+    constexpr uint32_t kSnapH = 512u;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, RendererConfig{kSnapW, kSnapH, 0u, 0u, rhi->rt_supported(), false}).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    apply_studio_rig_preset(rig, StudioRigPresetId::ShinkaiGoldenHour, {0.0f, 1.32f, 0.0f});
+
+    PreviewCamera studio_cam{};
+    studio_cam.target_x = 0.0f;
+    studio_cam.target_y = 1.28f;
+    studio_cam.target_z = 0.0f;
+    studio_cam.distance = 2.0f;
+    studio_cam.fovy_rad = 0.42f;
+    studio_cam.yaw_rad = 0.25f;
+    studio_cam.pitch_rad = 0.08f;
+
+    auto snap_vk = [&](const std::string& filename, RenderViewKind kind, const PreviewCamera& cam,
+                       StageDiagnosticMode dm, bool schem, bool flat25d, uint64_t fidx) {
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.studio_camera = studio_cam;
+        req.has_studio_frustum = true;
+        req.studio_frustum_aspect = 1.0f;
+        req.view_kind = kind;
+        req.stage_diag_mode = dm;
+        req.show_stage_schematic = schem;
+        req.show_stage_grid = true;
+        req.preview_25d_flatten = flat25d;
+        req.selected_studio_light_idx = 0;
+        req.lighting_mode = 1;
+        req.rt_enabled = rhi->rt_supported();
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.frame_index = fidx;
+        req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
+        req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+        const auto outs = renderer.graph().outputs();
+        const VkImage target_vp = (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
+        auto px = renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kSnapW, kSnapH);
+        REQUIRE(px.has_value());
+        const auto dir = snapshot_out_dir();
+        std::filesystem::create_directories(dir);
+        CHECK(aether::test::save_rgba8_png(dir / filename, kSnapW, kSnapH, px.value().data()));
+    };
+
+    const PreviewCamera stage_persp = make_stage_camera_preset(StageCameraView::FreePerspective, {0.0f, 1.15f, 0.0f});
+    const PreviewCamera stage_top = make_stage_camera_preset(StageCameraView::OrthoTop, {0.0f, 1.0f, 0.0f}, 4.5f);
+
+    snap_vk("phase2_8590_broadcast_clean.png", RenderViewKind::Broadcast, studio_cam, StageDiagnosticMode::Lit, false,
+            true, 1u);
+    snap_vk("phase2_8590_stage_persp.png", RenderViewKind::LightingStage, stage_persp, StageDiagnosticMode::Lit, true,
+            false, 2u);
+    snap_vk("phase2_8590_stage_top_ortho.png", RenderViewKind::LightingStage, stage_top, StageDiagnosticMode::Lit, true,
+            false, 3u);
+    snap_vk("phase2_8590_stage_clay.png", RenderViewKind::LightingStage, studio_cam, StageDiagnosticMode::Clay, false,
+            false, 4u);
+    snap_vk("phase2_8590_stage_falsecolor.png", RenderViewKind::LightingStage, studio_cam,
+            StageDiagnosticMode::FalseColor, false, false, 5u);
+
+    renderer.destroy();
+    avatar->destroy();
     rhi->destroy();
 }

@@ -7,6 +7,8 @@ add_library(aether_ui STATIC
     palette/command_palette.hpp
     panels/inspector/inspector_panel.cpp
     panels/inspector/inspector_panel.hpp
+    panels/lighting/lighting_stage_panels.cpp
+    panels/lighting/lighting_stage_panels.hpp
     panels/nodegraph/node_canvas.cpp
     panels/nodegraph/node_canvas.hpp
     panels/nodegraph/timeline_console.cpp
@@ -56,6 +58,7 @@ target_include_directories(aether_ui PUBLIC
 
 target_link_libraries(aether_ui PUBLIC
     aether_rhi
+    aether_renderer
     imgui::imgui
     implot::implot
     imguizmo::imguizmo

@@ -83,10 +83,13 @@ target_include_directories(aether_renderer PUBLIC
     "${CMAKE_BINARY_DIR}/generated/include"
 )
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 target_link_libraries(aether_renderer PUBLIC
     aether_rhi
     aether_core
     aether_rust_host
+    nlohmann_json::nlohmann_json
 )
 
 if(WIN32)

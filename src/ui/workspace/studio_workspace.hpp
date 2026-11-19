@@ -3,6 +3,7 @@
 #include "ui/modals/graphics_settings_modal.hpp"
 #include "ui/palette/command_palette.hpp"
 #include "ui/panels/inspector/inspector_panel.hpp"
+#include "ui/panels/lighting/lighting_stage_panels.hpp"
 #include "ui/panels/nodegraph/node_canvas.hpp"
 #include "ui/panels/nodegraph/timeline_console.hpp"
 #include "ui/panels/outliner/outliner_panel.hpp"
@@ -83,6 +84,8 @@ class StudioWorkspace {
     [[nodiscard]] const AppSettings& settings() const noexcept { return settings_; }
     [[nodiscard]] NodeCanvas& node_canvas() noexcept { return node_canvas_; }
     [[nodiscard]] ViewportPanel& viewport_panel() noexcept { return viewport_panel_; }
+    [[nodiscard]] LightingStagePanels& lighting_stage() noexcept { return lighting_stage_; }
+    [[nodiscard]] const LightingStagePanels& lighting_stage() const noexcept { return lighting_stage_; }
     [[nodiscard]] const UiFontSet& fonts() const noexcept { return fonts_; }
     [[nodiscard]] float effective_dpi_scale() const noexcept {
         return os_dpi_scale_ * (static_cast<float>(params_.get_int(ParamId::AppUiScalePct)) / 100.0f);
@@ -136,6 +139,7 @@ class StudioWorkspace {
     OutlinerPanel outliner_panel_{};
     ViewportPanel viewport_panel_{};
     InspectorPanel inspector_panel_{};
+    LightingStagePanels lighting_stage_{};
     NodeCanvas node_canvas_{};
     TimelineConsole timeline_console_{};
     TelemetryBar telemetry_bar_{};

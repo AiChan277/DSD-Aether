@@ -187,6 +187,7 @@ struct GpuFrameGlobals {
     uint64_t reservoir_curr_bda;
     uint64_t reservoir_prev_bda;
     uint2 studio_aux_u32;
+    float4 stage_camera_params; // x=is_orthographic, y=ortho_height, z=stage_diag_mode, w=stage_fast_panning
     GpuLight lights[8];
 };
 
@@ -308,15 +309,59 @@ float4 project_live2d_flat(GpuMat4 proj, float3 pos_view, float pivot_z, float z
     return clip;
 }
 
-// Exact inverse projection for ray origin reconstruction from Z-flattened G-Buffer (§10.4).
-float3 reconstruct_view_pos_from_zflat(GpuMat4 proj, float2 uv, float true_view_z, float pivot_z, float k) {
+// Converts hardware depth [0, 1] into negative view-space Z for BOTH Perspective & Parallel Orthographic projections.
+float depth_to_view_z(GpuFrameGlobals fg, float hw_depth) {
+    if (fg.stage_camera_params.x > 0.5) {
+        return fg.inv_proj.col2.z * hw_depth + fg.inv_proj.col3.z;
+    }
+    float denom = hw_depth + fg.proj.col2.z;
+    return (denom < -1e-6) ? (-fg.proj.col3.z / denom) : (-fg.camera_pos_world.w);
+}
+
+// Parallel-safe view vector: returns constant camera back axis in Orthographic views to prevent parallax distortion.
+float3 compute_effective_view_dir(GpuFrameGlobals fg, float3 world_pos) {
+    if (fg.stage_camera_params.x > 0.5) {
+        return normalize(fg.inv_view.col2.xyz);
+    }
+    float3 d = fg.camera_pos_world.xyz - world_pos;
+    float l2 = dot(d, d);
+    return (l2 > 1e-10) ? (d * rsqrt(l2)) : float3(0.0, 0.0, 1.0);
+}
+
+// Exact inverse projection for ray origin reconstruction from Z-flattened G-Buffer (§10.4), Persp + Ortho.
+float3 reconstruct_view_pos_from_zflat(GpuFrameGlobals fg, float2 uv, float true_view_z, float pivot_z, float k) {
     float z_f = lerp(true_view_z, pivot_z, k);
     float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float p00 = max(abs(proj.col0.x), 1e-5);
-    float p11 = max(abs(proj.col1.y), 1e-5);
-    float x_view = ndc.x * (-z_f) / p00;
-    float y_view = ndc.y * (-z_f) / p11;
+    float p00 = max(abs(fg.proj.col0.x), 1e-5);
+    float p11 = max(abs(fg.proj.col1.y), 1e-5);
+    float persp_w = (fg.stage_camera_params.x > 0.5) ? 1.0 : (-z_f);
+    float x_view = ndc.x * persp_w / p00;
+    float y_view = ndc.y * persp_w / p11;
     return float3(x_view, y_view, true_view_z);
+}
+
+// EL-Zone Photographic False-Color Exposure Mapping relative to 18% middle gray (log2 stops).
+float3 eval_false_color_el_zone(float linear_lum) {
+    float ev = log2(max(linear_lum, 1e-5) / 0.18);
+    if (ev < -4.0) {
+        return float3(0.11, 0.04, 0.28);
+    }
+    if (ev < -2.0) {
+        return float3(0.06, 0.24, 0.86);
+    }
+    if (ev < -0.5) {
+        return float3(0.08, 0.74, 0.88);
+    }
+    if (ev <= 0.5) {
+        return float3(0.16, 0.78, 0.24);
+    }
+    if (ev <= 1.5) {
+        return float3(0.94, 0.86, 0.16);
+    }
+    if (ev <= 3.0) {
+        return float3(0.98, 0.48, 0.08);
+    }
+    return float3(0.96, 0.10, 0.12);
 }
 
 float3 normalize_safe(float3 v, float3 fallback_n) {

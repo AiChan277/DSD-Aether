@@ -19,6 +19,46 @@ struct PreviewCamera {
     float pitch_rad{0.10f};
     float distance{4.70f};
     float fovy_rad{0.2805f}; // ~85mm portrait telephoto FOV (minimizes 3D perspective distortion)
+    bool is_orthographic{false};
+    float ortho_height{2.20f};
+};
+
+/** Dual-viewport isolation target distinguishing Broadcast output from Stage editor view. */
+enum class RenderViewKind : uint8_t {
+    Broadcast = 0,
+    LightingStage = 1,
+};
+
+/** Stage diagnostic visualization modes inside `Lighting` workspace. */
+enum class StageDiagnosticMode : uint8_t {
+    Lit = 0,        // Final 2.5D Satsuei Composite
+    Clay = 1,       // 18% Middle Gray lighting-only inspection
+    FalseColor = 2, // EL-Zone HDR exposure stops
+};
+
+/** 7 camera navigation modes in `LightingStageView`. */
+enum class StageCameraView : uint8_t {
+    FreePerspective = 0,
+    OrthoFront = 1,
+    OrthoBack = 2,
+    OrthoRight = 3,
+    OrthoLeft = 4,
+    OrthoTop = 5, // Lighting Plot
+    OrthoBottom = 6,
+};
+
+/**
+ * Isolated per-viewport render state (`StudioBroadcastView` vs `LightingStageView`).
+ * Each context maintains its own temporal denoiser history so moving stage cameras
+ * never contaminates broadcast Path Tracing accumulation.
+ */
+struct RenderViewContext {
+    RenderViewKind kind{RenderViewKind::Broadcast};
+    PreviewCamera camera{};
+    StageDiagnosticMode diag_mode{StageDiagnosticMode::Lit};
+    bool preview_25d_flatten{true};
+    bool show_schematic{false};
+    bool fast_panning{false};
 };
 
 struct PreviewRenderOptions {

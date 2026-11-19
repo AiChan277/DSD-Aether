@@ -242,6 +242,30 @@ struct PrecisionDarkTokens {
     ImU32 col32_hud_hand_joint = hex_col32(0xFFFFFFEB);
     ImU32 col32_hud_hand_normal = hex_col32(0xFFEB6EF5);
 
+    // Phase 2 Dedicated Lighting Tab, Stage Viewport, ViewCube & EL-Zone False Color tokens
+    ImVec4 stage_amber = hex_rgba(0xF59E0BFF);
+    ImVec4 stage_cyan = hex_rgba(0x38BDF8FF);
+    ImVec4 stage_purple = hex_rgba(0xA855F7FF);
+    ImVec4 stage_muted = hex_rgba(0x525866FF);
+    ImU32 col32_stage_amber = hex_col32(0xF59E0BFF);
+    ImU32 col32_stage_cyan = hex_col32(0x38BDF8FF);
+    ImU32 col32_stage_muted = hex_col32(0x52586699);
+    ImU32 col32_stage_pip_border = hex_col32(0x38BDF8E6);
+    ImU32 col32_stage_badge_bg = hex_col32(0x0E121AE6);
+    ImU32 col32_stage_viewcube_bg = hex_col32(0x161B26E0);
+    ImU32 col32_stage_gizmo_x = hex_col32(0xEF4444FF);
+    ImU32 col32_stage_gizmo_y = hex_col32(0x10B981FF);
+    ImU32 col32_stage_gizmo_z = hex_col32(0x3B82F6FF);
+    std::array<ImU32, 7> col32_stage_el_zones{
+        hex_col32(0x1C0A47FF), // <-4 EV Deep Shadow
+        hex_col32(0x0F3DDBFF), // -4..-2 EV
+        hex_col32(0x14BDE0FF), // -2..-0.5 EV
+        hex_col32(0x29C73DFF), // -0.5..+0.5 EV (18% Gray)
+        hex_col32(0xF0DB29FF), // +0.5..+1.5 EV (Skin)
+        hex_col32(0xFA7A14FF), // +1.5..+3 EV
+        hex_col32(0xF51A1FFF), // > +3 EV Clip
+    };
+
     // Typography sizes (§2.2 asks for Inter 13.5 px / JetBrains Mono 12.5 px). The FreeType builder
     // rasterizes whole pixel sizes only (13.5 silently renders at 13), so the tokens state the sizes
     // actually rendered; `font_size / type_body_px` is then the exact UI scale used by layout code.

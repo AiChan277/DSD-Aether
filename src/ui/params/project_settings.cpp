@@ -24,7 +24,8 @@ constexpr std::array<KeyBindingSpec, KeymapRegistry::kActionCount> kKeySpecs = {
     {ActionId::OpenPalette, "global.palette", "Command Palette", KeyScope::Global, "Ctrl+K", false},
     {ActionId::ModeLiveStudio, "global.mode_live", "Mode: Live Studio", KeyScope::Global, "Ctrl+Shift+1", false},
     {ActionId::ModeRigging, "global.mode_rigging", "Mode: Rigging", KeyScope::Global, "Ctrl+Shift+2", false},
-    {ActionId::ModeNodes, "global.mode_nodes", "Mode: Nodes", KeyScope::Global, "Ctrl+Shift+3", false},
+    {ActionId::ModeLighting, "global.mode_lighting", "Mode: Lighting", KeyScope::Global, "Ctrl+Shift+3", false},
+    {ActionId::ModeNodes, "global.mode_nodes", "Mode: Nodes", KeyScope::Global, "Ctrl+Shift+4", false},
     {ActionId::ProjectNew, "file.new", "New Project", KeyScope::Global, "Ctrl+N", false},
     {ActionId::ProjectOpen, "file.open", "Open Project...", KeyScope::Global, "Ctrl+O", false},
     {ActionId::ProjectSave, "file.save", "Save Project", KeyScope::Global, "Ctrl+S", false},
@@ -89,6 +90,11 @@ constexpr std::array<KeyBindingSpec, KeymapRegistry::kActionCount> kKeySpecs = {
     {ActionId::OutlinerHide, "outliner.hide", "Hide Selected", KeyScope::Outliner, "H", false},
     {ActionId::OutlinerUnhideAll, "outliner.unhide_all", "Unhide All", KeyScope::Outliner, "Alt+H", false},
     {ActionId::OutlinerDelete, "outliner.delete", "Delete Selected", KeyScope::Outliner, "Del", false},
+
+    {ActionId::LightingQuadView, "lighting.quad_view", "Lighting: Toggle Quad View", KeyScope::Global, "Ctrl+Alt+Q",
+     false},
+    {ActionId::LightingPilotLight, "lighting.pilot_light", "Lighting: Pilot Selected Light", KeyScope::Global,
+     "Ctrl+Alt+P", false},
 }};
 
 std::string trim_copy(std::string_view sv) {

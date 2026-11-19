@@ -7,6 +7,8 @@
 #include "core/paths.hpp"
 #include "core/telemetry.hpp"
 #include "core/viewport_aspect.hpp"
+#include "renderer/lighting_rig.hpp"
+#include "renderer/preview_pass.hpp"
 #include "rhi/rhi_device.hpp"
 #include "ui/theme/precision_dark.hpp"
 
@@ -22,7 +24,8 @@ struct StudioActions;
 enum class StudioMode : uint8_t {
     LiveStudio = 0,
     Rigging = 1,
-    Nodes = 2,
+    Lighting = 2,
+    Nodes = 3,
 };
 
 struct DevShellInputEcho {
@@ -72,6 +75,13 @@ struct DevShellAvatarView {
     float bone_head_y{1.46f};
     uint32_t broadcast_width{1920};
     uint32_t broadcast_height{1080};
+
+    // Dual-viewport Stage textures & dimensions (Lighting Tab only; broadcast stays on `viewport_texture`)
+    VkDescriptorSet stage_viewport_texture{VK_NULL_HANDLE};
+    VkDescriptorSet quad_top_texture{VK_NULL_HANDLE};
+    VkDescriptorSet quad_right_texture{VK_NULL_HANDLE};
+    uint32_t stage_viewport_w{0};
+    uint32_t stage_viewport_h{0};
 };
 
 struct DevShellTrackingView {
@@ -387,6 +397,20 @@ struct DevShellViewportActions {
     float target_preset_avatar_scale{1.0f};
     bool request_set_hand_tracking{false};
     bool target_hand_tracking_enabled{false};
+
+    // Phase 2 Lighting Tab & Dual-Viewport Stage synchronization
+    bool request_stage_render{false};
+    renderer::PreviewCamera stage_camera{};
+    renderer::StageDiagnosticMode stage_diag_mode{renderer::StageDiagnosticMode::Lit};
+    bool stage_show_schematic{true};
+    bool stage_show_grid{true};
+    bool stage_preview_25d_flatten{false};
+    bool stage_fast_panning{false};
+    int32_t stage_selected_light_idx{0};
+    bool stage_quad_view{false};
+    renderer::PreviewCamera quad_top_camera{};
+    renderer::PreviewCamera quad_right_camera{};
+    renderer::LightingRig* mutable_lighting_rig{nullptr};
 };
 
 /**

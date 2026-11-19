@@ -100,8 +100,16 @@ class Dx12FrameGraph {
     bool dxr_ready_{false};
     bool dxr_has_built_once_{false};
     uint8_t last_eff_lighting_mode_{0};
-    bool have_prev_view_proj_{false};
-    GpuMat4 prev_view_proj_{};
+    struct TemporalHistoryBank {
+        bool have_prev_view_proj{false};
+        GpuMat4 prev_view_proj{};
+        rhi::D3D12Texture prev_normal{};
+        rhi::D3D12Texture prev_rt_shadow{};
+        rhi::D3D12Texture prev_rim_occ{};
+        rhi::D3D12Texture prev_bounce{};
+        std::array<rhi::D3D12Buffer, 2> reservoir_bufs{};
+    };
+    std::array<TemporalHistoryBank, 2> history_{}; // [0] = BroadcastView, [1] = LightingStageView
     uint64_t rendered_frames_{0};
     float last_render_ms_{0.0f};
 
@@ -149,21 +157,18 @@ class Dx12FrameGraph {
     rhi::D3D12Texture gb_mv_{};
     rhi::D3D12Texture gb_mat_{};
     rhi::D3D12Texture gb_misc_{};
-    rhi::D3D12Texture prev_normal_{};
 
     rhi::D3D12Texture rt_shadow_raw_{};
     rhi::D3D12Texture rt_shadow_denoised_{};
-    rhi::D3D12Texture prev_rt_shadow_{};
     rhi::D3D12Texture rim_occ_raw_{};
     rhi::D3D12Texture rim_occ_denoised_{};
-    rhi::D3D12Texture prev_rim_occ_{};
     rhi::D3D12Texture bounce_half_{};
     rhi::D3D12Texture bounce_denoised_{};
-    rhi::D3D12Texture prev_bounce_{};
     rhi::D3D12Texture aov_backscatter_{};
     rhi::D3D12Texture aov_cornea_spec_{};
-    std::array<rhi::D3D12Buffer, 2> reservoir_bufs_{};
     std::array<StudioLightGPU, kMaxStudioLights> studio_lights_scratch_{};
+    std::vector<GpuStageOverlayElem> stage_overlay_scratch_{};
+    rhi::D3D12Buffer stage_overlay_buf_{};
 
     rhi::D3D12Texture hdr_scene_{};
     rhi::D3D12Texture crease_mask_{};
@@ -198,6 +203,7 @@ class Dx12FrameGraph {
     ID3D12PipelineState* pso_bloom_up_{nullptr};
     ID3D12PipelineState* pso_tone_composite_{nullptr};
     ID3D12PipelineState* pso_encode_bgra_{nullptr};
+    ID3D12PipelineState* pso_stage_schematic_{nullptr};
 };
 
 #if defined(_MSC_VER)

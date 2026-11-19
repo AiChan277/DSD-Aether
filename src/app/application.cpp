@@ -1135,6 +1135,9 @@ int run_application(const AppLaunchOptions& opts) {
         }
 
         VkDescriptorSet vp_tex_set = VK_NULL_HANDLE;
+        VkDescriptorSet stage_tex_set = VK_NULL_HANDLE;
+        VkDescriptorSet quad_top_tex_set = VK_NULL_HANDLE;
+        VkDescriptorSet quad_right_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet orb_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet preview_tex_set = VK_NULL_HANDLE;
         rhi::RhiImage preview_img{};
@@ -1189,19 +1192,34 @@ int run_application(const AppLaunchOptions& opts) {
 
         auto refresh_vp_descriptors = [&]() {
             rhi->wait_idle();
-            if (vp_tex_set != VK_NULL_HANDLE) {
-                ImGui_ImplVulkan_RemoveTexture(vp_tex_set);
-                vp_tex_set = VK_NULL_HANDLE;
-            }
-            if (orb_tex_set != VK_NULL_HANDLE) {
-                ImGui_ImplVulkan_RemoveTexture(orb_tex_set);
-                orb_tex_set = VK_NULL_HANDLE;
-            }
+            auto drop_tex = [](VkDescriptorSet& ds) {
+                if (ds != VK_NULL_HANDLE) {
+                    ImGui_ImplVulkan_RemoveTexture(ds);
+                    ds = VK_NULL_HANDLE;
+                }
+            };
+            drop_tex(vp_tex_set);
+            drop_tex(stage_tex_set);
+            drop_tex(quad_top_tex_set);
+            drop_tex(quad_right_tex_set);
+            drop_tex(orb_tex_set);
             const auto out = npr_renderer.graph().outputs();
             if (vp_sampler != VK_NULL_HANDLE) {
                 if (out.viewport_view != VK_NULL_HANDLE) {
                     vp_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.viewport_view,
                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                if (out.stage_viewport_view != VK_NULL_HANDLE) {
+                    stage_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.stage_viewport_view,
+                                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                if (out.quad_top_view != VK_NULL_HANDLE) {
+                    quad_top_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.quad_top_view,
+                                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                if (out.quad_right_view != VK_NULL_HANDLE) {
+                    quad_right_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.quad_right_view,
+                                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
                 if (out.orbit_orb_view != VK_NULL_HANDLE) {
                     orb_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.orbit_orb_view,
@@ -2542,14 +2560,62 @@ int run_application(const AppLaunchOptions& opts) {
             slot_submitted[frame.frame_slot] = true;
 
             npr_renderer.record_ui_composite(frame.cmd, render_req);
+
+            if (vp_actions.request_stage_render && has_avatar_ready) {
+                auto run_stage_pass = [&](const renderer::PreviewCamera& cam_in,
+                                          renderer::FrameRenderRequest::StageOutputSlot slot, bool allow_schem,
+                                          bool fast_pan) {
+                    renderer::FrameRenderRequest sreq = render_req;
+                    sreq.view_kind = renderer::RenderViewKind::LightingStage;
+                    sreq.camera = cam_in;
+                    sreq.stage_diag_mode = vp_actions.stage_diag_mode;
+                    sreq.show_stage_schematic = allow_schem;
+                    sreq.show_stage_grid = vp_actions.stage_show_grid;
+                    sreq.preview_25d_flatten = vp_actions.stage_preview_25d_flatten;
+                    sreq.stage_fast_panning = fast_pan;
+                    sreq.selected_studio_light_idx = vp_actions.stage_selected_light_idx;
+                    sreq.has_studio_frustum = true;
+                    sreq.studio_camera = camera;
+                    sreq.studio_frustum_aspect =
+                        (active_out_cfg.height > 0U)
+                            ? (static_cast<float>(active_out_cfg.width) / static_cast<float>(active_out_cfg.height))
+                            : (16.0f / 9.0f);
+                    sreq.skip_skin_and_blas = true;
+                    sreq.stage_output_slot = slot;
+                    sreq.viewport_aspect_mode = core::ViewportAspectMode::FitAuto;
+                    sreq.encode_output_bgra = false;
+                    sreq.encode_output_nv12 = false;
+                    sreq.external_color_image = VK_NULL_HANDLE;
+                    sreq.show_skeleton_heatmap = false;
+                    sreq.show_rig_colliders = false;
+                    sreq.show_orbit_orb = false;
+                    npr_renderer.graph().record_critical_passes(frame.cmd, sreq);
+                    npr_renderer.graph().record_ui_passes(frame.cmd, sreq);
+                };
+                run_stage_pass(vp_actions.stage_camera, renderer::FrameRenderRequest::StageOutputSlot::MainStage,
+                               vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                if (vp_actions.stage_quad_view) {
+                    run_stage_pass(vp_actions.quad_top_camera, renderer::FrameRenderRequest::StageOutputSlot::QuadTop,
+                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                    run_stage_pass(vp_actions.quad_right_camera,
+                                   renderer::FrameRenderRequest::StageOutputSlot::QuadRight,
+                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                }
+            }
+
             swapchain.begin_swapchain_pass(frame, clear_rgba);
 
             const auto fg_out = npr_renderer.graph().outputs();
             ui::DevShellAvatarView avatar_view{};
             avatar_view.viewport_texture = vp_tex_set;
+            avatar_view.stage_viewport_texture = stage_tex_set;
+            avatar_view.quad_top_texture = quad_top_tex_set;
+            avatar_view.quad_right_texture = quad_right_tex_set;
             avatar_view.orbit_orb_texture = orb_tex_set;
             avatar_view.viewport_w = fg_out.width;
             avatar_view.viewport_h = fg_out.height;
+            avatar_view.stage_viewport_w = fg_out.width;
+            avatar_view.stage_viewport_h = fg_out.height;
             avatar_view.wireframe_supported =
                 (active_backend == renderer::RenderBackend::DirectX12) ||
                 ((active_backend == renderer::RenderBackend::Vulkan) && npr_renderer.wireframe_supported());
@@ -2887,6 +2953,7 @@ int run_application(const AppLaunchOptions& opts) {
                     shell.workspace().set_host_status(host_status);
                     shell.workspace().sync_plugins(plugin_vms);
                     studio_actions.viewport = vp_actions;
+                    studio_actions.viewport.mutable_lighting_rig = &npr_renderer.lighting();
                     shell.render_studio(static_cast<double>(ui_begin) * 1e-6, *rhi, telem_cache, input_echo,
                                         imgui_arena, ffi_ok, avatar_view, tracking_view, render_view, output_view,
                                         studio_actions);
@@ -3056,14 +3123,17 @@ int run_application(const AppLaunchOptions& opts) {
 
         asset_job.reset();
         destroy_preview_resources(true);
-        if (vp_tex_set != VK_NULL_HANDLE) {
-            ImGui_ImplVulkan_RemoveTexture(vp_tex_set);
-            vp_tex_set = VK_NULL_HANDLE;
-        }
-        if (orb_tex_set != VK_NULL_HANDLE) {
-            ImGui_ImplVulkan_RemoveTexture(orb_tex_set);
-            orb_tex_set = VK_NULL_HANDLE;
-        }
+        auto drop_tex_exit = [](VkDescriptorSet& ds) {
+            if (ds != VK_NULL_HANDLE) {
+                ImGui_ImplVulkan_RemoveTexture(ds);
+                ds = VK_NULL_HANDLE;
+            }
+        };
+        drop_tex_exit(vp_tex_set);
+        drop_tex_exit(stage_tex_set);
+        drop_tex_exit(quad_top_tex_set);
+        drop_tex_exit(quad_right_tex_set);
+        drop_tex_exit(orb_tex_set);
         destroy_vp_sampler();
         npr_renderer.destroy();
         current_avatar.reset();

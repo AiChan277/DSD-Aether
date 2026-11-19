@@ -177,13 +177,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     bool is_hair_px = ((packed_mat & 0x8000u) != 0u) || (rt_class == 1u);
 
     // Reconstruct un-flattened world position & Dual-Normal vectors (N_proxy + N_geom)
-    float true_view_z = -fg.camera_pos_world.w;
-    if (hw_depth + fg.proj.col2.z < 0.0) {
-        true_view_z = -fg.proj.col3.z / (hw_depth + fg.proj.col2.z);
-    }
+    float true_view_z = depth_to_view_z(fg, hw_depth);
     float2 uv = (float2(tid.xy) + 0.5) * fg.viewport_size.zw;
     float3 view_pos = reconstruct_view_pos_from_zflat(
-        fg.proj, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
+        fg, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
     float3 view_geom_n = oct_decode(misc.zw);
@@ -359,7 +356,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     if (fg.studio_uav_slots.z != 0xFFFFFFFFu) {
         float3 back_glow = float3(0.0, 0.0, 0.0);
         if (is_hair_px || is_face_px || rt_class == 2u) {
-            float3 view_ws = normalize_safe(fg.camera_pos_world.xyz - world_pos, float3(0.0, 0.0, 1.0));
+            float3 view_ws = compute_effective_view_dir(fg, world_pos);
             float back_align = saturate(dot(-view_ws, primary_key_dir) * 0.5 + 0.5);
             if (back_align > 0.15) {
                 float3 probe_dir = sample_cone(normalize_safe(primary_key_dir - eff_geom_n * 0.35, primary_key_dir),
@@ -386,7 +383,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     if (fg.studio_uav_slots.w != 0xFFFFFFFFu) {
         float3 cornea_spec = float3(0.0, 0.0, 0.0);
         if (studio_count > 0u) {
-            float3 view_ws = normalize_safe(fg.camera_pos_world.xyz - world_pos, float3(0.0, 0.0, 1.0));
+            float3 view_ws = compute_effective_view_dir(fg, world_pos);
             uint max_spec_lights = min(studio_count, 8u);
             for (uint si = 0u; si < max_spec_lights; ++si) {
                 StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, si);

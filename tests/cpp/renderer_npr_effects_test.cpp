@@ -1,6 +1,7 @@
 #include "animation/spring_bone.hpp"
 #include "core/hot_path_guard.hpp"
 #include "flip_metric.hpp"
+#include "renderer/frame_globals_builder.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "renderer/sdf_generator.hpp"
 #include "renderer/studio_lighting.hpp"
@@ -1038,6 +1039,227 @@ TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtu
     CHECK(left_b_minus_r > 150.0);  // CyberCyan accent hue preserved on left
     CHECK(right_r_minus_g > 150.0); // StageMagenta accent hue preserved on right
 
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel Picking & Gizmo Scale",
+          "[renderer][phase2][lighting_stage]") {
+    using namespace aether::renderer;
+
+    // 1. Validate all 7 Stage Camera presets, Persp/Ortho inv_proj*proj identity, ray-picking & constant-px gizmos
+    {
+        const std::array<float, 3> pivot{0.0f, 1.32f, 0.0f};
+        for (int vi = 0; vi <= 6; ++vi) {
+            const auto v = static_cast<StageCameraView>(vi);
+            const PreviewCamera c = make_stage_camera_preset(v, pivot, 2.40f);
+            GpuMat4 view{}, inv_view{}, proj{}, inv_proj{}, vp{};
+            detail::Mat4Vec3 eye{};
+            detail::build_camera_matrices(c, 16.0f / 9.0f, view, inv_view, proj, inv_proj, vp, eye);
+            const GpuMat4 prod = detail::mul_mat4(proj, inv_proj);
+            INFO("vi=" << vi << " ortho=" << c.is_orthographic << " col2=(" << prod.col2[0] << "," << prod.col2[1]
+                       << "," << prod.col2[2] << "," << prod.col2[3] << ") col3=(" << prod.col3[0] << ","
+                       << prod.col3[1] << "," << prod.col3[2] << "," << prod.col3[3] << ")");
+            CHECK(std::fabs(prod.col0[0] - 1.0f) < 1e-4f);
+            CHECK(std::fabs(prod.col1[1] - 1.0f) < 1e-4f);
+            CHECK(std::fabs(prod.col2[2] - 1.0f) < 1e-4f);
+            CHECK(std::fabs(prod.col3[3] - 1.0f) < 1e-4f);
+            CHECK(std::fabs(prod.col3[2]) < 1e-4f);
+            CHECK(std::fabs(prod.col2[3]) < 1e-4f);
+            CHECK(c.is_orthographic == (vi > 0));
+        }
+
+        // Parallel Ortho ray picking vs Perspective ray picking on placed Softboxes
+        LightingRig pick_rig = LightingRig::default_three_point();
+        pick_rig.use_studio_lights = true;
+        pick_rig.studio_light_count = 2;
+        configure_fixture_defaults(pick_rig.studio_lights[0], StudioFixtureProfile::RectSoftbox);
+        pick_rig.studio_lights[0].use_orbit_angles = false;
+        pick_rig.studio_lights[0].position_ws = {-0.8f, 1.5f, 0.6f};
+        pick_rig.studio_lights[0].width_or_outer_m = 0.8f;
+        configure_fixture_defaults(pick_rig.studio_lights[1], StudioFixtureProfile::Octabox);
+        pick_rig.studio_lights[1].use_orbit_angles = false;
+        pick_rig.studio_lights[1].position_ws = {0.9f, 1.4f, -0.5f};
+        pick_rig.studio_lights[1].width_or_outer_m = 0.9f;
+
+        const PreviewCamera top_cam = make_stage_camera_preset(StageCameraView::OrthoTop, pivot, 3.0f);
+        const StagePickRay r0 = compute_stage_pick_ray(top_cam, 0.5f, 0.5f, 1.0f);
+        const StagePickRay r1 = compute_stage_pick_ray(top_cam, 0.25f, 0.75f, 1.0f);
+        CHECK(r0.is_orthographic);
+        // Parallel rays in Orthographic share identical world direction!
+        CHECK(std::fabs(r0.dir_ws[0] - r1.dir_ws[0]) < 1e-5f);
+        CHECK(std::fabs(r0.dir_ws[1] - r1.dir_ws[1]) < 1e-5f);
+        CHECK(std::fabs(r0.dir_ws[2] - r1.dir_ws[2]) < 1e-5f);
+
+        // Compute normalized screen coord of studio_lights[1] under OrthoTop & verify pick hits index 1!
+        const auto m_top = compute_view_proj(top_cam, 1.0f);
+        const auto& p1 = pick_rig.studio_lights[1].position_ws;
+        const float ndc_x = m_top[0] * p1[0] + m_top[4] * p1[1] + m_top[8] * p1[2] + m_top[12];
+        const float ndc_y = m_top[1] * p1[0] + m_top[5] * p1[1] + m_top[9] * p1[2] + m_top[13];
+        const float u01 = ndc_x * 0.5f + 0.5f;
+        const float v01 = 0.5f - ndc_y * 0.5f;
+        CHECK(pick_stage_studio_light(pick_rig, pivot, {0.0f, 1.4f, 2.0f}, top_cam, u01, v01, 1.0f) == 1);
+
+        const PreviewCamera persp_cam = make_stage_camera_preset(StageCameraView::FreePerspective, pivot);
+        const float g_near = stage_gizmo_world_scale(persp_cam, {0.0f, 1.32f, 1.5f}, 72.0f, 720.0f);
+        const float g_far = stage_gizmo_world_scale(persp_cam, {0.0f, 1.32f, -1.5f}, 72.0f, 720.0f);
+        CHECK(g_far > g_near); // Constant px size in perspective grows with distance!
+        const float g_o1 = stage_gizmo_world_scale(top_cam, {-1.0f, 1.3f, 0.0f}, 72.0f, 720.0f);
+        const float g_o2 = stage_gizmo_world_scale(top_cam, {1.0f, 0.1f, 0.5f}, 72.0f, 720.0f);
+        CHECK(std::fabs(g_o1 - g_o2) < 1e-5f); // Ortho constant-px scale is position invariant!
+    }
+
+    // 2. Vulkan Dual-Viewport Zero Schematic Leakage + Quad Targets + Clay/FalseColor/TemporalBank Isolation
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Vulkan Phase 2 GPU test: Vulkan unavailable");
+        return;
+    }
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.20f, 0.55f, 0.92f); // Saturated cobalt blue cloth
+    mat.toon_params[0] = 0.0f;
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.55f, 0.70f, 0.0f};
+    const float p1[3] = {0.55f, 0.70f, 0.0f};
+    const float p2[3] = {0.55f, 1.85f, 0.0f};
+    const float p3[3] = {-0.55f, 1.85f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.20f, 0.55f, 0.92f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kW = 256u;
+    constexpr uint32_t kH = 256u;
+    RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = rhi->rt_supported();
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.use_studio_lights = true;
+    rig.studio_light_count = 6;
+    for (uint32_t i = 0; i < 6u; ++i) {
+        configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
+        rig.studio_lights[i].use_orbit_angles = false;
+        rig.studio_lights[i].position_ws = {-0.75f + 0.30f * static_cast<float>(i), 1.30f, 0.90f};
+        rig.studio_lights[i].target_ws = {0.0f, 1.30f, 0.0f};
+        rig.studio_lights[i].aim_lock = false;
+        rig.studio_lights[i].width_or_outer_m = 0.85f;
+        rig.studio_lights[i].height_or_inner_m = 0.85f;
+        rig.studio_lights[i].grid_enabled = true;
+        rig.studio_lights[i].barn_doors_enabled = true;
+        rig.studio_lights[i].intensity_ev100 = (i == 0u) ? 1.0f : 0.12f;
+    }
+
+    PreviewCamera bcast_cam = make_stage_camera_preset(StageCameraView::FreePerspective, {0.0f, 1.30f, 0.0f});
+    bcast_cam.yaw_rad = 0.0f;
+    bcast_cam.pitch_rad = 0.0f;
+    bcast_cam.distance = 2.4f;
+
+    auto render_vk = [&](RenderViewKind kind, const PreviewCamera& cam, StageDiagnosticMode dm, bool req_schem,
+                         bool skip_skin, uint8_t mode, uint64_t fidx, std::vector<uint8_t>& out_vp,
+                         std::vector<uint8_t>& out_bgra) {
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.studio_camera = bcast_cam;
+        req.has_studio_frustum = true;
+        req.studio_frustum_aspect = 1.0f;
+        req.view_kind = kind;
+        req.stage_diag_mode = dm;
+        req.show_stage_schematic = req_schem;
+        req.show_stage_grid = true;
+        req.preview_25d_flatten = true;
+        req.skip_skin_and_blas = skip_skin;
+        req.lighting_mode = mode;
+        req.rt_enabled = (mode > 0u) && rcfg.enable_rt;
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.render_csm_shadow = false;
+        req.frame_index = fidx;
+        req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
+        req.frame_slot = static_cast<uint32_t>(fidx % ::aether::rhi::RhiSwapchain::kFramesInFlight);
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+        const auto outs = renderer.graph().outputs();
+        const VkImage target_vp = (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
+        auto vp_res = renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+        auto bg_res = renderer.graph().readback_image_rgba8(outs.bgra8_image, VK_IMAGE_LAYOUT_GENERAL, kW, kH);
+        REQUIRE(vp_res.has_value());
+        REQUIRE(bg_res.has_value());
+        out_vp = std::move(vp_res.value());
+        out_bgra = std::move(bg_res.value());
+        REQUIRE(rhi->validation_error_count() == 0);
+        REQUIRE(rhi->validation_warning_count() == 0);
+    };
+
+    std::vector<uint8_t> bcast_vp_0, bcast_bg_0;
+    std::vector<uint8_t> bcast_adv_vp, bcast_adv_bg;
+    std::vector<uint8_t> stage_vp, stage_bg;
+    std::vector<uint8_t> clay_vp, clay_bg;
+    std::vector<uint8_t> fc_vp, fc_bg;
+    std::vector<uint8_t> bcast_after_vp, bcast_after_bg;
+
+    // Warmup 1 Broadcast frame so history_[0] is valid & identical across baseline / adversarial / post-stage checks
+    render_vk(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, false, 0u, 1u, bcast_vp_0,
+              bcast_bg_0);
+
+    // 1. Broadcast clean baseline (mode 0 for bit-exact determinism across frames)
+    render_vk(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, false, 0u, 1u, bcast_vp_0,
+              bcast_bg_0);
+
+    // 2. Adversarial Broadcast with show_stage_schematic=true -> MUST NOT leak into viewport OR bgra8!
+    render_vk(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, true, false, 0u, 1u, bcast_adv_vp,
+              bcast_adv_bg);
+    CHECK(std::memcmp(bcast_vp_0.data(), bcast_adv_vp.data(), bcast_vp_0.size()) == 0);
+    CHECK(std::memcmp(bcast_bg_0.data(), bcast_adv_bg.data(), bcast_bg_0.size()) == 0);
+
+    // 3. Stage View (with RT enabled) renders schematics cleanly into stage_viewport_image while bgra8_image remains untouched Broadcast!
+    render_vk(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Lit, true, true, 1u, 1u, stage_vp,
+              stage_bg);
+    CHECK(std::memcmp(bcast_bg_0.data(), stage_bg.data(), bcast_bg_0.size()) == 0);
+
+    uint32_t vk_diff_px = 0u;
+    for (size_t i = 0; i < stage_vp.size(); i += 4u) {
+        if (std::abs(int(stage_vp[i + 0]) - int(bcast_vp_0[i + 0])) > 12 ||
+            std::abs(int(stage_vp[i + 1]) - int(bcast_vp_0[i + 1])) > 12 ||
+            std::abs(int(stage_vp[i + 2]) - int(bcast_vp_0[i + 2])) > 12) {
+            ++vk_diff_px;
+        }
+    }
+    INFO("Vulkan Stage schematic diff pixels vs Broadcast: " << vk_diff_px);
+    CHECK(vk_diff_px > 600u);
+
+    // 4. Clay 18% Gray & False Color EL-Zone
+    render_vk(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Clay, false, true, 1u, 2u, clay_vp,
+              clay_bg);
+    render_vk(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::FalseColor, false, true, 1u, 3u, fc_vp,
+              fc_bg);
+    const size_t ci = (static_cast<size_t>(kH / 2u) * kW + (kW / 2u)) * 4u;
+    const int vk_lit_chroma = std::abs(static_cast<int>(bcast_vp_0[ci + 2]) - static_cast<int>(bcast_vp_0[ci + 0]));
+    const int vk_clay_chroma = std::abs(static_cast<int>(clay_vp[ci + 2]) - static_cast<int>(clay_vp[ci + 0]));
+    CHECK(vk_lit_chroma > 60);
+    CHECK(vk_clay_chroma <= 35);
+    CHECK(vk_clay_chroma * 3 < vk_lit_chroma);
+    CHECK(std::memcmp(fc_vp.data(), clay_vp.data(), fc_vp.size()) != 0);
+
+    // 5. After Stage renders, Broadcast remains 100% invariant (zero bleed)
+    render_vk(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, false, 0u, 1u, bcast_after_vp,
+              bcast_after_bg);
+    CHECK(std::memcmp(bcast_vp_0.data(), bcast_after_vp.data(), bcast_vp_0.size()) == 0);
+
+    renderer.destroy();
+    avatar->destroy();
     rhi->destroy();
     aether_runtime_shutdown();
 }

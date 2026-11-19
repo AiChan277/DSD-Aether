@@ -96,7 +96,10 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
     device_ = &device;
     max_vertices_ = std::max(max_vertices, 4096u);
     enable_shared_output_ = enable_shared_output;
-    have_prev_view_proj_ = false;
+    stage_overlay_scratch_.resize(4096u);
+    for (auto& hb : history_) {
+        hb.have_prev_view_proj = false;
+    }
     rendered_frames_ = 0;
 
     if (auto rc = create_pipelines(); !rc) {
@@ -106,6 +109,16 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
     if (auto rc = ensure_upload_capacity(max_vertices_); !rc) {
         destroy();
         return rc;
+    }
+    {
+        auto sob = device_->create_buffer(
+            4096ull * sizeof(GpuStageOverlayElem), rhi::D3D12BufferUsage::ShaderResource,
+            rhi::D3D12BufferHeap::UploadCpu, true, false);
+        if (!sob) {
+            destroy();
+            return make_unexpected(sob.error());
+        }
+        stage_overlay_buf_ = sob.value();
     }
 
     // 1x1 white fallback texture + 2048^2 CSM depth target
@@ -193,6 +206,7 @@ void Dx12FrameGraph::destroy() noexcept {
         device_->destroy_texture(ltc_amp_);
         device_->destroy_texture(ltc_inv_m_);
         device_->destroy_texture(fallback_white_tex_);
+        device_->destroy_buffer(stage_overlay_buf_);
         for (auto& sl : upload_slices_) {
             device_->destroy_buffer(sl.fg_buf);
             device_->destroy_buffer(sl.pose_buf);
@@ -205,7 +219,9 @@ void Dx12FrameGraph::destroy() noexcept {
     device_ = nullptr;
     width_ = 0;
     height_ = 0;
-    have_prev_view_proj_ = false;
+    for (auto& hb : history_) {
+        hb.have_prev_view_proj = false;
+    }
 }
 
 Expected<void> Dx12FrameGraph::ensure_upload_capacity(uint32_t vertex_count) {
@@ -423,6 +439,25 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         pso_outline_hull_ = r.value();
     }
 
+    // Lighting Stage Schematic-Only Overlay PSO (Stage View exclusively, alpha-blended onto RGBA8 RTV)
+    {
+        rhi::D3D12GraphicsPipelineDesc d{};
+        d.vs_dxil = shaders::load_phase4_shader_dxil(SId::StageSchematicVs);
+        d.ps_dxil = shaders::load_phase4_shader_dxil(SId::StageSchematicFs);
+        d.num_render_targets = 1;
+        d.rtv_formats[0] = static_cast<int>(kRgba8Fmt);
+        d.dsv_format = static_cast<int>(DXGI_FORMAT_UNKNOWN);
+        d.depth_enable = false;
+        d.depth_write = false;
+        d.cull_mode = D3D12_CULL_MODE_NONE;
+        d.alpha_blend = true;
+        d.premultiplied_alpha = true;
+        auto r = device_->create_graphics_pso(d);
+        if (!r)
+            return make_unexpected(r.error());
+        pso_stage_schematic_ = r.value();
+    }
+
     pipelines_ready_ = true;
     return {};
 #endif
@@ -450,6 +485,7 @@ void Dx12FrameGraph::destroy_pipelines() noexcept {
     D3D12Device::destroy_pso(pso_bloom_up_);
     D3D12Device::destroy_pso(pso_tone_composite_);
     D3D12Device::destroy_pso(pso_encode_bgra_);
+    D3D12Device::destroy_pso(pso_stage_schematic_);
     pipelines_ready_ = false;
 }
 
@@ -462,7 +498,9 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
     destroy_size_dependent_targets();
     width_ = w;
     height_ = h;
-    have_prev_view_proj_ = false;
+    for (auto& hb : history_) {
+        hb.have_prev_view_proj = false;
+    }
 
     const float clear_zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const float clear_norm[4] = {0.5f, 0.5f, 0.0f, 1.0f};
@@ -489,21 +527,15 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
         return r;
     if (auto r = mk(gb_misc_, w, h, kMiscFmt, true, false, false, false, clear_zero); !r)
         return r;
-    if (auto r = mk(prev_normal_, w, h, kNormalFmt, false, false, false, false, nullptr); !r)
-        return r;
 
     if (auto r = mk(rt_shadow_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
         return r;
     if (auto r = mk(rt_shadow_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
         return r;
-    if (auto r = mk(prev_rt_shadow_, w, h, kRtFmt, false, false, false, false, nullptr); !r)
-        return r;
 
     if (auto r = mk(rim_occ_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
         return r;
     if (auto r = mk(rim_occ_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
-        return r;
-    if (auto r = mk(prev_rim_occ_, w, h, kRtFmt, false, false, false, false, nullptr); !r)
         return r;
 
     const uint32_t hw = std::max(1u, (w + 1u) / 2u);
@@ -512,15 +544,22 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
         return r;
     if (auto r = mk(bounce_denoised_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r)
         return r;
-    if (auto r = mk(prev_bounce_, hw, hh, kHdrFmt, false, false, false, false, nullptr); !r)
-        return r;
     if (auto r = mk(aov_backscatter_, w, h, kHdrFmt, false, true, false, false, nullptr); !r)
         return r;
     if (auto r = mk(aov_cornea_spec_, w, h, kHdrFmt, false, true, false, false, nullptr); !r)
         return r;
-    {
+
+    for (auto& hb : history_) {
+        if (auto r = mk(hb.prev_normal, w, h, kNormalFmt, false, false, false, false, nullptr); !r)
+            return r;
+        if (auto r = mk(hb.prev_rt_shadow, w, h, kRtFmt, false, false, false, false, nullptr); !r)
+            return r;
+        if (auto r = mk(hb.prev_rim_occ, w, h, kRtFmt, false, false, false, false, nullptr); !r)
+            return r;
+        if (auto r = mk(hb.prev_bounce, hw, hh, kHdrFmt, false, false, false, false, nullptr); !r)
+            return r;
         const uint64_t res_bytes = static_cast<uint64_t>(hw) * static_cast<uint64_t>(hh) * sizeof(GpuReSTIRReservoir);
-        for (auto& rb : reservoir_bufs_) {
+        for (auto& rb : hb.reservoir_bufs) {
             auto br = device_->create_buffer(
                 res_bytes, rhi::D3D12BufferUsage::UnorderedAccess | rhi::D3D12BufferUsage::ShaderResource,
                 rhi::D3D12BufferHeap::DefaultGpu, true, true);
@@ -546,7 +585,7 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
 
     if (auto r = mk(out_rgba16f_, w, h, kHdrFmt, false, true, enable_shared_output_, false, nullptr); !r)
         return r;
-    if (auto r = mk(out_rgba8_, w, h, kRgba8Fmt, false, true, enable_shared_output_, false, nullptr); !r)
+    if (auto r = mk(out_rgba8_, w, h, kRgba8Fmt, true, true, enable_shared_output_, false, nullptr); !r)
         return r;
 
     const bool bgra_uav = device_->gpu_info().supports_bgra8_uav;
@@ -588,21 +627,23 @@ void Dx12FrameGraph::destroy_size_dependent_targets() noexcept {
     }
     device_->destroy_texture(crease_mask_);
     device_->destroy_texture(hdr_scene_);
-    for (auto& rb : reservoir_bufs_) {
-        device_->destroy_buffer(rb);
+    for (auto& hb : history_) {
+        for (auto& rb : hb.reservoir_bufs) {
+            device_->destroy_buffer(rb);
+        }
+        device_->destroy_texture(hb.prev_bounce);
+        device_->destroy_texture(hb.prev_rim_occ);
+        device_->destroy_texture(hb.prev_rt_shadow);
+        device_->destroy_texture(hb.prev_normal);
     }
     device_->destroy_texture(aov_cornea_spec_);
     device_->destroy_texture(aov_backscatter_);
-    device_->destroy_texture(prev_bounce_);
     device_->destroy_texture(bounce_denoised_);
     device_->destroy_texture(bounce_half_);
-    device_->destroy_texture(prev_rim_occ_);
     device_->destroy_texture(rim_occ_denoised_);
     device_->destroy_texture(rim_occ_raw_);
-    device_->destroy_texture(prev_rt_shadow_);
     device_->destroy_texture(rt_shadow_denoised_);
     device_->destroy_texture(rt_shadow_raw_);
-    device_->destroy_texture(prev_normal_);
     device_->destroy_texture(gb_misc_);
     device_->destroy_texture(gb_mat_);
     device_->destroy_texture(gb_mv_);
@@ -653,7 +694,9 @@ void Dx12FrameGraph::destroy_avatar_resources() noexcept {
     avatar_face_sdf_slot_ = rhi::kD3D12InvalidDescIndex;
     avatar_vertex_count_ = 0;
     bound_avatar_ = nullptr;
-    have_prev_view_proj_ = false;
+    for (auto& hb : history_) {
+        hb.have_prev_view_proj = false;
+    }
 }
 
 Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
@@ -1071,14 +1114,22 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     const bool has_avatar = (req.avatar != nullptr && bound_avatar_ == req.avatar && avatar_vertex_count_ > 0);
     const bool rt_hardware_ready = device_->dxr_supported() && dxr_ready_ && pso_ray_effects_ != nullptr;
 
+    const bool is_stage_view = (req.view_kind == RenderViewKind::LightingStage);
+    const bool allow_view_hist =
+        !is_stage_view || (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::MainStage);
+    const uint32_t view_bank = is_stage_view ? 1u : 0u;
+    TemporalHistoryBank& hb = history_[view_bank];
+    const bool fast_stage_pan = is_stage_view && req.stage_fast_panning;
+    const bool hist_valid = allow_view_hist && hb.have_prev_view_proj && !fast_stage_pan;
+
     GpuFrameGlobals fg{};
     GpuMat4 next_prev_vp{};
     const uint8_t eff_mode = detail::populate_shared_frame_globals(
-        req, w, h, has_avatar, rt_hardware_ready, have_prev_view_proj_, prev_view_proj_, fg, next_prev_vp);
+        req, w, h, has_avatar, rt_hardware_ready, hist_valid, hb.prev_view_proj, fg, next_prev_vp);
     last_eff_lighting_mode_ = eff_mode;
     const bool use_rt = (eff_mode != 0u);
-    if (has_avatar) {
-        prev_view_proj_ = next_prev_vp;
+    if (has_avatar && allow_view_hist) {
+        hb.prev_view_proj = next_prev_vp;
     }
 
     fg.gbuffer_ids[0] = gb_n_.srv_index;
@@ -1097,10 +1148,10 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.gbuffer_extra_ids[4] = bounce_denoised_.srv_index;
     fg.gbuffer_extra_ids[5] = csm_depth_.srv_index;
     fg.gbuffer_extra_ids[6] = depth_stencil_.srv_index;
-    fg.gbuffer_extra_ids[7] = prev_normal_.srv_index;
+    fg.gbuffer_extra_ids[7] = hb.prev_normal.srv_index;
 
-    fg.history_ids[0] = prev_rt_shadow_.srv_index;
-    fg.history_ids[1] = prev_rim_occ_.srv_index;
+    fg.history_ids[0] = hb.prev_rt_shadow.srv_index;
+    fg.history_ids[1] = hb.prev_rim_occ.srv_index;
     fg.history_ids[2] = rim_occ_raw_.srv_index;
     fg.history_ids[3] = depth_stencil_.srv_index;
 
@@ -1110,13 +1161,12 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.output_storage_ids[2] = UINT32_MAX;
     fg.output_storage_ids[3] = UINT32_MAX;
 
+    const std::array<float, 3> head_target_ws = {fg.neck_seam_head_str[0], fg.neck_seam_head_str[1],
+                                                 fg.neck_seam_head_str[2]};
+    const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1],
+                                             fg.camera_pos_world[2]};
     {
-        const LightingRig fallback_rig = LightingRig::default_three_point();
-        const LightingRig& active_rig = (req.rig != nullptr) ? *req.rig : fallback_rig;
-        const std::array<float, 3> head_target_ws = {fg.neck_seam_head_str[0], fg.neck_seam_head_str[1],
-                                                     fg.neck_seam_head_str[2]};
-        const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1],
-                                                 fg.camera_pos_world[2]};
+        const LightingRig& active_rig = *req.rig;
         const uint32_t sl_count =
             pack_studio_lights_gpu(active_rig, head_target_ws, eye_pos_ws, studio_lights_scratch_);
         if (sl.studio_lights_buf.mapped_ptr != nullptr) {
@@ -1138,8 +1188,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.studio_uav_slots[2] = aov_backscatter_.uav_index;
     fg.studio_uav_slots[3] = aov_cornea_spec_.uav_index;
     const uint32_t cur_res = static_cast<uint32_t>(req.frame_index & 1ULL);
-    fg.reservoir_curr_bda = reservoir_bufs_[cur_res].uav_handle();
-    fg.reservoir_prev_bda = reservoir_bufs_[1u - cur_res].srv_handle();
+    fg.reservoir_curr_bda = hb.reservoir_bufs[cur_res].uav_handle();
+    fg.reservoir_prev_bda = hb.reservoir_bufs[1u - cur_res].srv_handle();
 
     std::memcpy(sl.fg_buf.mapped_ptr, &fg, sizeof(fg));
     const uint64_t fg_handle = sl.fg_buf.srv_handle();
@@ -1154,42 +1204,29 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             std::memcpy(sl.pose_buf.mapped_ptr, src_verts, static_cast<size_t>(copy_verts) * sizeof(AetherVertex25D));
         }
 
-        // Snapshot history before overwrite
-        if (have_prev_view_proj_) {
-            auto copy_tex = [&](rhi::D3D12Texture& src, rhi::D3D12Texture& dst) {
-                const int prev_s = src.current_state;
-                device_->cmd_transition_texture(cmd, src, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                device_->cmd_transition_texture(cmd, dst, D3D12_RESOURCE_STATE_COPY_DEST);
-                cmd->CopyResource(dst.resource, src.resource);
-                device_->cmd_transition_texture(cmd, src, prev_s);
-                device_->cmd_transition_texture(cmd, dst, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-            };
-            copy_tex(gb_n_, prev_normal_);
-            copy_tex(rt_shadow_denoised_, prev_rt_shadow_);
-            copy_tex(rim_occ_denoised_, prev_rim_occ_);
-            copy_tex(bounce_denoised_, prev_bounce_);
-        }
+        const bool reuse_skin_and_tlas = req.skip_skin_and_blas && (!use_rt || dxr_has_built_once_);
+        if (!reuse_skin_and_tlas) {
+            // Pass 1: Compute Skin/Pack -> GpuSkinnedVertex
+            device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
+            device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd->SetPipelineState(pso_skin_morph_);
+            GpuPushConstants pc{};
+            pc.frame_globals_bda = fg_handle;
+            pc.draw_data_bda = sl.pose_buf.srv_handle();
+            pc.vertex_buf_bda = skinned_vertices_buf_.uav_handle();
+            pc.aux_buf_bda = (surface_buf_.resource != nullptr) ? surface_buf_.srv_handle() : 0ULL;
+            pc.param0 = avatar_vertex_count_;
+            pc.param1 = hist_valid ? 1u : 0u;
+            cmd_set_root_pc(cmd, true, pc);
+            cmd->Dispatch((avatar_vertex_count_ + 63u) / 64u, 1u, 1u);
+            device_->cmd_uav_barrier(cmd, skinned_vertices_buf_.resource);
+            device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
-        // Pass 1: Compute Skin/Pack -> GpuSkinnedVertex
-        device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
-        device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cmd->SetPipelineState(pso_skin_morph_);
-        GpuPushConstants pc{};
-        pc.frame_globals_bda = fg_handle;
-        pc.draw_data_bda = sl.pose_buf.srv_handle();
-        pc.vertex_buf_bda = skinned_vertices_buf_.uav_handle();
-        pc.aux_buf_bda = (surface_buf_.resource != nullptr) ? surface_buf_.srv_handle() : 0ULL;
-        pc.param0 = avatar_vertex_count_;
-        pc.param1 = have_prev_view_proj_ ? 1u : 0u;
-        cmd_set_root_pc(cmd, true, pc);
-        cmd->Dispatch((avatar_vertex_count_ + 63u) / 64u, 1u, 1u);
-        device_->cmd_uav_barrier(cmd, skinned_vertices_buf_.resource);
-        device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-
-        // Pass 2: DXR Tier 1.1 BLAS/TLAS build or refit
-        if (use_rt) {
-            const bool refit_only = dxr_has_built_once_ && ((rendered_frames_ % 300ull) != 0ull);
-            record_dxr_build_or_refit(cmd, refit_only);
+            // Pass 2: DXR Tier 1.1 BLAS/TLAS build or refit
+            if (use_rt) {
+                const bool refit_only = dxr_has_built_once_ && ((rendered_frames_ % 300ull) != 0ull);
+                record_dxr_build_or_refit(cmd, refit_only);
+            }
         }
 
         // Pass 3: Depth + Stencil + G-Buffer Prepass (Strict positive D3D12 viewport + CCW front-face)
@@ -1262,8 +1299,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, aov_backscatter_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, aov_cornea_spec_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         const uint32_t cur_res_pass = static_cast<uint32_t>(req.frame_index & 1ULL);
-        device_->cmd_transition_buffer(cmd, reservoir_bufs_[cur_res_pass], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        device_->cmd_transition_buffer(cmd, reservoir_bufs_[1u - cur_res_pass],
+        device_->cmd_transition_buffer(cmd, hb.reservoir_bufs[cur_res_pass], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        device_->cmd_transition_buffer(cmd, hb.reservoir_bufs[1u - cur_res_pass],
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (use_rt) {
@@ -1277,7 +1314,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.param0 = rt_shadow_raw_.uav_index;
             p.param1 = rim_occ_raw_.uav_index;
             p.param2 = bounce_half_.uav_index;
-            p.param3 = ((w / 2u) << 16u) | (have_prev_view_proj_ ? 1u : 0u);
+            p.param3 = ((w / 2u) << 16u) | (hist_valid ? 1u : 0u);
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
         } else {
@@ -1336,8 +1373,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.frame_globals_bda = fg_handle;
             p.param0 =
                 (rt_shadow_raw_.srv_index & 0xFFFFu) |
-                (((have_prev_view_proj_ ? prev_rt_shadow_.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
-            p.param1 = (rt_shadow_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
+                (((hist_valid ? hb.prev_rt_shadow.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
+            p.param1 = (rt_shadow_denoised_.uav_index & 0xFFFFu) | ((hist_valid ? 1u : 0u) << 16u);
             p.param2 = w;
             p.param3 = h;
             p.fparam0 = (eff_mode >= 2u) ? 0.10f : 0.20f;
@@ -1346,8 +1383,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->Dispatch(gx, gy, 1u);
 
             p.param0 = (rim_occ_raw_.srv_index & 0xFFFFu) |
-                       (((have_prev_view_proj_ ? prev_rim_occ_.srv_index : rim_occ_raw_.srv_index) & 0xFFFFu) << 16u);
-            p.param1 = (rim_occ_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
+                       (((hist_valid ? hb.prev_rim_occ.srv_index : rim_occ_raw_.srv_index) & 0xFFFFu) << 16u);
+            p.param1 = (rim_occ_denoised_.uav_index & 0xFFFFu) | ((hist_valid ? 1u : 0u) << 16u);
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
 
@@ -1356,8 +1393,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             const uint32_t bgx = (hw + 7u) / 8u;
             const uint32_t bgy = (hh + 7u) / 8u;
             p.param0 = (bounce_half_.srv_index & 0xFFFFu) |
-                       (((have_prev_view_proj_ ? prev_bounce_.srv_index : bounce_half_.srv_index) & 0xFFFFu) << 16u);
-            p.param1 = (bounce_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
+                       (((hist_valid ? hb.prev_bounce.srv_index : bounce_half_.srv_index) & 0xFFFFu) << 16u);
+            p.param1 = (bounce_denoised_.uav_index & 0xFFFFu) | ((hist_valid ? 1u : 0u) << 16u);
             p.param2 = hw;
             p.param3 = hh;
             cmd_set_root_pc(cmd, true, p);
@@ -1366,6 +1403,22 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, rim_occ_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, bounce_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+
+        // Snapshot current view history immediately after Pass 5 so interleaved Broadcast <-> Stage never cross-contaminate
+        if (allow_view_hist) {
+            auto copy_tex = [&](rhi::D3D12Texture& src, rhi::D3D12Texture& dst) {
+                const int prev_s = src.current_state;
+                device_->cmd_transition_texture(cmd, src, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                device_->cmd_transition_texture(cmd, dst, D3D12_RESOURCE_STATE_COPY_DEST);
+                cmd->CopyResource(dst.resource, src.resource);
+                device_->cmd_transition_texture(cmd, src, prev_s);
+                device_->cmd_transition_texture(cmd, dst, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            };
+            copy_tex(gb_n_, hb.prev_normal);
+            copy_tex(rt_shadow_denoised_, hb.prev_rt_shadow);
+            copy_tex(rim_occ_denoised_, hb.prev_rim_occ);
+            copy_tex(bounce_denoised_, hb.prev_bounce);
+        }
 
         // Pass 6 & 7: Live2D NPR Shading + Inverted-Hull Outlines (depth read-only so SRVs work in PS)
         device_->cmd_transition_texture(cmd, hdr_scene_, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1490,13 +1543,15 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->Dispatch((mw + 7u) / 8u, (mh + 7u) / 8u, 1u);
             device_->cmd_transition_texture(cmd, bloom_mips_[dst_idx], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         }
-        have_prev_view_proj_ = true;
+        if (allow_view_hist) {
+            hb.have_prev_view_proj = true;
+        }
     } else {
         device_->cmd_transition_texture(cmd, hdr_scene_, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const float cz[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         cmd_clear_rtv(*device_, cmd, hdr_scene_, cz);
         device_->cmd_transition_texture(cmd, hdr_scene_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        have_prev_view_proj_ = false;
+        hb.have_prev_view_proj = false;
     }
 
     // Pass 10: Tone Composite + 2D Filter Pro -> out_rgba16f_
@@ -1515,7 +1570,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     }
     device_->cmd_transition_texture(cmd, out_rgba16f_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
-    // Pass 11: Encode out_rgba16f_ -> out_rgba8_ (universal RGBA8) & out_bgra8_ (Spout2 D3D11On12)
+    // Pass 11: Encode out_rgba16f_ -> out_rgba8_ (universal RGBA8) & Broadcast-only out_bgra8_ (Spout2 D3D11On12)
     cmd->SetPipelineState(pso_encode_bgra_);
     device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     {
@@ -1530,9 +1585,47 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         cmd_set_root_pc(cmd, true, p);
         cmd->Dispatch(gx, gy, 1u);
     }
+
+    // Strict Schematic-Only Overlay onto out_rgba8_ ONLY for LightingStageView (never Broadcast/out_bgra8_)
+    const bool allow_schematic = (req.view_kind == RenderViewKind::LightingStage) && req.show_stage_schematic &&
+                                 (pso_stage_schematic_ != nullptr) && (stage_overlay_buf_.mapped_ptr != nullptr);
+    if (allow_schematic) {
+        StageSchematicBuildParams sp{};
+        sp.selected_light_idx = req.selected_studio_light_idx;
+        sp.show_grid = req.show_stage_grid;
+        sp.show_frustum = req.has_studio_frustum;
+        sp.has_studio_frustum = req.has_studio_frustum;
+        sp.studio_cam = req.studio_camera;
+        sp.studio_aspect = (h > 0u) ? (static_cast<float>(w) / static_cast<float>(h)) : req.studio_frustum_aspect;
+        sp.pivot_ws = head_target_ws;
+        sp.eye_pos_ws = eye_pos_ws;
+        const uint32_t elem_cnt = build_stage_schematic_overlay(*req.rig, sp, stage_overlay_scratch_);
+        if (elem_cnt > 0u) {
+            std::memcpy(stage_overlay_buf_.mapped_ptr, stage_overlay_scratch_.data(),
+                        static_cast<size_t>(elem_cnt) * sizeof(GpuStageOverlayElem));
+            device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+            device_->cpu_rtv_handle(out_rgba8_.rtv_index, &rtv);
+            cmd->OMSetRenderTargets(1u, &rtv, FALSE, nullptr);
+            const D3D12_VIEWPORT svp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
+            const D3D12_RECT ssc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+            device_->cmd_bind_bindless_graphics(cmd);
+            cmd->RSSetViewports(1, &svp);
+            cmd->RSSetScissorRects(1, &ssc);
+            cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cmd->SetPipelineState(pso_stage_schematic_);
+            GpuPushConstants p{};
+            p.frame_globals_bda = fg_handle;
+            p.draw_data_bda = stage_overlay_buf_.srv_handle();
+            cmd_set_root_pc(cmd, false, p);
+            cmd->DrawInstanced(elem_cnt * 6u, 1u, 0u, 0u);
+        }
+    }
     device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_COMMON);
 
-    if (out_bgra8_.uav_index != rhi::kD3D12InvalidDescIndex) {
+    if (req.view_kind == RenderViewKind::Broadcast && out_bgra8_.uav_index != rhi::kD3D12InvalidDescIndex) {
+        device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
+        cmd->SetPipelineState(pso_encode_bgra_);
         device_->cmd_transition_texture(cmd, out_bgra8_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         GpuPushConstants p{};
         p.frame_globals_bda = fg_handle;

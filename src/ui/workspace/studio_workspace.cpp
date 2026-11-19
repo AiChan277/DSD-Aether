@@ -55,6 +55,7 @@ const char* kPanelViewport = "Viewport";
 const char* kPanelInspector = "Inspector";
 const char* kPanelNodeGraph = "Node Graph";
 const char* kPanelConsole = "Console";
+const char* kPanelLightMixer = "Light Mixer";
 const char* kPanelExpressions = "Expressions";
 const char* kPanelTimeline = "Performance Timeline";
 
@@ -166,6 +167,7 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
     }
 
     command_palette_.rebuild_entries(keymap_, settings_.recent_projects);
+    lighting_stage_.set_config_dir(config_dir_);
     synced_param_epoch_ = 0; // force initial ParamStore -> actions sync
     dock_layout_dirty_ = true;
 }
@@ -356,13 +358,19 @@ void StudioWorkspace::build_dock_layout(ImGuiID dockspace_id, StudioMode mode) {
     ImGui::DockBuilderDockWindow(kPanelViewport, main_id);
     ImGui::DockBuilderDockWindow(kPanelNodeGraph, bottom_id);
     ImGui::DockBuilderDockWindow(kPanelConsole, bottom_id);
+    ImGui::DockBuilderDockWindow(kPanelLightMixer, bottom_id);
     ImGui::DockBuilderDockWindow(kPanelExpressions, bottom_id);
     ImGui::DockBuilderDockWindow(kPanelTimeline, bottom_id);
     ImGui::DockBuilderFinish(dockspace_id);
 
     // Bring the mode's primary bottom tab to front once its window exists.
-    safe_copy_cstr(focus_tab_after_layout_.data(), focus_tab_after_layout_.size(),
-                   mode == StudioMode::LiveStudio ? kPanelConsole : kPanelNodeGraph);
+    const char* focus_bottom = kPanelNodeGraph;
+    if (mode == StudioMode::LiveStudio) {
+        focus_bottom = kPanelConsole;
+    } else if (mode == StudioMode::Lighting) {
+        focus_bottom = kPanelLightMixer;
+    }
+    safe_copy_cstr(focus_tab_after_layout_.data(), focus_tab_after_layout_.size(), focus_bottom);
 }
 
 void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
@@ -515,9 +523,25 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
     case PaletteCommandTag::ModeRigging:
         switch_mode(StudioMode::Rigging);
         break;
+    case PaletteCommandTag::ModeLighting:
+        switch_mode(StudioMode::Lighting);
+        break;
     case PaletteCommandTag::ModeNodes:
         switch_mode(StudioMode::Nodes);
         break;
+    case PaletteCommandTag::ToggleLightingQuadView:
+        if (mode_ != StudioMode::Lighting) {
+            switch_mode(StudioMode::Lighting);
+        }
+        lighting_stage_.toggle_quad_view();
+        break;
+    case PaletteCommandTag::ToggleLightingPilotLight: {
+        if (mode_ != StudioMode::Lighting) {
+            switch_mode(StudioMode::Lighting);
+        }
+        lighting_stage_.toggle_pilot_light(actions.viewport, {0.0f, 1.32f, 0.0f}, {0.716f, 1.110f, 1.961f});
+        break;
+    }
     case PaletteCommandTag::ProjectNew:
         if (!host_status_.on_air) {
             actions.request_new_project = true;
@@ -699,8 +723,20 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatar
         switch_mode(StudioMode::LiveStudio);
     } else if (keymap_.is_pressed(ActionId::ModeRigging)) {
         switch_mode(StudioMode::Rigging);
+    } else if (keymap_.is_pressed(ActionId::ModeLighting)) {
+        switch_mode(StudioMode::Lighting);
     } else if (keymap_.is_pressed(ActionId::ModeNodes)) {
         switch_mode(StudioMode::Nodes);
+    } else if (keymap_.is_pressed(ActionId::LightingQuadView) && !typing) {
+        if (mode_ != StudioMode::Lighting) {
+            switch_mode(StudioMode::Lighting);
+        }
+        lighting_stage_.toggle_quad_view();
+    } else if (keymap_.is_pressed(ActionId::LightingPilotLight) && !typing) {
+        if (mode_ != StudioMode::Lighting) {
+            switch_mode(StudioMode::Lighting);
+        }
+        lighting_stage_.toggle_pilot_light(actions.viewport, {0.0f, 1.32f, 0.0f}, avatar.camera_eye);
     } else if (keymap_.is_pressed(ActionId::MaximizeHoveredPanel) && !typing) {
         if (layout_maximized_) {
             layout_maximized_ = false;
@@ -950,27 +986,51 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         }
     };
 
-    // Z1 Outliner (OutlinerPanel manages its own ImGui::Begin("Outliner & Project")/End)
-    outliner_panel_.draw(mode_, host_status_.on_air, avatar, output_view, bones_, materials_, expressions_, plugins_,
-                         params_, undo_, fonts_, selection_, actions);
-    if (outliner_panel_.consume_inspect_outputs_request()) {
-        inspector_panel_.request_focus_output_section();
+    // Z1 Outliner
+    if (mode_ == StudioMode::Lighting) {
+        if (ImGui::Begin(kPanelOutliner)) {
+            track_hovered_zone(kPanelOutliner);
+            lighting_stage_.draw_outliner(avatar, fonts_, selection_, actions);
+        }
+        ImGui::End();
+    } else {
+        outliner_panel_.draw(mode_, host_status_.on_air, avatar, output_view, bones_, materials_, expressions_, plugins_,
+                             params_, undo_, fonts_, selection_, actions);
+        if (outliner_panel_.consume_inspect_outputs_request()) {
+            inspector_panel_.request_focus_output_section();
+        }
     }
 
-    // Z2 Viewport (ViewportPanel manages its own ImGui::Begin("Viewport")/End)
-    viewport_panel_.draw(mode_, hw_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused, params_,
-                         undo_, settings_, settings_dirty_, fonts_, scale, actions);
+    // Z2 Viewport (Broadcast Viewport vs Isolated Lighting Stage Viewport)
+    if (mode_ == StudioMode::Lighting) {
+        if (ImGui::Begin(kPanelViewport)) {
+            track_hovered_zone(kPanelViewport);
+            lighting_stage_.draw_stage_viewport(avatar, fonts_, scale, selection_, actions);
+        }
+        ImGui::End();
+    } else {
+        viewport_panel_.draw(mode_, hw_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused,
+                             params_, undo_, settings_, settings_dirty_, fonts_, scale, actions);
+    }
 
-    // Z3 Inspector (InspectorPanel manages its own ImGui::Begin("Inspector")/End)
+    // Z3 Inspector
     PropertyRowActions row_actions{};
-    inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
-                          output_view, host_status_, plugins_, selection_, params_, undo_, settings_, settings_dirty_,
-                          fonts_, row_actions, actions, &viewport_panel_);
+    if (mode_ == StudioMode::Lighting) {
+        if (ImGui::Begin(kPanelInspector)) {
+            track_hovered_zone(kPanelInspector);
+            lighting_stage_.draw_inspector(avatar, fonts_, params_, selection_, actions);
+        }
+        ImGui::End();
+    } else {
+        inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
+                              output_view, host_status_, plugins_, selection_, params_, undo_, settings_, settings_dirty_,
+                              fonts_, row_actions, actions, &viewport_panel_);
+    }
     if (const ImGuiWindow* hov = GImGui != nullptr ? GImGui->HoveredWindow : nullptr;
         hov != nullptr && hov->RootWindow != nullptr) {
         const char* rname = hov->RootWindow->Name;
         for (const char* zname : {kPanelOutliner, kPanelViewport, kPanelInspector, kPanelNodeGraph, kPanelConsole,
-                                  kPanelExpressions, kPanelTimeline}) {
+                                  kPanelLightMixer, kPanelExpressions, kPanelTimeline}) {
             if (std::strcmp(rname, zname) == 0) {
                 safe_copy_cstr(last_hovered_zone_window_.data(), last_hovered_zone_window_.size(), zname);
                 break;
@@ -995,7 +1055,18 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     }
     ImGui::End();
 
-    // Z4 Auxiliary Tabs (Console, Expressions, Timeline)
+    // Z4 Console, Light Mixer & Performance Tabs
+    if (mode_ == StudioMode::Lighting) {
+        if (ImGui::Begin(kPanelLightMixer)) {
+            track_hovered_zone(kPanelLightMixer);
+            lighting_stage_.draw_mixer_console(avatar, fonts_, selection_, actions);
+        }
+        ImGui::End();
+        lighting_stage_.export_stage_actions(avatar, actions.viewport);
+    } else {
+        actions.viewport.request_stage_render = false;
+    }
+
     if (ImGui::Begin(kPanelConsole)) {
         track_hovered_zone(kPanelConsole);
         const ConsoleTabResult res = timeline_console_.draw_console_tab(recent_logs_, log_head_, log_count_, fonts_);

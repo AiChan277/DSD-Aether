@@ -1,9 +1,14 @@
 #pragma once
 
 #include "aether_ffi_contract.h"
+#include "renderer/gpu_structs.hpp"
+#include "renderer/preview_pass.hpp"
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <span>
+#include <vector>
 
 namespace aether::renderer {
 
@@ -176,5 +181,108 @@ void compute_hillaire_sky_sh9(const std::array<float, 3>& sun_dir_ws, const std:
 
 /** Returns human-readable label for a `StudioGelPreset`. */
 [[nodiscard]] const char* studio_gel_name(StudioGelPreset gel) noexcept;
+
+/** Returns human-readable label for a `PassiveFlagMode`. */
+[[nodiscard]] const char* passive_flag_name(PassiveFlagMode mode) noexcept;
+
+/** Returns human-readable label for a `StudioGoboPattern`. */
+[[nodiscard]] const char* studio_gobo_name(StudioGoboPattern gobo) noexcept;
+
+/** Resolved world-space luminaire pose (origin, target, basis axes). */
+struct StudioLightWorldPose {
+    std::array<float, 3> position_ws{};
+    std::array<float, 3> target_ws{};
+    std::array<float, 3> forward_ws{};
+    std::array<float, 3> right_ws{};
+    std::array<float, 3> up_ws{};
+    float distance_m{2.0f};
+};
+
+/** Resolves world-space emitter position, target, forward direction, and tangent frame. */
+[[nodiscard]] StudioLightWorldPose resolve_studio_light_world_pose(const StudioLightSpec& spec,
+                                                                   const std::array<float, 3>& pivot_ws,
+                                                                   const std::array<float, 3>& eye_pos_ws) noexcept;
+
+/** Converts an orbit light to explicit world-space coordinates (`position_ws`) for direct gizmo manipulation. */
+void bake_studio_light_world_pose(StudioLightSpec& spec, const std::array<float, 3>& pivot_ws,
+                                  const std::array<float, 3>& eye_pos_ws) noexcept;
+
+/** Ensures `rig.studio_lights` is populated (converting legacy `rig.lights` once if needed) and activates studio array mode. */
+void ensure_studio_lights_initialized(LightingRig& rig, const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+
+/** Appends a new fixture to `rig.studio_lights` (up to `kMaxStudioLights`), returning its index or `-1` when full. */
+[[nodiscard]] int add_studio_light(LightingRig& rig, StudioFixtureProfile profile,
+                                     const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+
+/** Appends a passive bounce card or negative fill flag to `rig.studio_lights`, returning its index or `-1` when full. */
+[[nodiscard]] int add_passive_flag(LightingRig& rig, PassiveFlagMode mode,
+                                     const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+
+/** Duplicates `rig.studio_lights[index]` (offset slightly in azimuth), returning the new index or `-1`. */
+[[nodiscard]] int duplicate_studio_light(LightingRig& rig, uint32_t index) noexcept;
+
+/** Removes `rig.studio_lights[index]` cleanly without leaving dangling gaps. */
+[[nodiscard]] bool remove_studio_light(LightingRig& rig, uint32_t index) noexcept;
+
+/** 5 built-in complete studio rig presets shipped in `config/lighting_rigs.json`. */
+enum class StudioRigPresetId : uint8_t {
+    ThreePointBroadcast = 0,
+    DramaticRimSplit = 1,
+    ShinkaiGoldenHour = 2,
+    HighKeySoftBeauty = 3,
+    NeonCyberpunkDualColor = 4,
+};
+
+/** Returns human-readable name for a `StudioRigPresetId`. */
+[[nodiscard]] const char* studio_rig_preset_name(StudioRigPresetId id) noexcept;
+
+/** Applies one of the 5 built-in complete studio rig presets to `rig` (activating all 16-slot controls). */
+void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id,
+                             const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+
+/** Constructs a Stage Camera preset for one of the 7 stage views (Free Perspective + 6 Orthographic). */
+[[nodiscard]] PreviewCamera make_stage_camera_preset(StageCameraView view, const std::array<float, 3>& pivot_ws,
+                                                     float current_ortho_height = 2.20f) noexcept;
+
+/** World-space picking ray generated from either a Perspective or Parallel Orthographic stage camera. */
+struct StagePickRay {
+    std::array<float, 3> origin_ws{};
+    std::array<float, 3> dir_ws{};
+    bool is_orthographic{false};
+    float ortho_height{2.20f};
+};
+
+/** Computes a picking ray at normalized viewport coordinates `u_01, v_01` in `[0, 1]` for both Perspective & Ortho. */
+[[nodiscard]] StagePickRay compute_stage_pick_ray(const PreviewCamera& cam, float u_01, float v_01,
+                                                  float aspect) noexcept;
+
+/** Picks the nearest studio light fixture or passive flag under `u_01, v_01`, returning its index or `-1`. */
+[[nodiscard]] int pick_stage_studio_light(const LightingRig& rig, const std::array<float, 3>& pivot_ws,
+                                          const std::array<float, 3>& eye_pos_ws, const PreviewCamera& stage_cam,
+                                          float u_01, float v_01, float aspect, float* out_hit_t = nullptr) noexcept;
+
+/** Computes constant screen-pixel world scale factor for 3D gizmos in both Perspective & Ortho cameras. */
+[[nodiscard]] float stage_gizmo_world_scale(const PreviewCamera& cam, const std::array<float, 3>& world_pos,
+                                            float target_px = 78.0f, float viewport_h_px = 720.0f) noexcept;
+
+/** Parameters for generating strict schematic-only geometry into `GpuStageOverlayElem`. */
+struct StageSchematicBuildParams {
+    int selected_light_idx{-1};
+    bool show_grid{true};
+    bool show_frustum{true};
+    bool has_studio_frustum{false};
+    PreviewCamera studio_cam{};
+    float studio_aspect{16.0f / 9.0f};
+    std::array<float, 3> pivot_ws{0.0f, 1.32f, 0.0f};
+    std::array<float, 3> eye_pos_ws{0.0f, 1.48f, 2.20f};
+};
+
+/**
+ * Generates pure Schematic Lighting Overlay primitives (fixture wireframes, 15% translucent apertures,
+ * honeycomb grid hatch, barn door flaps, dashed aim lines, StudioCamera FOV frustum, and metric floor grid)
+ * strictly for `LightingStageView`. Writes up to `out_elems.size()` elements and returns count written.
+ */
+[[nodiscard]] uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchematicBuildParams& params,
+                                                     std::span<GpuStageOverlayElem> out_elems) noexcept;
 
 } // namespace aether::renderer
