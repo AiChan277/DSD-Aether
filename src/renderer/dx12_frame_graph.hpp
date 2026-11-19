@@ -46,6 +46,7 @@ class Dx12FrameGraph {
     void destroy() noexcept;
 
     [[nodiscard]] Expected<void> bind_avatar(const GpuAvatar* avatar);
+    [[nodiscard]] Expected<void> ensure_upload_capacity(uint32_t vertex_count);
     [[nodiscard]] Expected<void> apply_face_sdf(const SdfBakeOutput& baked);
 
     /** Records and submits all DX12 rendering passes for `req` cleanly (zero per-frame heap allocs). */
@@ -60,6 +61,7 @@ class Dx12FrameGraph {
     [[nodiscard]] uint32_t height() const noexcept { return height_; }
     [[nodiscard]] bool pipelines_ready() const noexcept { return pipelines_ready_; }
     [[nodiscard]] bool dxr_ready() const noexcept { return dxr_ready_; }
+    [[nodiscard]] const GpuAvatar* bound_avatar() const noexcept { return bound_avatar_; }
     [[nodiscard]] uint8_t last_effective_lighting_mode() const noexcept { return last_eff_lighting_mode_; }
     [[nodiscard]] uint64_t rendered_frames() const noexcept { return rendered_frames_; }
     [[nodiscard]] float last_render_ms() const noexcept { return last_render_ms_; }
@@ -76,7 +78,6 @@ class Dx12FrameGraph {
     void destroy_pipelines() noexcept;
     Expected<void> create_size_dependent_targets(uint32_t w, uint32_t h);
     void destroy_size_dependent_targets() noexcept;
-    Expected<void> ensure_upload_capacity(uint32_t vertex_count);
     void destroy_avatar_resources() noexcept;
     void destroy_dxr_structures() noexcept;
     Expected<void> prepare_dxr_structures(const GpuAvatar& avatar);

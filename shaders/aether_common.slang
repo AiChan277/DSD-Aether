@@ -108,6 +108,9 @@ struct GpuFrameGlobals {
     float4 eye_catchlight_params; // x=intensity, y=size, z=crease_disguise_eff, w=coaxial_flag
     float4 eye_left_center_r;     // xyz=left eye world pos, w=cornea_radius
     float4 eye_right_center_r;    // xyz=right eye world pos, w=cornea_radius
+    float4 neck_seam_origin_r;    // xyz=animated Neck joint world pos, w=horizontal neck radius (m)
+    float4 neck_seam_head_str;    // xyz=animated Head joint world pos, w=neck_seam_blend strength (0..1)
+    float4 face_skin_ref_rgb;     // rgb=sampled linear Face chin/lower-cheek reference RGB, w=valid flag
     GpuLight lights[8];
 };
 
@@ -342,4 +345,50 @@ float3 eval_3band_sh_ambient(float3 n, GpuFrameGlobals fg) {
 
 float2 ndc_to_screen_uv(float2 ndc) {
     return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+// Smooth rotation-invariant skeletal neck-to-head blend weight (1.0 at chin/upper neck, tapering to 0.0 at collarbone).
+float compute_neck_seam_blend(float3 world_pos, GpuFrameGlobals fg) {
+    float strength = saturate(fg.neck_seam_head_str.w);
+    if (strength <= 0.001) {
+        return 0.0;
+    }
+    float3 neck_p = fg.neck_seam_origin_r.xyz;
+    float3 head_p = fg.neck_seam_head_str.xyz;
+    float3 axis = head_p - neck_p;
+    float axis_len2 = max(dot(axis, axis), 1e-4);
+    float t = dot(world_pos - neck_p, axis) / axis_len2;
+    float vert_w = smoothstep(-0.85, -0.05, t) * (1.0 - smoothstep(1.35, 1.85, t));
+    float3 spine_p = neck_p + axis * clamp(t, -0.85, 1.35);
+    float r_perp = length(world_pos - spine_p);
+    float neck_r = max(fg.neck_seam_origin_r.w, 0.04);
+    float radial_w = 1.0 - smoothstep(neck_r * 0.85, neck_r * 1.45, r_perp);
+    return vert_w * radial_w * strength;
+}
+
+// Forward-flattened head-aligned proxy normal for the upper neck so downward chin bevels don't drop into false shadow.
+float3 compute_neck_proxy_normal(float3 true_n, GpuFrameGlobals fg) {
+    float3 h_fwd = normalize_safe(fg.head_fwd_world.xyz, float3(0.0, 0.0, 1.0));
+    float3 h_right = normalize_safe(fg.head_right_world.xyz, float3(1.0, 0.0, 0.0));
+    float3 h_up = normalize_safe(cross(h_fwd, h_right), float3(0.0, 1.0, 0.0));
+    float nx = dot(true_n, h_right);
+    float ny = dot(true_n, h_up);
+    float nz = dot(true_n, h_fwd);
+    float front_gate = smoothstep(-0.35, 0.15, nz);
+    float3 n_proxy = normalize_safe(h_right * (nx * 0.62) + h_up * (ny * 0.12) + h_fwd * max(nz, 0.55), h_fwd);
+    return normalize_safe(lerp(true_n, n_proxy, front_gate), true_n);
+}
+
+// Smooth skin-chroma detector for shared Body_00_SKIN atlases (accepts pale/tan/dark skin, rejects black/grey/metal/lace).
+float compute_body_skin_texel_weight(float3 lin_rgb, float4 face_ref) {
+    float r = lin_rgb.r;
+    float g = lin_rgb.g;
+    float b = lin_rgb.b;
+    float min_r = (face_ref.w > 0.5) ? min(0.10, face_ref.r * 0.30) : 0.10;
+    float lum_ok = smoothstep(min_r * 0.6, min_r * 1.35, r);
+    float rg_ok = smoothstep(1.01, 1.05, r / max(g, 1e-4));
+    float rb_ok = smoothstep(1.09, 1.18, r / max(b, 1e-4));
+    float gb_ok = smoothstep(0.95, 1.02, g / max(b, 1e-4));
+    float diff_ok = smoothstep(0.035, 0.080, r - b);
+    return lum_ok * rg_ok * rb_ok * gb_ok * diff_ok;
 }

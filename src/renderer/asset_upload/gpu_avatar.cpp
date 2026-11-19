@@ -437,6 +437,241 @@ bool is_bc7_format(uint32_t aether_fmt) noexcept {
     return aether_fmt == AETHER_TEX_FORMAT_BC7_UNORM || aether_fmt == AETHER_TEX_FORMAT_BC7_SRGB;
 }
 
+float srgb_u8_to_lin(uint8_t u) noexcept {
+    const float c = static_cast<float>(u) / 255.0f;
+    return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+
+std::string to_lower_str(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char ch : s) {
+        out.push_back((ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch + ('a' - 'A')) : ch);
+    }
+    return out;
+}
+
+std::string read_cstr_from_pool(const std::string& pool, uint32_t offset) {
+    if (offset >= pool.size()) {
+        return {};
+    }
+    const char* p = pool.data() + offset;
+    const size_t max_n = pool.size() - offset;
+    size_t len = 0;
+    while (len < max_n && p[len] != '\0') {
+        ++len;
+    }
+    return std::string(p, len);
+}
+
+bool sample_avatar_texel_rgba8(const AetherTextureDesc& td, const std::vector<uint8_t>& cpu_pixels, uint32_t tx,
+                               uint32_t ty, uint8_t out_rgba[4]) noexcept {
+    if (td.width == 0U || td.height == 0U) {
+        return false;
+    }
+    tx = std::min(tx, td.width - 1U);
+    ty = std::min(ty, td.height - 1U);
+    if (!is_bc7_format(td.format)) {
+        const uint64_t expected_bytes = static_cast<uint64_t>(td.width) * static_cast<uint64_t>(td.height) * 4ULL;
+        if (td.pixel_size < expected_bytes || td.pixel_offset + expected_bytes > cpu_pixels.size()) {
+            return false;
+        }
+        const uint8_t* px = cpu_pixels.data() + td.pixel_offset + (static_cast<size_t>(ty) * td.width + tx) * 4U;
+        out_rgba[0] = px[0];
+        out_rgba[1] = px[1];
+        out_rgba[2] = px[2];
+        out_rgba[3] = px[3];
+        return true;
+    }
+
+    // Decode BC7 Mode 6 block (produced by `bc7_cache.rs` for warm disk cache hits).
+    const uint32_t bw = (td.width + 3U) / 4U;
+    const uint32_t bh = (td.height + 3U) / 4U;
+    const uint64_t expected_bytes = static_cast<uint64_t>(bw) * static_cast<uint64_t>(bh) * 16ULL;
+    if (td.pixel_size < expected_bytes || td.pixel_offset + expected_bytes > cpu_pixels.size()) {
+        return false;
+    }
+    const size_t block_idx = static_cast<size_t>(ty / 4U) * bw + (tx / 4U);
+    const uint8_t* blk = cpu_pixels.data() + td.pixel_offset + block_idx * 16U;
+    uint64_t lo = 0ULL;
+    uint64_t hi = 0ULL;
+    std::memcpy(&lo, blk, 8U);
+    std::memcpy(&hi, blk + 8U, 8U);
+    if ((lo & 0x7FULL) != 0x40ULL) {
+        return false; // Non-Mode-6 block
+    }
+    const uint32_t p0 = static_cast<uint32_t>((lo >> 63U) & 1ULL);
+    const uint32_t p1 = static_cast<uint32_t>(hi & 1ULL);
+    const uint32_t pi = (ty & 3U) * 4U + (tx & 3U);
+    const uint32_t idx =
+        (pi == 0U) ? static_cast<uint32_t>((hi >> 1U) & 0x7ULL)
+                   : static_cast<uint32_t>((hi >> (4U + (pi - 1U) * 4U)) & 0xFULL);
+    static constexpr uint32_t kWeights[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+    const uint32_t w = kWeights[idx & 15U];
+    for (uint32_t ch = 0U; ch < 4U; ++ch) {
+        const uint32_t q0 = static_cast<uint32_t>((lo >> (7U + ch * 14U)) & 0x7FULL);
+        const uint32_t q1 = static_cast<uint32_t>((lo >> (14U + ch * 14U)) & 0x7FULL);
+        const uint32_t c0 = (q0 << 1U) | p0;
+        const uint32_t c1 = (q1 << 1U) | p1;
+        out_rgba[ch] = static_cast<uint8_t>(((64U - w) * c0 + w * c1 + 32U) >> 6U);
+    }
+    return true;
+}
+
+/**
+ * Samples the avatar's lower-cheek / chin `Face_00_SKIN` linear RGB once at upload time
+ * so the upper-neck baked-shadow normalizer matches ANY avatar skin tone automatically.
+ */
+void compute_face_skin_reference(GpuAvatar& avatar) {
+    avatar.face_skin_ref_linear = {0.85f, 0.68f, 0.58f, 0.0f};
+    if (avatar.submeshes.empty() || avatar.materials.empty() || avatar.rest_vertices.empty() ||
+        avatar.rest_surfaces.size() < avatar.rest_vertices.size() || avatar.cpu_texture_pixels.empty()) {
+        return;
+    }
+
+    float head_x = 0.0f;
+    float head_y = avatar.desc.aabb_min[1] + (avatar.desc.aabb_max[1] - avatar.desc.aabb_min[1]) * 0.88f;
+    float neck_y = head_y - 0.07f;
+    const uint16_t head_ji = avatar.desc.humanoid_to_joint[AETHER_BONE_HEAD];
+    const uint16_t neck_ji = avatar.desc.humanoid_to_joint[AETHER_BONE_NECK];
+    if (head_ji != 0xFFFFU && head_ji < avatar.joint_rest_world_pos.size()) {
+        head_x = avatar.joint_rest_world_pos[head_ji][0];
+        head_y = avatar.joint_rest_world_pos[head_ji][1];
+    }
+    if (neck_ji != 0xFFFFU && neck_ji < avatar.joint_rest_world_pos.size()) {
+        neck_y = avatar.joint_rest_world_pos[neck_ji][1];
+    }
+    const float neck_len = std::max(head_y - neck_y, 0.045f);
+    const float y_min = neck_y - 0.15f * neck_len;
+    const float y_max = head_y + 0.55f * neck_len;
+
+    struct SkinSample {
+        float r;
+        float g;
+        float b;
+        float luma;
+    };
+    std::vector<SkinSample> samples;
+    samples.reserve(512);
+
+    auto collect_from_submesh = [&](const AetherSubmeshDesc& sm, bool strict_chin) {
+        if (sm.material_index >= avatar.materials.size()) {
+            return;
+        }
+        const AetherNprMaterial& mat = avatar.materials[sm.material_index];
+        if (mat.tex_base >= avatar.texture_descs.size()) {
+            return;
+        }
+        const AetherTextureDesc& td = avatar.texture_descs[mat.tex_base];
+        if (td.width == 0U || td.height == 0U) {
+            return;
+        }
+        const bool is_srgb =
+            (td.format == AETHER_TEX_FORMAT_RGBA8_SRGB || td.format == AETHER_TEX_FORMAT_BC7_SRGB);
+        const size_t idx_end = std::min<size_t>(static_cast<size_t>(sm.index_offset) + sm.index_count,
+                                                avatar.rest_indices.size());
+        const size_t stride = std::max<size_t>(1U, (idx_end - sm.index_offset) / 2400U);
+        for (size_t ii = sm.index_offset; ii < idx_end; ii += stride) {
+            const uint32_t vi = avatar.rest_indices[ii];
+            if (vi >= avatar.rest_vertices.size()) {
+                continue;
+            }
+            const AetherVertex25D& v = avatar.rest_vertices[vi];
+            if (strict_chin) {
+                if (v.position[1] < y_min || v.position[1] > y_max) {
+                    continue;
+                }
+                if (std::abs(v.position[0] - head_x) > 0.075f) {
+                    continue;
+                }
+                if (v.true_normal[2] < 0.25f) {
+                    continue;
+                }
+            }
+            const AetherVertexSurface& s = avatar.rest_surfaces[vi];
+            const float u = std::clamp(s.uv0[0], 0.0f, 1.0f);
+            const float v_coord = std::clamp(s.uv0[1], 0.0f, 1.0f);
+            const uint32_t tx = std::min<uint32_t>(td.width - 1U, static_cast<uint32_t>(u * static_cast<float>(td.width)));
+            const uint32_t ty =
+                std::min<uint32_t>(td.height - 1U, static_cast<uint32_t>(v_coord * static_cast<float>(td.height)));
+            uint8_t px[4]{};
+            if (!sample_avatar_texel_rgba8(td, avatar.cpu_texture_pixels, tx, ty, px)) {
+                continue;
+            }
+            if (px[3] < 180U) {
+                continue;
+            }
+            const float r = (is_srgb ? srgb_u8_to_lin(px[0]) : (static_cast<float>(px[0]) / 255.0f)) * mat.base_color[0];
+            const float g = (is_srgb ? srgb_u8_to_lin(px[1]) : (static_cast<float>(px[1]) / 255.0f)) * mat.base_color[1];
+            const float b = (is_srgb ? srgb_u8_to_lin(px[2]) : (static_cast<float>(px[2]) / 255.0f)) * mat.base_color[2];
+            const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+            if (lum < 0.04f) {
+                continue;
+            }
+            samples.push_back({r, g, b, lum});
+        }
+    };
+
+    auto is_face_skin_submesh = [&](const AetherSubmeshDesc& sm) -> bool {
+        if (sm.material_index >= avatar.materials.size()) {
+            return false;
+        }
+        const std::string m_low = to_lower_str(read_cstr_from_pool(avatar.strings, avatar.materials[sm.material_index].name_offset));
+        const std::string s_low = to_lower_str(avatar.string_slice(sm.name_offset, sm.name_len));
+        auto has_bad = [](const std::string& t) {
+            return t.find("eye") != std::string::npos || t.find("mouth") != std::string::npos ||
+                   t.find("brow") != std::string::npos || t.find("lash") != std::string::npos ||
+                   t.find("highlight") != std::string::npos || t.find("sclera") != std::string::npos ||
+                   t.find("tooth") != std::string::npos || t.find("tongue") != std::string::npos ||
+                   t.find("hair") != std::string::npos;
+        };
+        if (has_bad(m_low) || has_bad(s_low)) {
+            return false;
+        }
+        const bool named_face_skin = (m_low.find("face") != std::string::npos && m_low.find("skin") != std::string::npos);
+        const bool flagged_face = ((sm.flags & AETHER_SUBMESH_FLAG_FACE) != 0U) &&
+                                  (m_low.find("face") != std::string::npos || s_low.find("face") != std::string::npos ||
+                                   m_low.find("skin") != std::string::npos);
+        return named_face_skin || flagged_face;
+    };
+
+    for (const auto& sm : avatar.submeshes) {
+        if (is_face_skin_submesh(sm)) {
+            collect_from_submesh(sm, true);
+        }
+    }
+    if (samples.size() < 16U) {
+        for (const auto& sm : avatar.submeshes) {
+            if (is_face_skin_submesh(sm)) {
+                collect_from_submesh(sm, false);
+            }
+        }
+    }
+    if (samples.empty()) {
+        return;
+    }
+
+    std::sort(samples.begin(), samples.end(), [](const SkinSample& a, const SkinSample& b) { return a.luma < b.luma; });
+    // Trimmed mean over the 45th..70th luminance percentile avoids dark lip lines & bright stickers.
+    const size_t lo = (samples.size() * 45U) / 100U;
+    const size_t hi = std::max(lo + 1U, (samples.size() * 70U) / 100U);
+    double sr = 0.0;
+    double sg = 0.0;
+    double sb = 0.0;
+    for (size_t i = lo; i < hi && i < samples.size(); ++i) {
+        sr += samples[i].r;
+        sg += samples[i].g;
+        sb += samples[i].b;
+    }
+    const double denom = static_cast<double>(std::min(hi, samples.size()) - lo);
+    avatar.face_skin_ref_linear = {
+        static_cast<float>(sr / denom),
+        static_cast<float>(sg / denom),
+        static_cast<float>(sb / denom),
+        1.0f,
+    };
+}
+
 } // namespace
 
 void StagedAvatarUpload::release() noexcept {
@@ -918,6 +1153,7 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     // Build static + double-buffered live skeleton overlay buffers (tiny, zero-sync-hazard).
     compute_rest_joint_world_positions(avatar->joints, avatar->joint_rest_world_pos);
     avatar->joint_anim_world_pos = avatar->joint_rest_world_pos;
+    compute_face_skin_reference(*avatar);
     build_joint_humanoid_sources(avatar->joints, avatar->desc, avatar->joint_humanoid_source);
     build_joint_spring_sources(avatar->joints, avatar->springs, avatar->joint_spring_source);
     build_deduped_expressions_and_morph_meta(avatar->expressions, avatar->morph_ranges, avatar->morph_deltas,

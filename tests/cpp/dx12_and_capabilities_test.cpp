@@ -18,6 +18,7 @@
 #include "renderer/circadian_lighting.hpp"
 #include "renderer/dx12_bridge.hpp"
 #include "renderer/dx12_frame_graph.hpp"
+#include "renderer/frame_globals_builder.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "renderer/sdf_generator.hpp"
 #include "rhi/d3d12_device.hpp"
@@ -834,4 +835,508 @@ TEST_CASE("Task 8: NPU Safe-Zone Box C^1 tanh compression, pitch glitch clamping
         CHECK_FALSE(d2.collision_projected);
         CHECK(d2.residual_penetration_m == 0.0f);
     }
+}
+
+TEST_CASE("DX12 Bridge mid-way avatar swap to larger vertex count keeps rendering cleanly",
+          "[dx12][avatar-swap][regression]") {
+    const auto small_path = std::filesystem::path(AETHER_REPO_ROOT) / "tests" / "data" / "reference_avatar.vrm";
+    const auto large_path = find_user_vrm_path();
+    REQUIRE(std::filesystem::is_regular_file(small_path));
+    if (large_path.empty()) {
+        SUCCEED("Optional larger VRM absent; skipping swap test");
+        return;
+    }
+
+    auto run_swap_on_adapter = [&](bool prefer_igpu, const char* tag) {
+        aether::rhi::RhiDeviceConfig vk_cfg{};
+        vk_cfg.headless = true;
+        vk_cfg.enable_validation = true;
+        vk_cfg.require_validation = true;
+        vk_cfg.prefer_integrated = prefer_igpu;
+        auto vk_dev_res = aether::rhi::RhiDevice::create(vk_cfg);
+        REQUIRE(vk_dev_res.has_value());
+        std::unique_ptr<aether::rhi::RhiDevice> rhi(vk_dev_res.value());
+
+        auto small_av = load_avatar_file(*rhi, small_path);
+        auto large_av = load_avatar_file(*rhi, large_path);
+        REQUIRE(small_av != nullptr);
+        REQUIRE(large_av != nullptr);
+        std::printf("[DX12_SWAP:%s] adapter='%s' small_verts=%u large_verts=%u\n", tag,
+                    rhi->gpu_info().device_name.c_str(), small_av->requirements.vertex_count,
+                    large_av->requirements.vertex_count);
+        REQUIRE(large_av->requirements.vertex_count > small_av->requirements.vertex_count);
+
+        aether::renderer::NprRenderer vk_npr;
+        aether::renderer::RendererConfig rcfg{};
+        rcfg.width = kW;
+        rcfg.height = kH;
+        rcfg.enable_rt = rhi->rt_supported() && !rhi->is_intel_igpu();
+        REQUIRE(vk_npr.init(*rhi, rcfg).has_value());
+
+        aether::GarbageCollector gc;
+        aether::renderer::Dx12Bridge bridge;
+        bridge.attach(*rhi, gc);
+
+        aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
+        rig.lighting_mode = rhi->is_intel_igpu() ? 0u : 1u;
+
+        auto bind_all = [&](const aether::renderer::GpuAvatar* av) {
+            REQUIRE(vk_npr.bind_avatar(av).has_value());
+            REQUIRE(bridge.bind_avatar(av).has_value());
+            REQUIRE(bridge.configure(kW, kH, av->requirements.vertex_count, &rhi->gpu_info()).has_value());
+        };
+
+        auto render_frames = [&](const aether::renderer::GpuAvatar* av, uint64_t& fidx, uint32_t count) {
+            const auto cam = aether::renderer::fit_camera_to_avatar(*av);
+            std::vector<uint8_t> last_rgba;
+            for (uint32_t i = 0; i < count; ++i, ++fidx) {
+                // Mirror application.cpp:2257 per-frame configure check.
+                REQUIRE(bridge.configure(kW, kH, av->requirements.vertex_count, &rhi->gpu_info()).has_value());
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = av;
+                req.rig = &rig;
+                req.camera = cam;
+                req.lighting_mode = rig.lighting_mode;
+                req.rt_enabled = (rig.lighting_mode > 0u);
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.frame_index = fidx;
+                req.completed_frame_index = (fidx >= 2u) ? fidx - 2u : 0u;
+                req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
+                REQUIRE(bridge.render(req));
+                bridge.fill_request(req);
+                REQUIRE(vk_npr.render_headless_frame(req));
+                if (req.external_color_image != VK_NULL_HANDLE) {
+                    bridge.on_submitted(vk_npr.frame_timeline_value());
+                }
+                if (i + 1u == count) {
+                    auto rb = vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image,
+                                                                  VK_IMAGE_LAYOUT_GENERAL, kW, kH);
+                    REQUIRE(rb.has_value());
+                    last_rgba = std::move(rb.value());
+                }
+            }
+            return last_rgba;
+        };
+
+        uint64_t fidx = 1;
+        // 1) Initial smaller avatar at startup
+        bind_all(small_av.get());
+        const auto rgba_small_1 = render_frames(small_av.get(), fidx, 4u);
+        const auto mom_small_1 = analyze_rgba8(rgba_small_1, kW, kH);
+        std::printf("[DX12_SWAP:%s] initial small opaque=%llu shared=%d\n", tag,
+                    static_cast<unsigned long long>(mom_small_1.opaque_count), bridge.stats().shared_texture ? 1 : 0);
+        CHECK(mom_small_1.opaque_count > (kW * kH) / 25u);
+
+        // 2) Mid-way load of larger character (bind_avatar then configure, mirroring application.cpp)
+        bind_all(large_av.get());
+        CHECK(bridge.is_avatar_bound(large_av.get()));
+        const uint64_t retired_before_steady = gc.stats().retired_pending + gc.stats().retired_reclaimed_total;
+        const auto rgba_large = render_frames(large_av.get(), fidx, 5u);
+        const uint64_t retired_after_steady = gc.stats().retired_pending + gc.stats().retired_reclaimed_total;
+        const auto mom_large = analyze_rgba8(rgba_large, kW, kH);
+        std::printf("[DX12_SWAP:%s] swapped large opaque=%llu gc_churn=%llu\n", tag,
+                    static_cast<unsigned long long>(mom_large.opaque_count),
+                    static_cast<unsigned long long>(retired_after_steady - retired_before_steady));
+        CHECK(mom_large.opaque_count > (kW * kH) / 25u);
+        CHECK(retired_after_steady == retired_before_steady);
+
+        // 3) Mid-way swap back to smaller character
+        bind_all(small_av.get());
+        CHECK(bridge.is_avatar_bound(small_av.get()));
+        const auto rgba_small_2 = render_frames(small_av.get(), fidx, 4u);
+        const auto mom_small_2 = analyze_rgba8(rgba_small_2, kW, kH);
+        CHECK(mom_small_2.opaque_count > (kW * kH) / 25u);
+
+        // 4) Failed bind_avatar must not leave stale bound_avatar_ or emit blank frames
+        aether::renderer::GpuAvatar empty_av{};
+        CHECK_FALSE(bridge.bind_avatar(&empty_av).has_value());
+        CHECK_FALSE(bridge.is_avatar_bound(&empty_av));
+        {
+            aether::renderer::FrameRenderRequest bad_req{};
+            bad_req.avatar = &empty_av;
+            bad_req.rig = &rig;
+            CHECK_FALSE(bridge.render(bad_req));
+        }
+
+        bridge.release();
+        (void)gc.flush_all_epochs();
+        rhi->wait_idle();
+        vk_npr.destroy();
+        small_av->destroy();
+        large_av->destroy();
+        rhi->destroy();
+        CHECK(rhi->validation_error_count() == 0u);
+    };
+
+    run_swap_on_adapter(false, "default");
+    run_swap_on_adapter(true, "igpu");
+}
+
+namespace {
+
+double srgb_u8_to_linear(uint8_t u) noexcept {
+    const double c = static_cast<double>(u) / 255.0;
+    return (c <= 0.04045) ? (c / 12.92) : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
+struct OklabColor {
+    double L{0.0};
+    double a{0.0};
+    double b{0.0};
+};
+
+OklabColor rgb_u8_to_oklab(uint8_t r8, uint8_t g8, uint8_t b8) noexcept {
+    const double r = srgb_u8_to_linear(r8);
+    const double g = srgb_u8_to_linear(g8);
+    const double b = srgb_u8_to_linear(b8);
+    const double l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    const double m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    const double s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    const double l_ = std::cbrt(std::max(0.0, l));
+    const double m_ = std::cbrt(std::max(0.0, m));
+    const double s_ = std::cbrt(std::max(0.0, s));
+    return {
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    };
+}
+
+double oklab_delta_e(const OklabColor& x, const OklabColor& y) noexcept {
+    const double dL = x.L - y.L;
+    const double da = x.a - y.a;
+    const double db = x.b - y.b;
+    return std::sqrt(dL * dL + da * da + db * db);
+}
+
+std::filesystem::path find_downloads_vrm_by_prefix(const std::string& prefix) {
+    const std::string up = read_env_var("USERPROFILE");
+    std::filesystem::path dl = up.empty() ? std::filesystem::path(R"(C:\Users\LEGION\Downloads)")
+                                          : (std::filesystem::path(up) / "Downloads");
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dl, ec)) {
+        return {};
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dl, ec)) {
+        if (!entry.is_regular_file(ec)) {
+            continue;
+        }
+        const std::string fn = entry.path().filename().string();
+        if (fn.rfind(prefix, 0) == 0 && entry.path().extension() == ".vrm") {
+            return entry.path();
+        }
+    }
+    return {};
+}
+
+aether::renderer::PreviewCamera make_neck_closeup_camera(const aether::renderer::GpuAvatar& av) noexcept {
+    float head_y = av.desc.aabb_min[1] + (av.desc.aabb_max[1] - av.desc.aabb_min[1]) * 0.88f;
+    float neck_y = head_y - 0.07f;
+    if (av.desc.humanoid_to_joint[AETHER_BONE_HEAD] < av.joint_rest_world_pos.size()) {
+        head_y = av.joint_rest_world_pos[av.desc.humanoid_to_joint[AETHER_BONE_HEAD]][1];
+    }
+    if (av.desc.humanoid_to_joint[AETHER_BONE_NECK] < av.joint_rest_world_pos.size()) {
+        neck_y = av.joint_rest_world_pos[av.desc.humanoid_to_joint[AETHER_BONE_NECK]][1];
+    }
+    aether::renderer::PreviewCamera cam{};
+    cam.target_x = 0.0f;
+    cam.target_y = 0.5f * (head_y + neck_y) + 0.015f;
+    cam.target_z = 0.0f;
+    cam.yaw_rad = 0.0f;
+    cam.pitch_rad = 0.0f;
+    cam.fovy_rad = 0.2805f;
+    cam.distance = 1.15f;
+    return cam;
+}
+
+} // namespace
+
+TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Traditional / Hybrid RT / 2.5D PT)",
+          "[neck-seam-probe]") {
+    constexpr uint32_t kPW = 512u;
+    constexpr uint32_t kPH = 512u;
+
+    const std::array<std::pair<const char*, std::filesystem::path>, 2> models = {{
+        {"6493", find_downloads_vrm_by_prefix("649314313514")},
+        {"8590", find_user_vrm_path()},
+    }};
+
+    aether::rhi::RhiDeviceConfig vk_cfg{};
+    vk_cfg.headless = true;
+    vk_cfg.enable_validation = false;
+    auto vk_dev_res = aether::rhi::RhiDevice::create(vk_cfg);
+    REQUIRE(vk_dev_res.has_value());
+    std::unique_ptr<aether::rhi::RhiDevice> rhi(vk_dev_res.value());
+
+    aether::rhi::D3D12DeviceConfig dx_cfg{};
+    dx_cfg.enable_debug_layer = false;
+    dx_cfg.use_preferred_luid = rhi->gpu_info().luid_valid;
+    dx_cfg.preferred_luid = rhi->gpu_info().luid;
+    auto dx_res = aether::rhi::D3D12Device::create(dx_cfg);
+    REQUIRE(dx_res.has_value());
+    std::unique_ptr<aether::rhi::D3D12Device> d3d12(dx_res.value());
+
+    const auto snap_dir = snapshot_out_dir();
+    std::filesystem::create_directories(snap_dir);
+
+    for (const auto& [tag, vrm_path] : models) {
+        if (vrm_path.empty()) {
+            std::printf("[NECK_PROBE:%s] SKIPPED (VRM not found)\n", tag);
+            continue;
+        }
+        auto avatar = load_avatar_file(*rhi, vrm_path);
+        REQUIRE(avatar != nullptr);
+
+        std::printf("\n===========================================================================\n");
+        std::printf("[NECK_PROBE:%s] File: %s (verts=%u, mats=%zu, submeshes=%zu) face_ref=(%.3f,%.3f,%.3f,valid=%.0f)\n",
+                    tag, vrm_path.filename().string().c_str(), avatar->requirements.vertex_count,
+                    avatar->materials.size(), avatar->submeshes.size(), avatar->face_skin_ref_linear[0],
+                    avatar->face_skin_ref_linear[1], avatar->face_skin_ref_linear[2], avatar->face_skin_ref_linear[3]);
+
+        // Print exact C++ material classification table
+        std::vector<uint32_t> dummy_tex(avatar->textures.size(), 1u);
+        std::vector<aether::renderer::GpuMaterial> gmats;
+        std::vector<aether::renderer::GpuSubmeshDraw> gsubs;
+        std::vector<uint32_t> opq, cut, trn;
+        aether::renderer::detail::populate_materials_and_submeshes(*avatar, dummy_tex, 0u, UINT32_MAX, gmats, gsubs, opq,
+                                                                   cut, trn);
+        for (size_t mi = 0; mi < avatar->materials.size(); ++mi) {
+            const auto& m = avatar->materials[mi];
+            const auto& gm = gmats[mi];
+            const std::string mname = aether::renderer::read_material_cstr(*avatar, m.name_offset);
+            const uint32_t pf = gm.extra_slots[2];
+            const uint32_t rt_class = (pf >> 10u) & 3u;
+            uint32_t sm_f = 0u;
+            for (const auto& sm : avatar->submeshes) {
+                if (sm.material_index == mi) {
+                    sm_f |= sm.flags;
+                }
+            }
+            const bool is_face = (rt_class == 0u) || ((sm_f & AETHER_SUBMESH_FLAG_FACE) != 0u) || ((pf & 2u) != 0u);
+            const bool is_body_atlas = (pf & (1u << 13u)) != 0u;
+            if (is_face || is_body_atlas || mname.find("SKIN") != std::string::npos ||
+                mname.find("Face") != std::string::npos || mname.find("Body") != std::string::npos) {
+                std::printf("  Mat[%zu] '%s': rt_class=%u is_face=%d body_skin_atlas=%d mat_flags=0x%04X sm_flags=0x%02X | "
+                            "lit=(%.2f,%.2f,%.2f) shade=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f\n",
+                            mi, mname.c_str(), rt_class, is_face ? 1 : 0, is_body_atlas ? 1 : 0, pf, sm_f, gm.lit_color[0],
+                            gm.lit_color[1], gm.lit_color[2], gm.shade_color[0], gm.shade_color[1], gm.shade_color[2],
+                            gm.emission_and_shift[3], gm.toon_params[0]);
+            }
+        }
+
+        aether::renderer::NprRenderer vk_npr;
+        aether::renderer::RendererConfig rcfg{};
+        rcfg.width = kPW;
+        rcfg.height = kPH;
+        rcfg.output_width = kPW;
+        rcfg.output_height = kPH;
+        rcfg.enable_rt = rhi->rt_supported();
+        REQUIRE(vk_npr.init(*rhi, rcfg).has_value());
+        REQUIRE(vk_npr.bind_avatar(avatar.get()).has_value());
+
+        aether::renderer::Dx12FrameGraph dx_fg;
+        REQUIRE(dx_fg.init(*d3d12, kPW, kPH, avatar->requirements.vertex_count, false).has_value());
+        REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+        aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
+        aether::renderer::apply_lighting_fixture_preset(rig, aether::renderer::LightingFixturePreset::ArriSkyPanelS60C);
+        rig.lights[0].orbit_azimuth_deg = 32.0f;
+        rig.lights[0].orbit_elevation_deg = 26.0f;
+        const auto cam = make_neck_closeup_camera(*avatar);
+
+        // Compute world key light direction L_key (az=32 deg, el=26 deg)
+        const float az_rad = 32.0f * (3.14159265f / 180.0f);
+        const float el_rad = 26.0f * (3.14159265f / 180.0f);
+        const std::array<float, 3> l_key = {std::cos(el_rad) * std::sin(az_rad), std::sin(el_rad),
+                                            std::cos(el_rad) * std::cos(az_rad)};
+
+        auto render_vk_view = [&](uint8_t mode, aether::renderer::ShadingDebugView dv, uint32_t warmup = 4u) {
+            rig.lighting_mode = mode;
+            std::vector<uint8_t> out;
+            for (uint32_t s = 0; s < warmup; ++s) {
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = avatar.get();
+                req.rig = &rig;
+                req.camera = cam;
+                req.lighting_mode = mode;
+                req.rt_enabled = (mode > 0u) && rhi->rt_supported();
+                req.debug_view = dv;
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.frame_index = s + 1u;
+                req.completed_frame_index = (s >= 2u) ? (s - 1u) : 0u;
+                req.frame_slot = s % aether::rhi::RhiSwapchain::kFramesInFlight;
+                REQUIRE(vk_npr.render_headless_frame(req));
+            }
+            auto rb = vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image,
+                                                          VK_IMAGE_LAYOUT_GENERAL, kPW, kPH);
+            REQUIRE(rb.has_value());
+            return rb.value();
+        };
+
+        auto render_dx_view = [&](uint8_t mode, aether::renderer::ShadingDebugView dv, uint32_t warmup = 4u) {
+            rig.lighting_mode = mode;
+            for (uint32_t s = 0; s < warmup; ++s) {
+                aether::renderer::FrameRenderRequest req{};
+                req.avatar = avatar.get();
+                req.rig = &rig;
+                req.camera = cam;
+                req.lighting_mode = mode;
+                req.rt_enabled = (mode > 0u) && d3d12->dxr_supported();
+                req.debug_view = dv;
+                req.show_checkerboard = false;
+                req.show_orbit_orb = false;
+                req.frame_index = s + 1u;
+                req.frame_slot = s % aether::rhi::kD3D12FrameCount;
+                REQUIRE(dx_fg.render_frame(req, true).has_value());
+            }
+            std::vector<uint8_t> out(static_cast<size_t>(kPW) * kPH * 4u, 0u);
+            REQUIRE(dx_fg.readback_rgba8(out));
+            return out;
+        };
+
+        // Locate exact jaw-to-neck seam row along center x = kPW / 2 using TrueNormals + Albedo discontinuity
+        const auto albedo_dx = render_dx_view(2u, aether::renderer::ShadingDebugView::Albedo, 1u);
+        const auto norm_dx = render_dx_view(2u, aether::renderer::ShadingDebugView::TrueNormals, 1u);
+        const auto final_dx_pt = render_dx_view(2u, aether::renderer::ShadingDebugView::Final, 6u);
+        const auto final_vk_pt = render_vk_view(2u, aether::renderer::ShadingDebugView::Final, 6u);
+
+        CHECK(aether::test::save_rgba8_png(snap_dir / (std::string("probe_") + tag + "_dx12_pt.png"), kPW, kPH,
+                                           final_dx_pt.data()));
+        CHECK(aether::test::save_rgba8_png(snap_dir / (std::string("probe_") + tag + "_vk_pt.png"), kPW, kPH,
+                                           final_vk_pt.data()));
+        CHECK(aether::test::save_rgba8_png(snap_dir / (std::string("probe_") + tag + "_albedo.png"), kPW, kPH,
+                                           albedo_dx.data()));
+
+        const uint32_t cx = kPW / 2u;
+        // Scan vertical band around chin/neck (y in [235..315] on 512px portrait centered between head and neck)
+        // First find the first sharp downward-facing normal drop or albedo drop below the mouth (~y=220).
+        uint32_t y_seam = 0u;
+        double best_jump = 0.0;
+        for (uint32_t y = 240u; y <= 310u; ++y) {
+            const size_t i0 = (static_cast<size_t>(y) * kPW + cx) * 4u;
+            const size_t i1 = (static_cast<size_t>(y + 2u) * kPW + cx) * 4u;
+            // Check that y is bright face skin (R > 160) and y+2 is darker or normal jumps steeply downward
+            const double r0 = albedo_dx[i0];
+            const double g0 = albedo_dx[i0 + 1];
+            const double b0 = albedo_dx[i0 + 2];
+            const double r1 = albedo_dx[i1];
+            const double g1 = albedo_dx[i1 + 1];
+            const double b1 = albedo_dx[i1 + 2];
+            const double ny0 = srgb_u8_to_linear(norm_dx[i0 + 1]) * 2.0 - 1.0;
+            const double ny1 = srgb_u8_to_linear(norm_dx[i1 + 1]) * 2.0 - 1.0;
+            const double alb_drop = (r0 - r1) + (g0 - g1) + (b0 - b1);
+            const double n_jump = std::abs(ny0 - ny1) * 120.0;
+            const double score = (r0 > 150.0 && r1 > 110.0) ? (alb_drop + n_jump) : 0.0;
+            if (score > best_jump) {
+                best_jump = score;
+                y_seam = y;
+            }
+        }
+        std::printf("  Centerline scan (x=%u, y=250..305, step=3):\n", cx);
+        for (uint32_t y = 250u; y <= 305u; y += 3u) {
+            const size_t i = (static_cast<size_t>(y) * kPW + cx) * 4u;
+            const double ny = srgb_u8_to_linear(norm_dx[i + 1]) * 2.0 - 1.0;
+            const double nz = srgb_u8_to_linear(norm_dx[i + 2]) * 2.0 - 1.0;
+            std::printf("    y=%3u: alb=(%3u,%3u,%3u) n_yz=(%+.2f,%+.2f) final_pt=(%3u,%3u,%3u)\n", y, albedo_dx[i],
+                        albedo_dx[i + 1], albedo_dx[i + 2], ny, nz, final_dx_pt[i], final_dx_pt[i + 1],
+                        final_dx_pt[i + 2]);
+        }
+        REQUIRE(y_seam > 20u);
+        const uint32_t y_chin = y_seam - 10u; // Lower cheek / chin skin cleanly above outline/seam
+        const uint32_t y_neck = y_seam + 8u;  // Upper neck skin cleanly below outline/seam (above choker on 6493)
+        std::printf("  Seam located at x=%u: y_seam=%u (jump=%.1f) -> Probe Chin=(%u,%u), UpperNeck=(%u,%u)\n", cx,
+                    y_seam, best_jump, cx, y_chin, cx, y_neck);
+
+        auto probe_backend = [&](const char* bname, auto&& render_fn) {
+            for (uint8_t mode = 0u; mode <= 2u; ++mode) {
+                const char* mname = (mode == 0u) ? "Traditional" : ((mode == 1u) ? "HybridRT" : "2.5D_PT");
+                const auto img_final = render_fn(mode, aether::renderer::ShadingDebugView::Final, 6u);
+                const auto img_alb = render_fn(mode, aether::renderer::ShadingDebugView::Albedo, 1u);
+                const auto img_nrm = render_fn(mode, aether::renderer::ShadingDebugView::TrueNormals, 1u);
+                const auto img_msk = render_fn(mode, aether::renderer::ShadingDebugView::SdfFace, 1u);
+                const auto img_shd = render_fn(mode, aether::renderer::ShadingDebugView::RtShadowDenoised, 1u);
+                const auto img_gi = render_fn(mode, aether::renderer::ShadingDebugView::Bounce, 1u);
+
+                auto read_px = [&](const std::vector<uint8_t>& buf, uint32_t x, uint32_t y) {
+                    const size_t i = (static_cast<size_t>(y) * kPW + x) * 4u;
+                    return std::array<uint8_t, 4>{buf[i + 0u], buf[i + 1u], buf[i + 2u], buf[i + 3u]};
+                };
+                auto decode_n = [&](std::array<uint8_t, 4> p) {
+                    const float nx = static_cast<float>(srgb_u8_to_linear(p[0])) * 2.0f - 1.0f;
+                    const float ny = static_cast<float>(srgb_u8_to_linear(p[1])) * 2.0f - 1.0f;
+                    const float nz = static_cast<float>(srgb_u8_to_linear(p[2])) * 2.0f - 1.0f;
+                    const float l = std::sqrt(nx * nx + ny * ny + nz * nz);
+                    return std::array<float, 3>{l > 1e-4f ? nx / l : 0.0f, l > 1e-4f ? ny / l : 0.0f,
+                                                l > 1e-4f ? nz / l : 1.0f};
+                };
+
+                const auto cf = read_px(img_final, cx, y_chin);
+                const auto nf = read_px(img_final, cx, y_neck);
+                const auto ca = read_px(img_alb, cx, y_chin);
+                const auto na = read_px(img_alb, cx, y_neck);
+                const auto cn = decode_n(read_px(img_nrm, cx, y_chin));
+                const auto nn = decode_n(read_px(img_nrm, cx, y_neck));
+                const float c_ndl = cn[0] * l_key[0] + cn[1] * l_key[1] + cn[2] * l_key[2];
+                const float n_ndl = nn[0] * l_key[0] + nn[1] * l_key[1] + nn[2] * l_key[2];
+                const double c_sh = srgb_u8_to_linear(read_px(img_shd, cx, y_chin)[0]);
+                const double n_sh = srgb_u8_to_linear(read_px(img_shd, cx, y_neck)[0]);
+                const auto cgi = read_px(img_gi, cx, y_chin);
+                const auto ngi = read_px(img_gi, cx, y_neck);
+                const double cm = srgb_u8_to_linear(read_px(img_msk, cx, y_chin)[0]);
+                const double nm = srgb_u8_to_linear(read_px(img_msk, cx, y_neck)[0]);
+
+                const OklabColor ok_c = rgb_u8_to_oklab(cf[0], cf[1], cf[2]);
+                const OklabColor ok_n = rgb_u8_to_oklab(nf[0], nf[1], nf[2]);
+                const double dL_pct = std::abs(ok_c.L - ok_n.L) * 100.0;
+                const double dE_pct = oklab_delta_e(ok_c, ok_n) * 100.0;
+
+                std::printf("  [%s | %-11s] dL*=%.2f%% dE=%.2f%%\n", bname, mname, dL_pct, dE_pct);
+                std::printf("    CHIN: mask=%.2f alb=(%3u,%3u,%3u) N=(%+.2f,%+.2f,%+.2f) N.L=%+.3f RTsh=%.3f "
+                            "GI=(%.3f,%.3f,%.3f) Final=(%3u,%3u,%3u) L*=%.4f\n",
+                            cm, ca[0], ca[1], ca[2], cn[0], cn[1], cn[2], c_ndl, c_sh, srgb_u8_to_linear(cgi[0]),
+                            srgb_u8_to_linear(cgi[1]), srgb_u8_to_linear(cgi[2]), cf[0], cf[1], cf[2], ok_c.L);
+                std::printf("    NECK: mask=%.2f alb=(%3u,%3u,%3u) N=(%+.2f,%+.2f,%+.2f) N.L=%+.3f RTsh=%.3f "
+                            "GI=(%.3f,%.3f,%.3f) Final=(%3u,%3u,%3u) L*=%.4f\n",
+                            nm, na[0], na[1], na[2], nn[0], nn[1], nn[2], n_ndl, n_sh, srgb_u8_to_linear(ngi[0]),
+                            srgb_u8_to_linear(ngi[1]), srgb_u8_to_linear(ngi[2]), nf[0], nf[1], nf[2], ok_n.L);
+
+                // Step 3 automated assertions: visually seamless chin-to-neck transition (< 3.0% L* and Delta-E)
+                CHECK(dL_pct < 3.0);
+                CHECK(dE_pct < 3.0);
+                CHECK(n_sh >= 0.90);
+            }
+        };
+
+        probe_backend("DX12  ", render_dx_view);
+        probe_backend("Vulkan", render_vk_view);
+
+        // Verify choker / dark accessory preservation on shared Body_00_SKIN atlas (6493 black leather choker)
+        if (std::string(tag) == "6493") {
+            const size_t ci = (static_cast<size_t>(y_seam + 24u) * kPW + cx) * 4u;
+            CHECK(final_dx_pt[ci + 0u] < 75u);
+            CHECK(final_vk_pt[ci + 0u] < 75u);
+        }
+
+        // Verify Inspector Neck Seam Blend slider = 0.0 restores raw VRM neck shadow cleanly
+        rig.neck_seam_blend = 0.0f;
+        const auto off_dx_pt = render_dx_view(2u, aether::renderer::ShadingDebugView::Final, 4u);
+        const size_t ic = (static_cast<size_t>(y_chin) * kPW + cx) * 4u;
+        const size_t in = (static_cast<size_t>(y_neck) * kPW + cx) * 4u;
+        const double off_dL_pct =
+            std::abs(rgb_u8_to_oklab(off_dx_pt[ic], off_dx_pt[ic + 1u], off_dx_pt[ic + 2u]).L -
+                     rgb_u8_to_oklab(off_dx_pt[in], off_dx_pt[in + 1u], off_dx_pt[in + 2u]).L) *
+            100.0;
+        std::printf("  [Slider=0.0 check] DX12 2.5D_PT raw VRM dL*=%.2f%%\n", off_dL_pct);
+        CHECK(off_dL_pct > 10.0);
+        rig.neck_seam_blend = 1.0f;
+
+        dx_fg.destroy();
+        vk_npr.destroy();
+        avatar->destroy();
+    }
+
+    d3d12->destroy();
+    rhi->destroy();
 }

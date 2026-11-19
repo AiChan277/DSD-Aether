@@ -332,6 +332,7 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 if (begin_property_table("##shading_detail")) {
                     static constexpr ParamId kLive2dExtraRows[] = {
                         ParamId::RenderFaceNormalFlatten,
+                        ParamId::RenderNeckSeamBlend,
                         ParamId::RenderCelBandSharpness,
                         ParamId::RenderShadowWarmCool,
                         ParamId::RenderIndirectBleedStrength,

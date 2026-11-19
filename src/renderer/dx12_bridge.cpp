@@ -229,7 +229,13 @@ Expected<void> Dx12Bridge::configure(uint32_t width, uint32_t height, uint32_t m
     const bool same_device_cfg =
         (d3d12_ != nullptr && d3d12_->is_valid()) && same_luid && (target_prefer_igpu_ == want_igpu);
 
-    if (ready() && same_device_cfg && width == width_ && height == height_ && max_vertices <= max_vertices_) {
+    if (ready() && same_device_cfg && width == width_ && height == height_) {
+        if (max_vertices > max_vertices_) {
+            if (auto rc = fg_.ensure_upload_capacity(max_vertices); !rc) {
+                return rc;
+            }
+            max_vertices_ = max_vertices;
+        }
         return {};
     }
 
@@ -273,12 +279,27 @@ Expected<void> Dx12Bridge::configure(uint32_t width, uint32_t height, uint32_t m
         max_vertices_ = max_vertices;
         if (bound_avatar_ != nullptr) {
             if (auto brc = fg_.bind_avatar(bound_avatar_); !brc) {
+                bound_avatar_ = nullptr;
                 return brc;
             }
         }
-    } else if (width != width_ || height != height_) {
-        if (auto rc = fg_.resize(width, height); !rc) {
-            return rc;
+    } else {
+        if (width != width_ || height != height_) {
+            if (auto rc = fg_.resize(width, height); !rc) {
+                return rc;
+            }
+        }
+        if (max_vertices > max_vertices_) {
+            if (auto rc = fg_.ensure_upload_capacity(max_vertices); !rc) {
+                return rc;
+            }
+            max_vertices_ = max_vertices;
+        }
+        if (bound_avatar_ != nullptr && fg_.bound_avatar() != bound_avatar_) {
+            if (auto brc = fg_.bind_avatar(bound_avatar_); !brc) {
+                bound_avatar_ = nullptr;
+                return brc;
+            }
         }
     }
 
@@ -295,11 +316,19 @@ Expected<void> Dx12Bridge::configure(uint32_t width, uint32_t height, uint32_t m
 }
 
 Expected<void> Dx12Bridge::bind_avatar(const GpuAvatar* avatar) {
-    bound_avatar_ = avatar;
     if (!fg_.pipelines_ready()) {
+        bound_avatar_ = avatar;
         return {};
     }
-    return fg_.bind_avatar(avatar);
+    if (auto rc = fg_.bind_avatar(avatar); !rc) {
+        bound_avatar_ = nullptr;
+        return rc;
+    }
+    bound_avatar_ = avatar;
+    if (avatar != nullptr) {
+        max_vertices_ = std::max(max_vertices_, std::max(avatar->requirements.vertex_count, 4U));
+    }
+    return {};
 }
 
 Expected<void> Dx12Bridge::apply_face_sdf(const SdfBakeOutput& baked) {
@@ -314,7 +343,7 @@ bool Dx12Bridge::render(const FrameRenderRequest& req, std::span<uint8_t> option
     if (!ready()) {
         return false;
     }
-    if (req.avatar != bound_avatar_) {
+    if (req.avatar == nullptr || req.avatar != bound_avatar_ || fg_.bound_avatar() != req.avatar) {
         return false;
     }
     const uint64_t t0 = now_us();

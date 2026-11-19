@@ -52,6 +52,7 @@ struct LightingRig {
     // Spec §10 & 2D Hand-Drawn Live2D Illustration look parameters
     float global_live2d_flatness{0.75f};
     float face_normal_flatten{0.85f};
+    float neck_seam_blend{1.00f};
     float cel_band_sharpness{0.025f};
     float shadow_warm_cool_shift{0.75f};
     float iro_tsuke_strength{0.85f};

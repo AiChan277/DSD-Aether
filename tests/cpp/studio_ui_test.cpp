@@ -83,7 +83,7 @@ struct ScopedUiRig {
 TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 96U); // 90 + photometric/catchlight (4) + [TESTING] crease disguise (2)
+    REQUIRE(kParamCount == 97U); // 90 + photometric/catchlight (4) + [TESTING] crease disguise (2) + neck seam blend (1)
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);

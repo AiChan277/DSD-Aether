@@ -165,7 +165,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float4 misc = aether_load(gb_misc_slot, ip);
     uint packed_mat = aether_uload(gb_mat_slot, ip).x;
     uint rt_class = (packed_mat >> 10u) & 3u;
-    bool is_face_px = (rt_class == 0u) || (misc.y > 0.5);
+    bool is_face_px = (rt_class == 0u) || ((packed_mat & 0x1000u) != 0u) || (misc.y > 0.5);
+    bool is_body_skin_px = ((packed_mat & 0x2000u) != 0u) && !is_face_px;
 
     // Reconstruct un-flattened world position & Dual-Normal vectors (N_proxy + N_geom)
     float true_view_z = -fg.camera_pos_world.w;
@@ -179,10 +180,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
     float3 view_geom_n = oct_decode(misc.zw);
     float3 world_geom_n = normalize_safe(mul_col3(fg.inv_view, view_geom_n), world_n);
+    float neck_w = is_body_skin_px ? compute_neck_seam_blend(world_pos, fg) : 0.0;
+    float3 eff_geom_n = normalize_safe(lerp(world_geom_n, world_n, neck_w), world_n);
 
-    // Dual-Normal Ray Launching: offset RayOrigin along true N_geom
+    // Dual-Normal Ray Launching: offset RayOrigin along true N_geom (blended smoothly toward neck proxy on upper neck)
     float curvature_bias = 0.0020 + 0.0014 * abs(true_view_z) + 0.006 * curvature;
-    float3 ray_origin = world_pos + world_geom_n * max(0.0015, curvature_bias);
+    float3 ray_origin = world_pos + eff_geom_n * max(0.0015, curvature_bias);
 
     uint frame_idx = fg.state_u32.x;
     uint lighting_mode = (fg.state_u32.w >> 10u) & 3u;
@@ -191,7 +194,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float j1 = ign_blue_noise(tid.xy ^ uint2(31u, 17u), frame_idx + 17u);
 
     // FaceSkin (0x01) excludes self-intersection from facial polygons; traces Hair (0x02) | HandsProps (0x04) | BodyCloth (0x08).
-    uint shadow_mask = is_face_px ? 0xFEu : 0xFFu;
+    // Upper neck skin masks out overhanging chin/jaw (0x01) and close back-hair overhang (0x02) to eliminate dark jaw-seam bands.
+    uint shadow_mask = is_face_px ? 0xFEu : ((neck_w > 0.25) ? 0xFCu : ((neck_w > 0.05) ? 0xFEu : 0xFFu));
 
     // 1) Alpha-tested soft cone directional RT shadows
     float shadow_vis = 1.0;
@@ -213,11 +217,11 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             continue;
         }
         float3 ldir = compute_world_light_dir(l, world_pos);
-        float ndl_geom = dot(world_geom_n, ldir);
+        float ndl_geom = dot(eff_geom_n, ldir);
         float lw = max(luminance(l.color_intensity.rgb), 0.1);
 
-        // Smooth terminator factor on non-face surfaces: facing-away triangles enter shadow (0.0), NEVER force 1.0!
-        float geom_face = is_face_px ? 1.0 : smoothstep(-0.20, 0.06, ndl_geom);
+        // Smooth terminator factor on non-face surfaces; relaxed proportionally across upper-neck transition zone.
+        float geom_face = is_face_px ? 1.0 : lerp(smoothstep(-0.20, 0.06, ndl_geom), 1.0, neck_w);
         if (geom_face <= 0.001) {
             weight_sum += lw;
             continue;
@@ -226,7 +230,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         // Respect true fixture angular radius (0.53 deg sun, 0.8 deg Dedolight, soft SkyPanel/Window)
         float cone_r = max(l.direction_radius.w, 0.0045);
         float tmin_bias = is_face_px ? 0.004 : (0.006 + 0.012 * (1.0 - saturate(ndl_geom)) + 0.010 * curvature);
-        float3 light_origin = ray_origin + world_geom_n * (0.0015 + 0.003 * curvature);
+        float3 light_origin = ray_origin + eff_geom_n * (0.0015 + 0.003 * curvature);
 
         uint s_count = (cone_r >= 0.05) ? 4u : 2u;
         float s_accum = 0.0;
@@ -257,6 +261,11 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         }
 
         float vis = (s_accum / float(s_count)) * geom_face;
+        if (neck_w > 0.001) {
+            // Attenuate residual millimeter-close chin/neck self-occlusion on front-lit upper neck
+            float front_lit = smoothstep(-0.10, 0.25, dot(world_n, ldir));
+            vis = lerp(vis, max(vis, front_lit), neck_w);
+        }
         vis_accum += lw * vis;
         weight_sum += lw;
     }
@@ -308,17 +317,18 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         float3 bounce_rgb = float3(0.0, 0.0, 0.0);
 
         uint sample_n = is_path_trace ? 2u : 1u;
+        uint bounce_mask = (is_face_px || neck_w > 0.05) ? 0xFEu : 0xFFu;
         for (uint si = 0u; si < sample_n; ++si) {
             float u1 = frac(j0 + 0.381966 * float(si));
             float u2 = frac(j1 + 0.618034 * float(si));
-            float3 bdir = fold_ray_above_geom_horizon(sample_cosine_hemisphere(world_n, u1, u2), world_geom_n, 0.05);
+            float3 bdir = fold_ray_above_geom_horizon(sample_cosine_hemisphere(world_n, u1, u2), eff_geom_n, 0.05);
             RayDesc rb = {};
             rb.Origin = ray_origin;
             rb.Direction = bdir;
             rb.TMin = 0.005 + 0.008 * curvature;
             rb.TMax = max(fg.light_params.z, is_path_trace ? 0.45 : 0.28);
             RayQuery<RAY_FLAG_NONE> qb;
-            qb.TraceRayInline(g_Tlas, RAY_FLAG_NONE, 0xFFu, rb);
+            qb.TraceRayInline(g_Tlas, RAY_FLAG_NONE, bounce_mask, rb);
             while (qb.Proceed()) {
                 if (qb.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
                     if (passes_rt_alpha_test(qb.CandidateInstanceID() + qb.CandidatePrimitiveIndex(),

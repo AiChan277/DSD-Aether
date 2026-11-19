@@ -44,7 +44,8 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
     uint mat_id = g_Pc.param0 & 0x3FFu;
     uint rt_class = (mat_flags >> 10u) & 3u;
     bool is_hair = ((g_Pc.param1 & 6u) != 0u) || ((mat_flags & 4u) != 0u) || (rt_class == 1u);
-    bool is_face_mat = ((mat_flags & 2u) != 0u) || ((g_Pc.param1 & 1u) != 0u) || (v.prev_pos_sdf.w > 0.5);
+    bool is_face_mat = ((mat_flags & 2u) != 0u) || ((g_Pc.param1 & 1u) != 0u) || (v.prev_pos_sdf.w > 0.5) || (rt_class == 0u);
+    bool is_body_skin_atlas = ((mat_flags & (1u << 13u)) != 0u) && !is_face_mat;
 
     float3 true_n_ws = normalize_safe(v.true_norm_hair.xyz, float3(0.0, 0.0, 1.0));
     float3 proxy_n_ws = normalize_safe(v.proxy_norm_out.xyz, true_n_ws);
@@ -52,6 +53,13 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
     float3 shade_n_ws = is_face_mat
                             ? proxy_n_ws
                             : normalize_safe(lerp(true_n_ws, proxy_n_ws, crease_eff), true_n_ws);
+    if (is_body_skin_atlas) {
+        float neck_w = compute_neck_seam_blend(v.pos_zflat.xyz, fg);
+        if (neck_w > 0.001) {
+            float3 neck_proxy = compute_neck_proxy_normal(true_n_ws, fg);
+            shade_n_ws = normalize_safe(lerp(shade_n_ws, neck_proxy, neck_w), shade_n_ws);
+        }
+    }
 
     o.view_normal = normalize_safe(mul_col3(fg.view, shade_n_ws), float3(0.0, 0.0, 1.0));
     o.world_pos = v.pos_zflat.xyz;
@@ -60,7 +68,8 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
 
     uint crease_q8 = is_face_mat ? 0u : (uint(round(saturate(v.tangent_crease.w) * 255.0)) & 0xFFu);
     o.material_id = g_Pc.param0;
-    o.packed_mat = mat_id | (rt_class << 10u) | (is_hair ? 0x8000u : 0u) | (crease_q8 << 16u);
+    o.packed_mat = mat_id | (rt_class << 10u) | (is_face_mat ? 0x1000u : 0u) | (is_body_skin_atlas ? 0x2000u : 0u) |
+                   (is_hair ? 0x8000u : 0u) | (crease_q8 << 16u);
 
     float k_eff = saturate(z_flat_weight * fg.head_pivot_view_and_flatness.w);
     float sdf_mask = max(v.prev_pos_sdf.w, ((mat_flags & 2u) != 0u) ? 1.0 : 0.0);

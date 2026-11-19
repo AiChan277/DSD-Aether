@@ -48,9 +48,14 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
     }
 
     uint gb_n_slot = fg.gbuffer_ids[0].x;
+    uint gb_mat_slot = fg.gbuffer_ids[0].z;
     uint gb_misc_slot = fg.gbuffer_ids[0].w;
     float3 view_n = oct_decode(aether_load(gb_n_slot, p).xy);
+    uint packed_mat = aether_uload(gb_mat_slot, p).x;
     float4 misc = aether_load(gb_misc_slot, p);
+    uint rt_class = (packed_mat >> 10u) & 3u;
+    bool is_face_px = (rt_class == 0u) || ((packed_mat & 0x1000u) != 0u) || (misc.y > 0.5);
+    bool is_body_skin_px = ((packed_mat & 0x2000u) != 0u) && !is_face_px;
 
     float true_view_z = -fg.camera_pos_world.w;
     if (hw_depth + fg.proj.col2.z < 0.0) {
@@ -61,9 +66,10 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
         fg.proj, uv, true_view_z, fg.head_pivot_view_and_flatness.z, misc.x);
     float3 world_pos = mul_col(fg.inv_view, float4(view_pos, 1.0)).xyz;
     float3 world_n = normalize_safe(mul_col3(fg.inv_view, view_n), float3(0.0, 0.0, 1.0));
+    float neck_w = is_body_skin_px ? compute_neck_seam_blend(world_pos, fg) : 0.0;
 
     float vis = 1.0;
-    if (csm_slot != 0xFFFFu && misc.y < 0.5) {
+    if (csm_slot != 0xFFFFu && !is_face_px && neck_w < 0.99) {
         float4 sc = mul_col(fg.shadow_view_proj[0], float4(world_pos + world_n * 0.006, 1.0));
         float2 sc_ndc = sc.xy / max(abs(sc.w), 1e-5);
 #ifdef __TARGET_SPIRV__
@@ -82,7 +88,7 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
                     occ += (sz - 0.003 > d) ? 0.0 : 1.0;
                 }
             }
-            vis = occ * 0.25;
+            vis = lerp(occ * 0.25, 1.0, neck_w);
         }
     }
 

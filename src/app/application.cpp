@@ -1295,6 +1295,7 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.bloom_intensity = npr_renderer.lighting().bloom_intensity;
         vp_actions.outline_scale = npr_renderer.lighting().outline_width_scale;
         vp_actions.face_normal_flatten = npr_renderer.lighting().face_normal_flatten;
+        vp_actions.neck_seam_blend = npr_renderer.lighting().neck_seam_blend;
         vp_actions.cel_band_sharpness = npr_renderer.lighting().cel_band_sharpness;
         vp_actions.shadow_warm_cool_shift = npr_renderer.lighting().shadow_warm_cool_shift;
         vp_actions.iro_tsuke_strength = npr_renderer.lighting().iro_tsuke_strength;
@@ -1872,21 +1873,58 @@ int run_application(const AppLaunchOptions& opts) {
                     retire_avatar(std::move(current_avatar));
                     current_avatar = std::move(up_res.value());
                     last_loaded_avatar_path = current_avatar->source_path;
+                    bool vk_bound = true;
                     if (auto b_rc = npr_renderer.bind_avatar(current_avatar.get()); !b_rc) {
+                        vk_bound = false;
                         AETHER_LOG_ERROR("renderer", "NprRenderer bind_avatar failed: %s", b_rc.error().c_str());
                     }
-                    dx11_bridge.bind_avatar(current_avatar.get());
-                    (void)configure_dx11_for_avatar();
-                    (void)dx12_bridge.bind_avatar(current_avatar.get());
-                    (void)configure_dx12_for_avatar();
+                    bool active_bound = vk_bound;
+                    if (active_backend == renderer::RenderBackend::DirectX11) {
+                        dx11_bridge.bind_avatar(current_avatar.get());
+                        if (!configure_dx11_for_avatar()) {
+                            active_backend = renderer::RenderBackend::Vulkan;
+                            dx11_bridge.release();
+                            shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 11 Unavailable",
+                                                         "Falling back to the Vulkan renderer", frame_now_s);
+                        } else {
+                            active_bound = true;
+                        }
+                    } else if (active_backend == renderer::RenderBackend::DirectX12) {
+                        bool dx12_ok = true;
+                        if (auto d_rc = dx12_bridge.bind_avatar(current_avatar.get()); !d_rc) {
+                            AETHER_LOG_ERROR("renderer", "Dx12Bridge bind_avatar failed: %s", d_rc.error().c_str());
+                            dx12_ok = false;
+                        } else if (!configure_dx12_for_avatar()) {
+                            dx12_ok = false;
+                        } else if (!dx12_bridge.is_avatar_bound(current_avatar.get())) {
+                            if (auto d_rc2 = dx12_bridge.bind_avatar(current_avatar.get()); !d_rc2) {
+                                AETHER_LOG_ERROR("renderer", "Dx12Bridge deferred bind_avatar failed: %s",
+                                                 d_rc2.error().c_str());
+                                dx12_ok = false;
+                            }
+                        }
+                        if (!dx12_ok) {
+                            active_backend = renderer::RenderBackend::Vulkan;
+                            dx12_bridge.release();
+                            shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 12 Unavailable",
+                                                         "Falling back to the Vulkan renderer", frame_now_s);
+                        } else {
+                            active_bound = true;
+                        }
+                    }
                     baked_face_sdf_applied = false;
                     avatar_bone_heights = extract_avatar_bone_heights(*current_avatar);
                     camera = renderer::fit_camera_to_avatar(*current_avatar);
                     cam_transition_.cancel();
                     pipeline->push_rest_skeleton(build_rest_metrics_from_avatar(*current_avatar));
                     push_avatar_scene_items_to_ui(*current_avatar, shell.workspace());
-                    shell.workspace().push_toast(ui::ToastSeverity::Success, "Avatar Loaded",
-                                                 current_avatar->source_path.c_str(), frame_now_s);
+                    if (active_bound) {
+                        shell.workspace().push_toast(ui::ToastSeverity::Success, "Avatar Loaded",
+                                                     current_avatar->source_path.c_str(), frame_now_s);
+                    } else {
+                        shell.workspace().push_toast(ui::ToastSeverity::Error, "Avatar Bind Failed",
+                                                     current_avatar->source_path.c_str(), frame_now_s);
+                    }
                 }
             }
 
@@ -1987,6 +2025,7 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.bloom_intensity = vp_actions.bloom_intensity;
                 rig.outline_width_scale = vp_actions.outline_scale;
                 rig.face_normal_flatten = vp_actions.face_normal_flatten;
+                rig.neck_seam_blend = vp_actions.neck_seam_blend;
                 rig.cel_band_sharpness = vp_actions.cel_band_sharpness;
                 rig.iro_tsuke_strength = vp_actions.iro_tsuke_strength;
                 rig.crease_strength = vp_actions.crease_strength;
@@ -2253,14 +2292,18 @@ int run_application(const AppLaunchOptions& opts) {
                                                  "Falling back to the Vulkan renderer", frame_now_s);
                 }
             } else if (active_backend == renderer::RenderBackend::DirectX12 && current_avatar != nullptr) {
-                const bool was_ready = dx12_bridge.ready();
-                if (!configure_dx12_for_avatar()) {
+                bool dx12_ok = configure_dx12_for_avatar();
+                if (dx12_ok && !dx12_bridge.is_avatar_bound(current_avatar.get())) {
+                    if (auto b_rc = dx12_bridge.bind_avatar(current_avatar.get()); !b_rc) {
+                        AETHER_LOG_ERROR("renderer", "Dx12Bridge bind_avatar failed: %s", b_rc.error().c_str());
+                        dx12_ok = false;
+                    }
+                }
+                if (!dx12_ok) {
                     active_backend = renderer::RenderBackend::Vulkan;
                     dx12_bridge.release();
                     shell.workspace().push_toast(ui::ToastSeverity::Warning, "DirectX 12 Unavailable",
                                                  "Falling back to the Vulkan renderer", frame_now_s);
-                } else if (!was_ready) {
-                    (void)dx12_bridge.bind_avatar(current_avatar.get());
                 }
             }
             (void)gc.collect_epoch(completed_frame_timeline(*rhi), 16U);

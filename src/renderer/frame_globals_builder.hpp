@@ -372,6 +372,49 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     resolve_eye_world(AETHER_BONE_LEFT_EYE, 1.0f, fg.eye_left_center_r);
     resolve_eye_world(AETHER_BONE_RIGHT_EYE, -1.0f, fg.eye_right_center_r);
 
+    // Animated world-space Neck->Head spine axis + Face skin reference RGB for seamless jaw-to-neck shading
+    auto resolve_bone_world = [&](uint32_t hbone, Mat4Vec3 fallback) -> Mat4Vec3 {
+        if (has_avatar && hbone < 55u) {
+            const uint16_t ji = req.avatar->desc.humanoid_to_joint[hbone];
+            if (ji != 0xFFFFu && ji < req.avatar->joint_anim_world_pos.size()) {
+                const auto& bp = req.avatar->joint_anim_world_pos[ji];
+                return {
+                    (av_cos * bp[0] + av_sin * bp[2]) * av_scale + req.avatar_pos[0],
+                    bp[1] * av_scale + req.avatar_pos[1],
+                    (-av_sin * bp[0] + av_cos * bp[2]) * av_scale + req.avatar_pos[2],
+                };
+            }
+        }
+        return fallback;
+    };
+    const Mat4Vec3 head_ws = resolve_bone_world(AETHER_BONE_HEAD, pivot_ws);
+    Mat4Vec3 neck_ws =
+        resolve_bone_world(AETHER_BONE_NECK, {head_ws.x, head_ws.y - 0.070f * av_scale, head_ws.z});
+    const float dx_nh = head_ws.x - neck_ws.x;
+    const float dy_nh = head_ws.y - neck_ws.y;
+    const float dz_nh = head_ws.z - neck_ws.z;
+    if ((dx_nh * dx_nh + dy_nh * dy_nh + dz_nh * dz_nh) < (0.035f * av_scale) * (0.035f * av_scale)) {
+        neck_ws = {head_ws.x, head_ws.y - 0.070f * av_scale, head_ws.z};
+    }
+    fg.neck_seam_origin_r[0] = neck_ws.x;
+    fg.neck_seam_origin_r[1] = neck_ws.y;
+    fg.neck_seam_origin_r[2] = neck_ws.z;
+    fg.neck_seam_origin_r[3] = 0.095f * av_scale;
+    fg.neck_seam_head_str[0] = head_ws.x;
+    fg.neck_seam_head_str[1] = head_ws.y;
+    fg.neck_seam_head_str[2] = head_ws.z;
+    fg.neck_seam_head_str[3] = std::clamp(rig.neck_seam_blend, 0.0f, 1.0f);
+    if (has_avatar) {
+        for (int c = 0; c < 4; ++c) {
+            fg.face_skin_ref_rgb[c] = req.avatar->face_skin_ref_linear[static_cast<size_t>(c)];
+        }
+    } else {
+        fg.face_skin_ref_rgb[0] = 0.0f;
+        fg.face_skin_ref_rgb[1] = 0.0f;
+        fg.face_skin_ref_rgb[2] = 0.0f;
+        fg.face_skin_ref_rgb[3] = 0.0f;
+    }
+
     const uint8_t req_mode =
         (req.lighting_mode <= 2u) ? req.lighting_mode : static_cast<uint8_t>(req.rt_enabled ? 1 : 0);
     const uint8_t eff_mode = (req_mode == 0u || !req.rt_enabled || !rt_hardware_ready) ? uint8_t{0} : req_mode;
@@ -488,7 +531,7 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             if (is_genuine_eye_iris_name(mat_name, mat_sm_names[i])) {
                 packed_flags |= kMatExtraEyeIrisBit;
             }
-            if (is_body_skin_atlas_name(mat_name, mat_sm_names[i])) {
+            if (rtb != RtMaskBucket::FaceSkin && is_body_skin_atlas_name(mat_name, mat_sm_names[i])) {
                 packed_flags |= kMatExtraBodySkinAtlasBit;
             }
             if ((m.flags & AETHER_MAT_FLAG_SDF_FACE) != 0u) {
@@ -508,6 +551,51 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             gm.extra_slots[0] = UINT32_MAX;
             gm.extra_slots[1] = UINT32_MAX;
             gm.extra_slots[2] = (static_cast<uint32_t>(RtMaskBucket::BodyCloth) << kMatExtraRtClassShift);
+        }
+    }
+
+    // Harmonize Body/Neck skin MToon _ShadeColor & _ShadeShift toward the avatar's Face skin calibration
+    // when a VRM ships darker Body _ShadeColor or harsher Body _ShadeShift than Face skin.
+    bool found_face_skin = false;
+    float face_shade_rgb[3]{1.0f, 1.0f, 1.0f};
+    float face_shade_luma = 1.0f;
+    float face_shade_shift = -0.05f;
+    for (size_t i = 0; i < avatar.materials.size() && i < out_materials.size(); ++i) {
+        const auto& gm = out_materials[i];
+        const uint32_t rtb = (gm.extra_slots[2] & kMatExtraRtClassMask) >> kMatExtraRtClassShift;
+        if (rtb != static_cast<uint32_t>(RtMaskBucket::FaceSkin)) {
+            continue;
+        }
+        const std::string m_low = to_lower_ascii(read_material_cstr(avatar, avatar.materials[i].name_offset));
+        if (contains_any(m_low, {"eye", "mouth", "brow", "lash", "highlight", "sclera", "tooth", "tongue"})) {
+            continue;
+        }
+        face_shade_rgb[0] = gm.shade_color[0];
+        face_shade_rgb[1] = gm.shade_color[1];
+        face_shade_rgb[2] = gm.shade_color[2];
+        face_shade_luma = 0.2126f * face_shade_rgb[0] + 0.7152f * face_shade_rgb[1] + 0.0722f * face_shade_rgb[2];
+        face_shade_shift = gm.emission_and_shift[3];
+        found_face_skin = true;
+        if (contains_any(m_low, {"skin", "hada"})) {
+            break;
+        }
+    }
+    if (found_face_skin) {
+        for (size_t i = 0; i < avatar.materials.size() && i < out_materials.size(); ++i) {
+            auto& gm = out_materials[i];
+            if ((gm.extra_slots[2] & kMatExtraBodySkinAtlasBit) == 0u) {
+                continue;
+            }
+            const float body_shade_luma =
+                0.2126f * gm.shade_color[0] + 0.7152f * gm.shade_color[1] + 0.0722f * gm.shade_color[2];
+            if (body_shade_luma < face_shade_luma - 0.02f) {
+                gm.shade_color[0] = std::max(gm.shade_color[0], face_shade_rgb[0]);
+                gm.shade_color[1] = std::max(gm.shade_color[1], face_shade_rgb[1]);
+                gm.shade_color[2] = std::max(gm.shade_color[2], face_shade_rgb[2]);
+            }
+            if (face_shade_shift >= -0.65f && gm.emission_and_shift[3] > face_shade_shift) {
+                gm.emission_and_shift[3] = face_shade_shift;
+            }
         }
     }
 

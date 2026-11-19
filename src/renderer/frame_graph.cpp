@@ -1182,6 +1182,9 @@ Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     avatar_face_sdf_slot_ = UINT32_MAX;
     bound_avatar_ = nullptr;
     have_prev_view_proj_ = false;
+    last_rt_avatar_ = nullptr;
+    last_rt_as_update_us_ = 0ULL;
+    last_rt_pose_hash_ = 0ULL;
 
     if (avatar == nullptr) {
         return {};

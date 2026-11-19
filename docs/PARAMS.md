@@ -34,6 +34,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.resolution_scale_pct` | Render | Render Scale | `int` | T3 | `100.0` | `[50.0, 200.0]` | % | — | persist, app, undoable |
 | `render.aa_mode` | Render | Anti-Aliasing | `enum` | T3 | `1.0` | `[0.0, 2.0]` | — | — | persist, app, undoable |
 | `render.face_normal_flatten` | Render | Face Flatness | `float` | T3 | `0.85` | `[0.0, 1.0]` | — | `/aether/param/render.face_normal_flatten` | persist, project, osc, undoable |
+| `render.neck_seam_blend` | Render | Neck Seam Blend | `float` | T3 | `1.00` | `[0.0, 1.0]` | — | `/aether/param/render.neck_seam_blend` | persist, project, osc, undoable |
 | `render.cel_band_sharpness` | Render | Cel Feather | `float` | T3 | `0.025` | `[0.005, 0.25]` | — | `/aether/param/render.cel_band_sharpness` | persist, project, osc, undoable |
 | `render.shadow_warm_cool` | Render | Shadow Hue | `float` | T3 | `0.75` | `[0.0, 1.0]` | — | `/aether/param/render.shadow_warm_cool` | persist, project, osc, undoable |
 | `render.iro_tsuke_strength` | Render | Iro-Tsuke Ink | `float` | T3 | `0.85` | `[0.0, 1.0]` | — | `/aether/param/render.iro_tsuke_strength` | persist, project, osc, undoable |

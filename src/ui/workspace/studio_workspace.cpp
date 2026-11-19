@@ -402,6 +402,7 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.outline_scale = params_.get_float(ParamId::RenderOutlineScale);
     v.bloom_intensity = params_.get_float(ParamId::RenderBloomIntensity);
     v.face_normal_flatten = params_.get_float(ParamId::RenderFaceNormalFlatten);
+    v.neck_seam_blend = params_.get_float(ParamId::RenderNeckSeamBlend);
     v.cel_band_sharpness = params_.get_float(ParamId::RenderCelBandSharpness);
     v.shadow_warm_cool_shift = params_.get_float(ParamId::RenderShadowWarmCool);
     v.iro_tsuke_strength = params_.get_float(ParamId::RenderIroTsukeStrength);

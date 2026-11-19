@@ -132,9 +132,16 @@ struct alignas(16) GpuFrameGlobals {
     // xyz = world position of eye sphere center, w = cornea_radius (m)
     float eye_left_center_r[4]{-0.032f, 1.40f, 0.025f, 0.014f};
     float eye_right_center_r[4]{0.032f, 1.40f, 0.025f, 0.014f};
+    // xyz = animated world-space Neck joint center, w = horizontal neck radius (m)
+    float neck_seam_origin_r[4]{0.0f, 1.26f, 0.0f, 0.095f};
+    // xyz = animated world-space Head joint center (neck->head axis), w = neck_seam_blend strength (0..1)
+    float neck_seam_head_str[4]{0.0f, 1.33f, 0.0f, 1.0f};
+    // rgb = sampled linear Face chin/lower-cheek reference skin RGB, w = valid flag (1.0 when sampled)
+    float face_skin_ref_rgb[4]{0.85f, 0.68f, 0.58f, 0.0f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);
+static_assert(sizeof(GpuFrameGlobals) <= 4096);
 static_assert(AETHER_OFFSETOF(GpuFrameGlobals, lights) + 8 * sizeof(GpuLight) == sizeof(GpuFrameGlobals));
 
 static_assert(sizeof(AetherVertex25D) == 64);

@@ -125,13 +125,14 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float k_gi = max(fg.hair_velocity_ws.w, 0.0);
 
     uint rt_class = (mat_flags >> 10u) & 3u;
-    bool is_face = ((mat_flags & 2u) != 0u) || ((i.submesh_flags & 1u) != 0u);
+    bool is_face = ((mat_flags & 2u) != 0u) || ((i.submesh_flags & 1u) != 0u) || (rt_class == 0u);
     bool is_hair = ((mat_flags & 4u) != 0u) || ((i.submesh_flags & 6u) != 0u) || (rt_class == 1u);
     bool is_eye_iris = ((mat_flags & (1u << 12u)) != 0u);
-    bool is_body_skin_atlas = ((mat_flags & (1u << 13u)) != 0u);
-    bool texel_is_warm_skin = (lit_rgba.r > 0.25) && (lit_rgba.r > lit_rgba.g * 1.02) &&
-                              (lit_rgba.r > lit_rgba.b * 1.12) && ((lit_rgba.r - lit_rgba.b) > 0.10);
-    bool is_skin_pixel = is_face || (is_body_skin_atlas && texel_is_warm_skin);
+    bool is_body_skin = !is_face && ((mat_flags & (1u << 13u)) != 0u);
+    float skin_chroma_w = is_body_skin ? compute_body_skin_texel_weight(lit_rgba.rgb, fg.face_skin_ref_rgb) : 0.0;
+    float neck_w = is_body_skin ? compute_neck_seam_blend(i.world_pos, fg) : 0.0;
+    float neck_skin_w = neck_w * skin_chroma_w;
+    bool is_skin_pixel = is_face || (is_body_skin && (skin_chroma_w > 0.35));
 
     // Orient double-sided backfaces correctly so inner back-hair and hems never ignite false silhouette rims.
     float3 true_n = normalize_safe(i.true_norm_and_crease.xyz, float3(0.0, 0.0, 1.0));
@@ -148,6 +149,10 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float3 shade_n = (!is_face && crease_disguise > 0.001)
                          ? normalize_safe(lerp(true_n, proxy_n, crease_disguise), true_n)
                          : true_n;
+    float3 n_neck_proxy = (neck_skin_w > 0.001) ? compute_neck_proxy_normal(true_n, fg) : true_n;
+    if (neck_skin_w > 0.001) {
+        shade_n = normalize_safe(lerp(shade_n, n_neck_proxy, neck_skin_w), shade_n);
+    }
 
     float3 view_v = normalize_safe(fg.camera_pos_world.xyz - i.world_pos, float3(0.0, 0.0, 1.0));
     float norm_flat_k = is_skin_pixel ? face_norm_flatten : 0.0;
@@ -157,6 +162,21 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     // Sample authentic MToon _ShadeTexture * _ShadeColor
     float3 tex_shade_mul = aether_sample(mat.tex_slots.y, kSamplerLinearClamp, i.uv).rgb;
     float3 shade_col = mat.shade_color.rgb * tex_shade_mul;
+
+    // VRoid baked upper-neck texture shadow compensation (strictly gated on upper-neck skin chroma)
+    if (is_body_skin && neck_skin_w > 0.001 && fg.face_skin_ref_rgb.w > 0.5) {
+        float3 face_ref = fg.face_skin_ref_rgb.rgb;
+        float ref_luma = max(luminance(face_ref), 1e-4);
+        float px_luma = max(luminance(lit_rgba.rgb), 1e-4);
+        float darken_ratio = saturate((ref_luma - px_luma) / max(ref_luma, 0.05));
+        float chroma_shift = saturate(length(lit_rgba.rgb - face_ref) * 1.5);
+        float lift_w =
+            neck_skin_w * saturate(max(smoothstep(0.01, 0.14, darken_ratio), smoothstep(0.04, 0.18, chroma_shift)));
+        float3 de_shadowed = lerp(lit_rgba.rgb, max(lit_rgba.rgb, face_ref), lift_w);
+        float3 ratio = de_shadowed / max(lit_rgba.rgb, float3(0.02, 0.02, 0.02));
+        lit_rgba.rgb = de_shadowed;
+        shade_col = min(shade_col * ratio, max(shade_col, face_ref));
+    }
 
     int2 pix_i = int2(i.clip_pos.xy);
     float rt_shadow = 1.0;
@@ -227,6 +247,9 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float3 e_bounce = bounce_rgb * max(mat.hair_specular_params.w, 0.35);
     float3 indirect = sh_ambient * ((lighting_mode == 0u) ? 0.42 : 0.28) + fill_indirect + cie_sky + earth_bounce +
                       e_bounce * 0.65;
+    if (is_skin_pixel && lighting_mode >= 1u) {
+        indirect = max(indirect, sh_ambient * 0.34 + fill_indirect + cie_sky);
+    }
 
     float gi_luma = luminance(e_bounce);
     float l_gi_lift = k_gi * gi_luma * 0.45;
@@ -270,15 +293,32 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         cel_lit = min(sdf_lit, face_rt) * beam_atten;
     } else {
         float mtoon_shift = mat.emission_and_shift.w;
-        // Honor authored MToon _ShadeShift; remap VRoid's unshaded -1.0 clamp so key light shapes garments.
-        float shift = (mtoon_shift < -0.65) ? 0.12 : mtoon_shift;
+        // Honor authored MToon _ShadeShift; remap VRoid's unshaded -1.0 clamp to soft skin threshold on body skin vs garment 0.12.
+        float default_vroid_shift = is_skin_pixel ? -0.18 : 0.12;
+        float shift = (mtoon_shift < -0.65) ? default_vroid_shift : mtoon_shift;
         float toony = clamp(mat.toon_params.x, 0.0, 1.0);
         float half_soft = clamp(cel_feather * max(1.35 - toony * 0.55, 0.45) + extra_feather, 0.008, 0.14);
         float l_form = ndl_unshadowed + l_gi_lift * 0.25;
         float form_lit = quantize_cel(l_form, shift, half_soft);
+        if (neck_skin_w > 0.001) {
+            // Unify upper-neck skin with exact Face 2.5D horizontal proxy cel lighting for a seamless jawline.
+            float3 h_fwd = normalize_safe(fg.head_fwd_world.xyz, float3(0.0, 0.0, 1.0));
+            float3 h_right = normalize_safe(fg.head_right_world.xyz, float3(1.0, 0.0, 0.0));
+            float2 n_h = normalize_safe(float3(dot(n_neck_proxy, h_right), dot(n_neck_proxy, h_fwd), 0.0),
+                                        float3(0.0, 1.0, 0.0)).xy;
+            float2 l_h = float2(dot(key_dir, h_right), dot(key_dir, h_fwd));
+            float a_l = (dot(l_h, l_h) > 1e-6) ? atan2(l_h.x, l_h.y) : 0.0;
+            static const float kFaceProxySpread = 0.55;
+            float a_n = asin(clamp(n_h.x / kFaceProxySpread, -1.0, 1.0));
+            float a_face = a_n * (1.0 - 0.5 * face_norm_flatten);
+            float d_face = cos(a_face - a_l);
+            float face_feather = clamp(cel_feather + extra_feather, 0.008, 0.04);
+            float neck_face_lit = quantize_cel(d_face + l_gi_lift * 0.25, 0.0, face_feather);
+            form_lit = lerp(form_lit, neck_face_lit, neck_skin_w);
+        }
         float cast_lit = rt_shadow_active ? smoothstep(0.50 - rt_soft, 0.50 + rt_soft, rt_shadow) : 1.0;
         cel_lit = min(form_lit, cast_lit) * beam_atten;
-        deep_shadow = (1.0 - quantize_cel(l_form, shift - 0.34, half_soft)) * (1.0 - cel_lit);
+        deep_shadow = (1.0 - quantize_cel(l_form, shift - 0.34, half_soft)) * (1.0 - cel_lit) * (1.0 - neck_skin_w);
     }
 
     // Stencil forehead bang drop-shadow fallback only when RT shadow pass is inactive

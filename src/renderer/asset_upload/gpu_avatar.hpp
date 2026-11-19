@@ -122,6 +122,8 @@ struct GpuAvatar {
     std::string strings;
     std::vector<BrowBoneBinding> brow_bones;
     bool has_split_brow_morphs{false};
+    // Calibrated linear RGB of lower-cheek / chin Face skin sampled once on upload (w = 1.0 when valid).
+    std::array<float, 4> face_skin_ref_linear{0.85f, 0.68f, 0.58f, 0.0f};
 
     ~GpuAvatar() { destroy(); }
     GpuAvatar() = default;

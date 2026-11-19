@@ -166,8 +166,22 @@ void Dx12FrameGraph::destroy() noexcept {
 }
 
 Expected<void> Dx12FrameGraph::ensure_upload_capacity(uint32_t vertex_count) {
+    if (device_ == nullptr) {
+        return make_unexpected(
+            Error::make(ErrorCode::InvalidArg, "Dx12FrameGraph::ensure_upload_capacity uninitialized"));
+    }
     const uint32_t need = std::max(vertex_count, max_vertices_);
     const uint64_t pose_bytes = static_cast<uint64_t>(need) * sizeof(AetherVertex25D);
+    bool need_wait_idle = false;
+    for (const auto& sl : upload_slices_) {
+        if (sl.pose_buf.resource != nullptr && sl.pose_vertex_cap < need) {
+            need_wait_idle = true;
+            break;
+        }
+    }
+    if (need_wait_idle) {
+        device_->wait_idle();
+    }
     for (auto& sl : upload_slices_) {
         if (sl.fg_buf.resource == nullptr) {
             auto r = device_->create_buffer(4096u, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
@@ -196,6 +210,7 @@ Expected<void> Dx12FrameGraph::ensure_upload_capacity(uint32_t vertex_count) {
             sl.pose_vertex_cap = need;
         }
     }
+    max_vertices_ = need;
     return {};
 }
 
@@ -598,7 +613,9 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
             }
             const DXGI_FORMAT fmt = map_dxgi_avatar_tex(td.format);
             std::span<const uint8_t> pix(avatar->cpu_texture_pixels.data() + td.pixel_offset, td.pixel_size);
-            auto t_res = device_->create_texture_2d_from_data(td.width, td.height, static_cast<int>(fmt), pix, 0u);
+            const uint32_t tw = std::max(1u, td.width);
+            const uint32_t th = std::max(1u, td.height);
+            auto t_res = device_->create_texture_2d_from_data(tw, th, static_cast<int>(fmt), pix, 0u);
             if (!t_res) {
                 return make_unexpected(t_res.error());
             }
@@ -616,6 +633,14 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     detail::populate_materials_and_submeshes(*avatar, avatar_tex_slots_, fallback_white_tex_.srv_index, sdf_fallback,
                                              cached_materials_, cached_submeshes_, opaque_draws_, cutout_draws_,
                                              transparent_draws_);
+    if (!avatar->submeshes.empty()) {
+        auto by_queue = [&](uint32_t a, uint32_t b) {
+            return avatar->submeshes[a].render_queue_offset < avatar->submeshes[b].render_queue_offset;
+        };
+        std::stable_sort(opaque_draws_.begin(), opaque_draws_.end(), by_queue);
+        std::stable_sort(cutout_draws_.begin(), cutout_draws_.end(), by_queue);
+        std::stable_sort(transparent_draws_.begin(), transparent_draws_.end(), by_queue);
+    }
 
     const uint64_t mat_bytes = static_cast<uint64_t>(cached_materials_.size()) * sizeof(GpuMaterial);
     auto mat_res = device_->create_buffer(mat_bytes, rhi::D3D12BufferUsage::ShaderResource,
