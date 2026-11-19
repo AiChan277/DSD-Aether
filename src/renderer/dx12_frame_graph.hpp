@@ -94,6 +94,8 @@ class Dx12FrameGraph {
     rhi::D3D12Device* device_{nullptr};
     uint32_t width_{0};
     uint32_t height_{0};
+    uint32_t prev_stage_w_{0};
+    uint32_t prev_stage_h_{0};
     uint32_t max_vertices_{131072u};
     bool enable_shared_output_{true};
     bool pipelines_ready_{false};

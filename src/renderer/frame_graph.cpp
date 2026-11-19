@@ -224,6 +224,18 @@ Expected<void> FrameGraph::resize(uint32_t viewport_w, uint32_t viewport_h, uint
             return r;
         if (auto r = rebuild_vp_target(quad_right_out_, q_w, q_h); !r)
             return r;
+        stage_rt_w_ = vw;
+        stage_rt_h_ = vh;
+        stage_active_w_ = vw;
+        stage_active_h_ = vh;
+        quad_top_rt_w_ = q_w;
+        quad_top_rt_h_ = q_h;
+        quad_top_active_w_ = q_w;
+        quad_top_active_h_ = q_h;
+        quad_right_rt_w_ = q_w;
+        quad_right_rt_h_ = q_h;
+        quad_right_active_w_ = q_w;
+        quad_right_active_h_ = q_h;
         return {};
     }
     if (auto res = create_size_dependent_targets(rw, rh); !res) {
@@ -235,6 +247,99 @@ Expected<void> FrameGraph::resize(uint32_t viewport_w, uint32_t viewport_h, uint
     for (auto& hb : history_) {
         hb.have_prev_view_proj = false;
     }
+    return {};
+}
+
+Expected<void> FrameGraph::ensure_stage_target_sizes(uint32_t stage_w, uint32_t stage_h, uint32_t qtop_w,
+                                                     uint32_t qtop_h, uint32_t qright_w, uint32_t qright_h,
+                                                     bool& out_rebuilt) {
+    out_rebuilt = false;
+    if (device_ == nullptr || device_->device() == VK_NULL_HANDLE) {
+        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "FrameGraph::ensure_stage_target_sizes uninitialized")};
+    }
+    const uint32_t sw = std::clamp(stage_w, 16u, 4096u);
+    const uint32_t sh = std::clamp(stage_h, 16u, 4096u);
+    const uint32_t tw = std::clamp(qtop_w, 16u, 4096u);
+    const uint32_t th = std::clamp(qtop_h, 16u, 4096u);
+    const uint32_t rw = std::clamp(qright_w, 16u, 4096u);
+    const uint32_t rh = std::clamp(qright_h, 16u, 4096u);
+
+    const bool need_stage = (stage_viewport_out_.img.handle == VK_NULL_HANDLE) || (sw > stage_rt_w_) || (sh > stage_rt_h_);
+    const bool need_qtop = (quad_top_out_.img.handle == VK_NULL_HANDLE) || (tw > quad_top_rt_w_) || (th > quad_top_rt_h_);
+    const bool need_qright =
+        (quad_right_out_.img.handle == VK_NULL_HANDLE) || (rw > quad_right_rt_w_) || (rh > quad_right_rt_h_);
+
+    if (!need_stage && !need_qtop && !need_qright) {
+        stage_active_w_ = sw;
+        stage_active_h_ = sh;
+        quad_top_active_w_ = tw;
+        quad_top_active_h_ = th;
+        quad_right_active_w_ = rw;
+        quad_right_active_h_ = rh;
+        return {};
+    }
+
+    device_->wait_idle();
+    auto rebuild = [&](RegisteredImage& target, uint32_t nw, uint32_t nh) -> Expected<void> {
+        if (target.sampled_slot != UINT32_MAX) {
+            bindless_.release_sampled_image(target.sampled_slot);
+            target.sampled_slot = UINT32_MAX;
+        }
+        device_->destroy_image(target.img);
+        target.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        auto img_res = device_->create_image_2d(nw, nh, VK_FORMAT_B8G8R8A8_UNORM,
+                                                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                                VK_IMAGE_ASPECT_COLOR_BIT);
+        if (!img_res) {
+            return Unexpected<Error>{img_res.error()};
+        }
+        target.img = img_res.value();
+        auto slot_res = bindless_.register_sampled_image(target.img.view);
+        if (!slot_res) {
+            return Unexpected<Error>{slot_res.error()};
+        }
+        target.sampled_slot = slot_res.value();
+        return {};
+    };
+    auto cap_dim = [](uint32_t need, uint32_t cur) noexcept -> uint32_t {
+        const uint32_t m = std::max(need, cur);
+        return std::min(4096u, ((m + 63u) / 64u) * 64u);
+    };
+
+    if (need_stage) {
+        const uint32_t nw = cap_dim(sw, stage_rt_w_);
+        const uint32_t nh = cap_dim(sh, stage_rt_h_);
+        if (auto r = rebuild(stage_viewport_out_, nw, nh); !r)
+            return r;
+        stage_rt_w_ = nw;
+        stage_rt_h_ = nh;
+        out_rebuilt = true;
+    }
+    if (need_qtop) {
+        const uint32_t nw = cap_dim(tw, quad_top_rt_w_);
+        const uint32_t nh = cap_dim(th, quad_top_rt_h_);
+        if (auto r = rebuild(quad_top_out_, nw, nh); !r)
+            return r;
+        quad_top_rt_w_ = nw;
+        quad_top_rt_h_ = nh;
+        out_rebuilt = true;
+    }
+    if (need_qright) {
+        const uint32_t nw = cap_dim(rw, quad_right_rt_w_);
+        const uint32_t nh = cap_dim(rh, quad_right_rt_h_);
+        if (auto r = rebuild(quad_right_out_, nw, nh); !r)
+            return r;
+        quad_right_rt_w_ = nw;
+        quad_right_rt_h_ = nh;
+        out_rebuilt = true;
+    }
+    stage_active_w_ = sw;
+    stage_active_h_ = sh;
+    quad_top_active_w_ = tw;
+    quad_top_active_h_ = th;
+    quad_right_active_w_ = rw;
+    quad_right_active_h_ = rh;
     return {};
 }
 
@@ -745,6 +850,30 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
                           VK_IMAGE_ASPECT_COLOR_BIT, false, "quad_right_out");
         !r)
         return r;
+    stage_rt_w_ = vw;
+    stage_rt_h_ = vh;
+    stage_active_w_ = vw;
+    stage_active_h_ = vh;
+    quad_top_rt_w_ = qw;
+    quad_top_rt_h_ = qh;
+    quad_top_active_w_ = qw;
+    quad_top_active_h_ = qh;
+    quad_right_rt_w_ = qw;
+    quad_right_rt_h_ = qh;
+    quad_right_active_w_ = qw;
+    quad_right_active_h_ = qh;
+
+    const float pip_scale = std::min({1.0f, 640.0f / static_cast<float>(w), 360.0f / static_cast<float>(h)});
+    const uint32_t pip_w = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<float>(w) * pip_scale)));
+    const uint32_t pip_h = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<float>(h) * pip_scale)));
+    if (auto r = make_reg(stage_broadcast_pip_out_, pip_w, pip_h, VK_FORMAT_B8G8R8A8_UNORM, att_sampled, true, false,
+                          false, VK_IMAGE_ASPECT_COLOR_BIT, false, "stage_broadcast_pip_out");
+        !r)
+        return r;
+    stage_pip_w_ = pip_w;
+    stage_pip_h_ = pip_h;
+    prev_stage_scene_w_ = 0;
+    prev_stage_scene_h_ = 0;
 
     const VkImageUsageFlags hist_usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     for (auto& hb : history_) {
@@ -861,6 +990,12 @@ void FrameGraph::destroy_size_dependent_targets() noexcept {
     drop(stage_viewport_out_);
     drop(quad_top_out_);
     drop(quad_right_out_);
+    drop(stage_broadcast_pip_out_);
+    stage_rt_w_ = stage_rt_h_ = stage_active_w_ = stage_active_h_ = 0;
+    quad_top_rt_w_ = quad_top_rt_h_ = quad_top_active_w_ = quad_top_active_h_ = 0;
+    quad_right_rt_w_ = quad_right_rt_h_ = quad_right_active_w_ = quad_right_active_h_ = 0;
+    stage_pip_w_ = stage_pip_h_ = 0;
+    prev_stage_scene_w_ = prev_stage_scene_h_ = 0;
     for (auto& hb : history_) {
         for (auto& rb : hb.reservoir_bufs) {
             device_->destroy_buffer(rb);
@@ -1499,11 +1634,34 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         (req.external_color_image != VK_NULL_HANDLE && req.external_width > 0U && req.external_height > 0U);
     const bool has_avatar = !use_external && (req.avatar != nullptr && bound_avatar_ == req.avatar &&
                                               req.avatar->requirements.vertex_count > 0);
-    const uint32_t w = effective_output_width();
-    const uint32_t h = effective_output_height();
-    if (w == 0 || h == 0 || out_ring_[0].bgra8.img.handle == VK_NULL_HANDLE) {
+    const uint32_t rw = effective_output_width();
+    const uint32_t rh = effective_output_height();
+    if (rw == 0 || rh == 0 || out_ring_[0].bgra8.img.handle == VK_NULL_HANDLE) {
         return;
     }
+
+    const bool is_stage_view = (req.view_kind == RenderViewKind::LightingStage);
+    uint32_t dst_rt_w = rw;
+    uint32_t dst_rt_h = rh;
+    if (is_stage_view) {
+        if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadTop) {
+            dst_rt_w = (quad_top_rt_w_ > 0u) ? quad_top_rt_w_ : std::max(cfg_.width / 2u, 16u);
+            dst_rt_h = (quad_top_rt_h_ > 0u) ? quad_top_rt_h_ : std::max(cfg_.height / 2u, 16u);
+        } else if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadRight) {
+            dst_rt_w = (quad_right_rt_w_ > 0u) ? quad_right_rt_w_ : std::max(cfg_.width / 2u, 16u);
+            dst_rt_h = (quad_right_rt_h_ > 0u) ? quad_right_rt_h_ : std::max(cfg_.height / 2u, 16u);
+        } else {
+            dst_rt_w = (stage_rt_w_ > 0u) ? stage_rt_w_ : std::max(cfg_.width, 16u);
+            dst_rt_h = (stage_rt_h_ > 0u) ? stage_rt_h_ : std::max(cfg_.height, 16u);
+        }
+    }
+    const detail::StageRenderRegion sreg =
+        is_stage_view
+            ? detail::compute_stage_render_region(req, rw, rh, dst_rt_w, dst_rt_h)
+            : detail::StageRenderRegion{rw, rh, rw, rh, static_cast<float>(rw) / static_cast<float>(rh),
+                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const uint32_t w = sreg.scene_w;
+    const uint32_t h = sreg.scene_h;
 
     const uint32_t out_slot =
         (req.view_kind == RenderViewKind::Broadcast) ? (req.frame_slot % kOutputRingSlots) : last_output_slot_;
@@ -1539,20 +1697,29 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     if (!fg_alloc_res) {
         return;
     }
-    const bool is_stage_view = (req.view_kind == RenderViewKind::LightingStage);
     const bool allow_view_hist =
         !is_stage_view || (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::MainStage);
     const uint32_t view_bank = is_stage_view ? 1u : 0u;
     TemporalHistoryBank& hb = history_[view_bank];
+    const bool stage_size_changed = is_stage_view && allow_view_hist &&
+                                    (w != prev_stage_scene_w_ || h != prev_stage_scene_h_);
+    if (is_stage_view && allow_view_hist) {
+        prev_stage_scene_w_ = w;
+        prev_stage_scene_h_ = h;
+    }
     const bool fast_stage_pan = is_stage_view && req.stage_fast_panning;
-    const bool hist_valid = allow_view_hist && hb.have_prev_view_proj && !fast_stage_pan;
+    const bool hist_valid = allow_view_hist && hb.have_prev_view_proj && !fast_stage_pan && !stage_size_changed;
 
     const auto& fg_alloc = fg_alloc_res.value();
     GpuFrameGlobals fg{};
     GpuMat4 next_prev_vp{};
     const bool rt_hardware_ready = device_->rt_supported() && accel_.is_ready() && pso_ray_effects_ != VK_NULL_HANDLE;
+    const std::array<float, 4> uv_scale{sreg.uv_scale_x, sreg.uv_scale_y, sreg.uv_max_u, sreg.uv_max_v};
+    const std::array<float, 4> half_uv_scale{sreg.half_uv_scale_x, sreg.half_uv_scale_y, sreg.half_uv_max_u,
+                                             sreg.half_uv_max_v};
     const uint8_t eff_mode = detail::populate_shared_frame_globals(
-        req, w, h, has_avatar, rt_hardware_ready, hist_valid, hb.prev_view_proj, fg, next_prev_vp);
+        req, w, h, has_avatar, rt_hardware_ready, hist_valid, hb.prev_view_proj, fg, next_prev_vp,
+        is_stage_view ? sreg.proj_aspect : 0.0f, &uv_scale, &half_uv_scale);
     if (has_avatar && allow_view_hist) {
         hb.prev_view_proj = next_prev_vp;
     }
@@ -2194,27 +2361,46 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         t_begin(rhi::GpuPassId::PostBloom);
         bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pso_bloom_down_, "bloom_down");
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
-        uint32_t src_w = w;
-        uint32_t src_h = h;
+        const bool subrect_bloom = (w < rw) || (h < rh);
+        auto pack_subrect = [](uint32_t psw, uint32_t psh, uint32_t asw, uint32_t ash) noexcept -> uint64_t {
+            return static_cast<uint64_t>(std::min(psw, 0xFFFFu)) |
+                   (static_cast<uint64_t>(std::min(psh, 0xFFFFu)) << 16u) |
+                   (static_cast<uint64_t>(std::min(asw, 0xFFFFu)) << 32u) |
+                   (static_cast<uint64_t>(std::min(ash, 0xFFFFu)) << 48u);
+        };
+        std::array<uint32_t, kBloomMipCount> act_mip_w{};
+        std::array<uint32_t, kBloomMipCount> act_mip_h{};
+        uint32_t phys_sw = rw;
+        uint32_t phys_sh = rh;
+        uint32_t act_sw = w;
+        uint32_t act_sh = h;
         uint32_t src_slot = hdr_scene_.sampled_slot;
         for (uint32_t i = 0; i < kBloomMipCount; ++i) {
             auto& dst = bloom_mips_[i];
             trans(dst, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+            const uint32_t act_dw = subrect_bloom ? std::min(dst.img.width, std::max(act_sw / 2u, 1u)) : dst.img.width;
+            const uint32_t act_dh =
+                subrect_bloom ? std::min(dst.img.height, std::max(act_sh / 2u, 1u)) : dst.img.height;
+            act_mip_w[i] = act_dw;
+            act_mip_h[i] = act_dh;
             GpuPushConstants pc{};
+            pc.vertex_buf_bda = subrect_bloom ? pack_subrect(phys_sw, phys_sh, act_sw, act_sh) : 0ULL;
             pc.param0 = src_slot;
             pc.param1 = dst.storage_slot;
-            pc.param2 = dst.img.width;
-            pc.param3 = dst.img.height;
+            pc.param2 = act_dw;
+            pc.param3 = act_dh;
             pc.fparam0 = (i == 0) ? rig.bloom_threshold : 0.0f;
-            pc.fparam1 = 1.0f / static_cast<float>(src_w);
-            pc.fparam2 = 1.0f / static_cast<float>(src_h);
+            pc.fparam1 = 1.0f / static_cast<float>(phys_sw);
+            pc.fparam2 = 1.0f / static_cast<float>(phys_sh);
             vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, (dst.img.width + 7u) / 8u, (dst.img.height + 7u) / 8u, 1);
+            vkCmdDispatch(cmd, (act_dw + 7u) / 8u, (act_dh + 7u) / 8u, 1);
             trans(dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
-            src_w = dst.img.width;
-            src_h = dst.img.height;
+            phys_sw = dst.img.width;
+            phys_sh = dst.img.height;
+            act_sw = act_dw;
+            act_sh = act_dh;
             src_slot = dst.sampled_slot;
         }
 
@@ -2224,15 +2410,20 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
             auto& hi = bloom_mips_[static_cast<size_t>(i)];
             trans(hi, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+            const uint32_t lo_act_w = act_mip_w[static_cast<size_t>(i) + 1U];
+            const uint32_t lo_act_h = act_mip_h[static_cast<size_t>(i) + 1U];
+            const uint32_t hi_act_w = act_mip_w[static_cast<size_t>(i)];
+            const uint32_t hi_act_h = act_mip_h[static_cast<size_t>(i)];
             GpuPushConstants pc{};
+            pc.vertex_buf_bda = subrect_bloom ? pack_subrect(lo.img.width, lo.img.height, lo_act_w, lo_act_h) : 0ULL;
             pc.param0 = lo.sampled_slot;
             pc.param1 = hi.storage_slot;
-            pc.param2 = hi.img.width;
-            pc.param3 = hi.img.height;
+            pc.param2 = hi_act_w;
+            pc.param3 = hi_act_h;
             pc.fparam1 = 1.0f / static_cast<float>(lo.img.width);
             pc.fparam2 = 1.0f / static_cast<float>(lo.img.height);
             vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
-            vkCmdDispatch(cmd, (hi.img.width + 7u) / 8u, (hi.img.height + 7u) / 8u, 1);
+            vkCmdDispatch(cmd, (hi_act_w + 7u) / 8u, (hi_act_h + 7u) / 8u, 1);
             trans(hi, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
         }
@@ -2454,23 +2645,48 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
 
     const bool is_stage = (req.view_kind == RenderViewKind::LightingStage);
     RegisteredImage* dst_vp = &viewport_out_;
-    uint32_t w = cfg_.width;
-    uint32_t h = cfg_.height;
+    uint32_t rt_w = cfg_.width;
+    uint32_t rt_h = cfg_.height;
     if (is_stage) {
         if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadTop) {
             dst_vp = &quad_top_out_;
-            w = std::max(cfg_.width / 2u, 16u);
-            h = std::max(cfg_.height / 2u, 16u);
+            rt_w = (quad_top_rt_w_ > 0u) ? quad_top_rt_w_ : std::max(cfg_.width / 2u, 16u);
+            rt_h = (quad_top_rt_h_ > 0u) ? quad_top_rt_h_ : std::max(cfg_.height / 2u, 16u);
         } else if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadRight) {
             dst_vp = &quad_right_out_;
-            w = std::max(cfg_.width / 2u, 16u);
-            h = std::max(cfg_.height / 2u, 16u);
+            rt_w = (quad_right_rt_w_ > 0u) ? quad_right_rt_w_ : std::max(cfg_.width / 2u, 16u);
+            rt_h = (quad_right_rt_h_ > 0u) ? quad_right_rt_h_ : std::max(cfg_.height / 2u, 16u);
         } else {
             dst_vp = &stage_viewport_out_;
+            rt_w = (stage_rt_w_ > 0u) ? stage_rt_w_ : std::max(cfg_.width, 16u);
+            rt_h = (stage_rt_h_ > 0u) ? stage_rt_h_ : std::max(cfg_.height, 16u);
         }
     }
     if (dst_vp->img.handle == VK_NULL_HANDLE) {
         return;
+    }
+    rt_w = (dst_vp->img.width > 0u) ? dst_vp->img.width : rt_w;
+    rt_h = (dst_vp->img.height > 0u) ? dst_vp->img.height : rt_h;
+    const uint32_t eff_w = effective_output_width();
+    const uint32_t eff_h = effective_output_height();
+    const detail::StageRenderRegion sreg =
+        is_stage ? detail::compute_stage_render_region(req, eff_w, eff_h, rt_w, rt_h)
+                 : detail::StageRenderRegion{rt_w, rt_h, eff_w, eff_h,
+                                             static_cast<float>(rt_w) / static_cast<float>(std::max(1u, rt_h)),
+                                             1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const uint32_t w = sreg.target_w;
+    const uint32_t h = sreg.target_h;
+    if (is_stage) {
+        if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadTop) {
+            quad_top_active_w_ = w;
+            quad_top_active_h_ = h;
+        } else if (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::QuadRight) {
+            quad_right_active_w_ = w;
+            quad_right_active_h_ = h;
+        } else {
+            stage_active_w_ = w;
+            stage_active_h_ = h;
+        }
     }
     const uint32_t fslot = req.frame_slot % rhi::GpuTimingRing::kFrameSlots;
     VkDescriptorSet set0 = bindless_.global_set();
@@ -2500,19 +2716,31 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         return;
     }
     const auto& fg_alloc = fg_alloc_res.value();
-    const auto aspect_layout = core::compute_viewport_aspect_layout(
-        static_cast<float>(w), static_cast<float>(h), static_cast<float>(effective_output_width()),
-        static_cast<float>(effective_output_height()), req.viewport_aspect_mode);
+    core::ViewportAspectLayout aspect_layout{};
     PreviewCamera heat_cam = req.camera;
-    heat_cam.fovy_rad = aspect_layout.effective_fovy_rad(req.camera.fovy_rad);
+    float ui_aspect = sreg.proj_aspect;
+    float ui_w_f = static_cast<float>(w);
+    float ui_h_f = static_cast<float>(h);
+    if (!is_stage) {
+        aspect_layout = core::compute_viewport_aspect_layout(
+            static_cast<float>(rt_w), static_cast<float>(rt_h), static_cast<float>(eff_w), static_cast<float>(eff_h),
+            req.viewport_aspect_mode);
+        heat_cam.fovy_rad = aspect_layout.effective_fovy_rad(req.camera.fovy_rad);
+        ui_aspect = aspect_layout.frame_aspect;
+        ui_w_f = aspect_layout.frame_width();
+        ui_h_f = aspect_layout.frame_height();
+    }
     GpuFrameGlobals fg{};
+    for (int i = 0; i < 4; ++i) {
+        fg.target_uv_scale[i] = 1.0f;
+        fg.target_half_uv_scale[i] = 1.0f;
+    }
     Mat4Vec3 eye{};
-    build_camera_matrices(heat_cam, aspect_layout.frame_aspect, fg.view, fg.inv_view, fg.proj, fg.inv_proj,
-                          fg.view_proj, eye);
-    fg.viewport_size[0] = aspect_layout.frame_width();
-    fg.viewport_size[1] = aspect_layout.frame_height();
-    fg.viewport_size[2] = 1.0f / aspect_layout.frame_width();
-    fg.viewport_size[3] = 1.0f / aspect_layout.frame_height();
+    build_camera_matrices(heat_cam, ui_aspect, fg.view, fg.inv_view, fg.proj, fg.inv_proj, fg.view_proj, eye);
+    fg.viewport_size[0] = ui_w_f;
+    fg.viewport_size[1] = ui_h_f;
+    fg.viewport_size[2] = 1.0f / ui_w_f;
+    fg.viewport_size[3] = 1.0f / ui_h_f;
     fg.stage_camera_params[0] = heat_cam.is_orthographic ? 1.0f : 0.0f;
     fg.stage_camera_params[1] = heat_cam.ortho_height;
     fg.stage_camera_params[2] = is_stage ? static_cast<float>(static_cast<uint8_t>(req.stage_diag_mode)) : 0.0f;
@@ -2543,7 +2771,7 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         col_att.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        ri.renderArea = {{0, 0}, {w, h}};
+        ri.renderArea = {{0, 0}, {rt_w, rt_h}};
         ri.layerCount = 1;
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &col_att;
@@ -2558,13 +2786,23 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         GpuPushConstants pc{};
         pc.frame_globals_bda = fg_alloc.device_address;
         pc.param0 = out_rgba16f_.sampled_slot;
-        pc.param1 = (req.show_checkerboard ? 1u : 0u) | (aspect_layout.explicit_matte ? 2u : 0u);
-        pc.param2 = std::bit_cast<uint32_t>(aspect_layout.uv_du);
-        pc.param3 = std::bit_cast<uint32_t>(aspect_layout.uv_dv);
-        pc.fparam0 = aspect_layout.norm_x0;
-        pc.fparam1 = aspect_layout.norm_y0;
-        pc.fparam2 = aspect_layout.norm_x1;
-        pc.fparam3 = aspect_layout.norm_y1;
+        if (is_stage) {
+            pc.param1 = (req.show_checkerboard ? 1u : 0u) | 4u;
+            pc.param2 = std::bit_cast<uint32_t>(sreg.uv_scale_x);
+            pc.param3 = std::bit_cast<uint32_t>(sreg.uv_scale_y);
+            pc.fparam0 = 0.0f;
+            pc.fparam1 = 0.0f;
+            pc.fparam2 = sreg.uv_max_u;
+            pc.fparam3 = sreg.uv_max_v;
+        } else {
+            pc.param1 = (req.show_checkerboard ? 1u : 0u) | (aspect_layout.explicit_matte ? 2u : 0u);
+            pc.param2 = std::bit_cast<uint32_t>(aspect_layout.uv_du);
+            pc.param3 = std::bit_cast<uint32_t>(aspect_layout.uv_dv);
+            pc.fparam0 = aspect_layout.norm_x0;
+            pc.fparam1 = aspect_layout.norm_y0;
+            pc.fparam2 = aspect_layout.norm_x1;
+            pc.fparam3 = aspect_layout.norm_y1;
+        }
         vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
 
@@ -2752,26 +2990,9 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                 if (auto sb = rebar_.allocate(static_cast<VkDeviceSize>(elem_cnt) * sizeof(GpuStageOverlayElem), 16u)) {
                     std::memcpy(sb.value().mapped, stage_overlay_scratch_.data(),
                                 static_cast<size_t>(elem_cnt) * sizeof(GpuStageOverlayElem));
-                    const uint32_t max_x0 = w > 0u ? w - 1u : 0u;
-                    const uint32_t max_y0 = h > 0u ? h - 1u : 0u;
-                    const int32_t sx0 = std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_x0)), 0,
-                                                   static_cast<int32_t>(max_x0));
-                    const int32_t sy0 = std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_y0)), 0,
-                                                   static_cast<int32_t>(max_y0));
-                    const uint32_t sw =
-                        static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_width())));
-                    const uint32_t sh =
-                        static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_height())));
-                    const VkViewport svp{aspect_layout.frame_x0,
-                                         aspect_layout.frame_y0 + aspect_layout.frame_height(),
-                                         aspect_layout.frame_width(),
-                                         -aspect_layout.frame_height(),
-                                         0.0f,
-                                         1.0f};
-                    const VkRect2D ssc{
-                        {sx0, sy0},
-                        {std::min(sw, w > static_cast<uint32_t>(sx0) ? w - static_cast<uint32_t>(sx0) : 1u),
-                         std::min(sh, h > static_cast<uint32_t>(sy0) ? h - static_cast<uint32_t>(sy0) : 1u)}};
+                    const VkViewport svp{0.0f, static_cast<float>(w), static_cast<float>(w),
+                                         -static_cast<float>(w > 0u ? h : 1u), 0.0f, 1.0f};
+                    const VkRect2D ssc{{0, 0}, {w, h}};
                     vkCmdSetViewport(cmd, 0, 1, &svp);
                     vkCmdSetScissor(cmd, 0, 1, &ssc);
                     bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_stage_schematic_,
@@ -2791,6 +3012,50 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
           VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
           VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+
+    // Optional clean fixed-aspect Broadcast Monitor pass for LightingStage PiP / Quad Broadcast cell
+    if (!is_stage && req.encode_stage_broadcast_pip && stage_broadcast_pip_out_.img.handle != VK_NULL_HANDLE) {
+        const uint32_t pw = stage_pip_w_;
+        const uint32_t ph = stage_pip_h_;
+        trans(stage_broadcast_pip_out_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        VkRenderingAttachmentInfo pa{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        pa.imageView = stage_broadcast_pip_out_.img.view;
+        pa.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        pa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        pa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        pa.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        VkRenderingInfo pri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        pri.renderArea = {{0, 0}, {pw, ph}};
+        pri.layerCount = 1;
+        pri.colorAttachmentCount = 1;
+        pri.pColorAttachments = &pa;
+        vkCmdBeginRendering(cmd, &pri);
+        const VkViewport pvp{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph), 0.0f, 1.0f};
+        const VkRect2D psc{{0, 0}, {pw, ph}};
+        vkCmdSetViewport(cmd, 0, 1, &pvp);
+        vkCmdSetScissor(cmd, 0, 1, &psc);
+        bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_viewport_compose_, "viewport_compose");
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
+        GpuPushConstants ppc{};
+        ppc.frame_globals_bda = fg_alloc.device_address;
+        ppc.param0 = out_rgba16f_.sampled_slot;
+        ppc.param1 = req.show_checkerboard ? 1u : 0u;
+        ppc.param2 = std::bit_cast<uint32_t>(1.0f);
+        ppc.param3 = std::bit_cast<uint32_t>(1.0f);
+        ppc.fparam0 = 0.0f;
+        ppc.fparam1 = 0.0f;
+        ppc.fparam2 = 1.0f;
+        ppc.fparam3 = 1.0f;
+        vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(ppc), &ppc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        trans(stage_broadcast_pip_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+    }
 
     // Pass 13B: 128x128 Light Orbit Orb Preview
     if (req.show_orbit_orb && !is_stage) {
@@ -3010,6 +3275,8 @@ FrameGraphOutputs FrameGraph::outputs_for_slot(uint32_t ring_slot) const noexcep
     o.quad_top_view = quad_top_out_.img.view;
     o.quad_right_image = quad_right_out_.img.handle;
     o.quad_right_view = quad_right_out_.img.view;
+    o.stage_broadcast_pip_image = stage_broadcast_pip_out_.img.handle;
+    o.stage_broadcast_pip_view = stage_broadcast_pip_out_.img.view;
     o.orbit_orb_image = orbit_orb_out_.img.handle;
     o.orbit_orb_view = orbit_orb_out_.img.view;
     o.rt_shadow_raw_image = rt_shadow_raw_.img.handle;
@@ -3017,6 +3284,20 @@ FrameGraphOutputs FrameGraph::outputs_for_slot(uint32_t ring_slot) const noexcep
     o.hdr_scene_image = hdr_scene_.img.handle;
     o.width = cfg_.width;
     o.height = cfg_.height;
+    o.stage_viewport_width = (stage_active_w_ > 0u) ? stage_active_w_ : cfg_.width;
+    o.stage_viewport_height = (stage_active_h_ > 0u) ? stage_active_h_ : cfg_.height;
+    o.stage_viewport_rt_width = (stage_rt_w_ > 0u) ? stage_rt_w_ : cfg_.width;
+    o.stage_viewport_rt_height = (stage_rt_h_ > 0u) ? stage_rt_h_ : cfg_.height;
+    o.quad_top_width = (quad_top_active_w_ > 0u) ? quad_top_active_w_ : std::max(cfg_.width / 2u, 16u);
+    o.quad_top_height = (quad_top_active_h_ > 0u) ? quad_top_active_h_ : std::max(cfg_.height / 2u, 16u);
+    o.quad_top_rt_width = (quad_top_rt_w_ > 0u) ? quad_top_rt_w_ : std::max(cfg_.width / 2u, 16u);
+    o.quad_top_rt_height = (quad_top_rt_h_ > 0u) ? quad_top_rt_h_ : std::max(cfg_.height / 2u, 16u);
+    o.quad_right_width = (quad_right_active_w_ > 0u) ? quad_right_active_w_ : std::max(cfg_.width / 2u, 16u);
+    o.quad_right_height = (quad_right_active_h_ > 0u) ? quad_right_active_h_ : std::max(cfg_.height / 2u, 16u);
+    o.quad_right_rt_width = (quad_right_rt_w_ > 0u) ? quad_right_rt_w_ : std::max(cfg_.width / 2u, 16u);
+    o.quad_right_rt_height = (quad_right_rt_h_ > 0u) ? quad_right_rt_h_ : std::max(cfg_.height / 2u, 16u);
+    o.stage_broadcast_pip_width = stage_pip_w_;
+    o.stage_broadcast_pip_height = stage_pip_h_;
     o.output_width = effective_output_width();
     o.output_height = effective_output_height();
     return o;

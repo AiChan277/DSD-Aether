@@ -45,6 +45,15 @@ class LightingStagePanels {
     [[nodiscard]] const std::vector<renderer::StudioRigPresetRecord>& rig_presets() const noexcept {
         return saved_rigs_;
     }
+    [[nodiscard]] float last_stage_draw_w() const noexcept { return last_stage_draw_w_; }
+    [[nodiscard]] float last_stage_draw_h() const noexcept { return last_stage_draw_h_; }
+    [[nodiscard]] const renderer::PreviewCamera& stage_camera() const noexcept { return stage_camera_; }
+    [[nodiscard]] const renderer::PreviewCamera& quad_top_camera() const noexcept { return quad_top_camera_; }
+    [[nodiscard]] const renderer::PreviewCamera& quad_right_camera() const noexcept { return quad_right_camera_; }
+    [[nodiscard]] std::array<float, 4> last_pip_inner_rect() const noexcept { return last_pip_inner_rect_; }
+    [[nodiscard]] std::array<float, 4> last_quad_rect(int idx) const noexcept {
+        return (idx >= 0 && idx < 4) ? last_quad_rects_[static_cast<size_t>(idx)] : std::array<float, 4>{};
+    }
 
     void draw_outliner(const DevShellAvatarView& avatar, const UiFontSet& fonts, UiSelection& selection,
                        StudioActions& actions) noexcept;
@@ -97,6 +106,16 @@ class LightingStagePanels {
     bool gizmo_dragging_{false};
     int gizmo_active_axis_{-1};
     bool fast_panning_{false};
+    uint32_t desired_stage_w_{960};
+    uint32_t desired_stage_h_{640};
+    uint32_t desired_quad_top_w_{480};
+    uint32_t desired_quad_top_h_{320};
+    uint32_t desired_quad_right_w_{480};
+    uint32_t desired_quad_right_h_{320};
+    float last_stage_draw_w_{960.0f};
+    float last_stage_draw_h_{640.0f};
+    std::array<float, 4> last_pip_inner_rect_{};
+    std::array<std::array<float, 4>, 4> last_quad_rects_{};
 };
 
 } // namespace aether::ui

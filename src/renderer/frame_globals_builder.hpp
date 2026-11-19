@@ -207,6 +207,58 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     return normalize3({l.direction_or_pos[0], l.direction_or_pos[1], l.direction_or_pos[2]});
 }
 
+struct StageRenderRegion {
+    uint32_t target_w{1};
+    uint32_t target_h{1};
+    uint32_t scene_w{1};
+    uint32_t scene_h{1};
+    float proj_aspect{16.0f / 9.0f};
+    float uv_scale_x{1.0f};
+    float uv_scale_y{1.0f};
+    float uv_max_u{1.0f};
+    float uv_max_v{1.0f};
+    float half_uv_scale_x{1.0f};
+    float half_uv_scale_y{1.0f};
+    float half_uv_max_u{1.0f};
+    float half_uv_max_v{1.0f};
+};
+
+[[nodiscard]] inline StageRenderRegion compute_stage_render_region(const FrameRenderRequest& req, uint32_t buf_w,
+                                                                   uint32_t buf_h, uint32_t dst_rt_w,
+                                                                   uint32_t dst_rt_h) noexcept {
+    const uint32_t safe_bw = std::max(1u, buf_w);
+    const uint32_t safe_bh = std::max(1u, buf_h);
+    const uint32_t safe_rtw = std::max(1u, dst_rt_w);
+    const uint32_t safe_rth = std::max(1u, dst_rt_h);
+    const uint32_t tw = (req.stage_viewport_w >= 16u) ? std::min(req.stage_viewport_w, safe_rtw) : safe_rtw;
+    const uint32_t th = (req.stage_viewport_h >= 16u) ? std::min(req.stage_viewport_h, safe_rth) : safe_rth;
+    const float proj_aspect = static_cast<float>(tw) / static_cast<float>(th);
+
+    uint32_t sw = tw;
+    uint32_t sh = th;
+    if (sw > safe_bw || sh > safe_bh) {
+        const float s = std::min(static_cast<float>(safe_bw) / static_cast<float>(tw),
+                                 static_cast<float>(safe_bh) / static_cast<float>(th));
+        sw = std::clamp(static_cast<uint32_t>(std::lround(static_cast<float>(tw) * s)), 16u, safe_bw);
+        sh = std::clamp(static_cast<uint32_t>(std::lround(static_cast<float>(th) * s)), 16u, safe_bh);
+    }
+    const float sx = static_cast<float>(sw) / static_cast<float>(safe_bw);
+    const float sy = static_cast<float>(sh) / static_cast<float>(safe_bh);
+    const float max_u = std::max(0.0f, (static_cast<float>(sw) - 0.5f) / static_cast<float>(safe_bw));
+    const float max_v = std::max(0.0f, (static_cast<float>(sh) - 0.5f) / static_cast<float>(safe_bh));
+
+    const uint32_t phys_hw = std::max(safe_bw / 2u, 1u);
+    const uint32_t phys_hh = std::max(safe_bh / 2u, 1u);
+    const uint32_t act_hw = std::min(phys_hw, std::max(sw / 2u, 1u));
+    const uint32_t act_hh = std::min(phys_hh, std::max(sh / 2u, 1u));
+    const float hsx = static_cast<float>(act_hw) / static_cast<float>(phys_hw);
+    const float hsy = static_cast<float>(act_hh) / static_cast<float>(phys_hh);
+    const float h_max_u = std::max(0.0f, (static_cast<float>(act_hw) - 0.5f) / static_cast<float>(phys_hw));
+    const float h_max_v = std::max(0.0f, (static_cast<float>(act_hh) - 0.5f) / static_cast<float>(phys_hh));
+
+    return {tw, th, sw, sh, proj_aspect, sx, sy, max_u, max_v, hsx, hsy, h_max_u, h_max_v};
+}
+
 /**
  * Shared Vulkan / DirectX 12 `GpuFrameGlobals` assembly guaranteeing identical projection,
  * lighting rig, Live2D flattening pivot, and Tasks 3-6 shader parameters (`anti-flip contract`).
@@ -214,14 +266,23 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
 [[nodiscard]] inline uint8_t populate_shared_frame_globals(const FrameRenderRequest& req, uint32_t w, uint32_t h,
                                                            bool has_avatar, bool rt_hardware_ready,
                                                            bool have_prev_view_proj, const GpuMat4& prev_view_proj,
-                                                           GpuFrameGlobals& fg, GpuMat4& out_next_prev_vp) noexcept {
+                                                           GpuFrameGlobals& fg, GpuMat4& out_next_prev_vp,
+                                                           float aspect_override = 0.0f,
+                                                           const std::array<float, 4>* target_uv_scale = nullptr,
+                                                           const std::array<float, 4>* target_half_uv_scale = nullptr) noexcept {
     const LightingRig& rig = *req.rig;
     fg = {};
+    const float proj_aspect = (aspect_override > 0.05f) ? aspect_override
+                                                        : (static_cast<float>(w) / static_cast<float>(std::max(1u, h)));
     Mat4Vec3 eye{};
-    build_camera_matrices(req.camera, static_cast<float>(w) / static_cast<float>(h), fg.view, fg.inv_view, fg.proj,
-                          fg.inv_proj, fg.view_proj, eye);
+    build_camera_matrices(req.camera, proj_aspect, fg.view, fg.inv_view, fg.proj, fg.inv_proj, fg.view_proj, eye);
     fg.prev_view_proj = have_prev_view_proj ? prev_view_proj : fg.view_proj;
     out_next_prev_vp = fg.view_proj;
+    for (int i = 0; i < 4; ++i) {
+        fg.target_uv_scale[i] = (target_uv_scale != nullptr) ? (*target_uv_scale)[static_cast<size_t>(i)] : 1.0f;
+        fg.target_half_uv_scale[i] =
+            (target_half_uv_scale != nullptr) ? (*target_half_uv_scale)[static_cast<size_t>(i)] : 1.0f;
+    }
 
     const float av_scale = std::clamp(req.avatar_scale, 0.25f, 4.0f);
     const float av_yaw_rad = req.avatar_rot_y_deg * kDegToRad;

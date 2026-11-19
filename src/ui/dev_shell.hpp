@@ -80,8 +80,21 @@ struct DevShellAvatarView {
     VkDescriptorSet stage_viewport_texture{VK_NULL_HANDLE};
     VkDescriptorSet quad_top_texture{VK_NULL_HANDLE};
     VkDescriptorSet quad_right_texture{VK_NULL_HANDLE};
+    VkDescriptorSet stage_broadcast_pip_texture{VK_NULL_HANDLE};
     uint32_t stage_viewport_w{0};
     uint32_t stage_viewport_h{0};
+    uint32_t stage_viewport_rt_w{0};
+    uint32_t stage_viewport_rt_h{0};
+    uint32_t quad_top_w{0};
+    uint32_t quad_top_h{0};
+    uint32_t quad_top_rt_w{0};
+    uint32_t quad_top_rt_h{0};
+    uint32_t quad_right_w{0};
+    uint32_t quad_right_h{0};
+    uint32_t quad_right_rt_w{0};
+    uint32_t quad_right_rt_h{0};
+    uint32_t stage_broadcast_pip_w{0};
+    uint32_t stage_broadcast_pip_h{0};
 };
 
 struct DevShellTrackingView {
@@ -400,6 +413,12 @@ struct DevShellViewportActions {
 
     // Phase 2 Lighting Tab & Dual-Viewport Stage synchronization
     bool request_stage_render{false};
+    uint32_t desired_stage_w{960};
+    uint32_t desired_stage_h{640};
+    uint32_t desired_quad_top_w{480};
+    uint32_t desired_quad_top_h{320};
+    uint32_t desired_quad_right_w{480};
+    uint32_t desired_quad_right_h{320};
     renderer::PreviewCamera stage_camera{};
     renderer::StageDiagnosticMode stage_diag_mode{renderer::StageDiagnosticMode::Lit};
     bool stage_show_schematic{true};

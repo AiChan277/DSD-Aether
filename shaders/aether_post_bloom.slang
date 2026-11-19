@@ -13,12 +13,24 @@ void cs_bloom_down(uint3 tid : SV_DispatchThreadID) {
 
     float2 uv = (float2(tid.xy) + 0.5) / float2(float(w), float(h));
     float2 hp = float2(g_Pc.fparam1, g_Pc.fparam2);
+    float2 src_uv_max = float2(1.0, 1.0);
+    if (g_Pc.vertex_buf_bda != 0ul) {
+        uint phys_sw = uint(g_Pc.vertex_buf_bda & 0xFFFFul);
+        uint phys_sh = uint((g_Pc.vertex_buf_bda >> 16ul) & 0xFFFFul);
+        uint act_sw = uint((g_Pc.vertex_buf_bda >> 32ul) & 0xFFFFul);
+        uint act_sh = uint((g_Pc.vertex_buf_bda >> 48ul) & 0xFFFFul);
+        float2 ps = max(float2(float(phys_sw), float(phys_sh)), float2(1.0, 1.0));
+        float2 asc = float2(float(act_sw), float(act_sh));
+        uv *= (asc / ps);
+        src_uv_max = max((asc - 0.5) / ps, float2(0.0, 0.0));
+        uv = clamp(uv, float2(0.0, 0.0), src_uv_max);
+    }
 
     float4 s = aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv, 0) * 4.0;
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(-hp.x, -hp.y), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(hp.x, -hp.y), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(-hp.x, hp.y), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(hp.x, hp.y), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(-hp.x, -hp.y), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(hp.x, -hp.y), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(-hp.x, hp.y), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(hp.x, hp.y), float2(0.0, 0.0), src_uv_max), 0);
     s *= (1.0 / 8.0);
 
     if (g_Pc.fparam0 > 0.0) {
@@ -45,16 +57,28 @@ void cs_bloom_up(uint3 tid : SV_DispatchThreadID) {
 
     float2 uv = (float2(tid.xy) + 0.5) / float2(float(w), float(h));
     float2 hp = float2(g_Pc.fparam1, g_Pc.fparam2);
+    float2 src_uv_max = float2(1.0, 1.0);
+    if (g_Pc.vertex_buf_bda != 0ul) {
+        uint phys_sw = uint(g_Pc.vertex_buf_bda & 0xFFFFul);
+        uint phys_sh = uint((g_Pc.vertex_buf_bda >> 16ul) & 0xFFFFul);
+        uint act_sw = uint((g_Pc.vertex_buf_bda >> 32ul) & 0xFFFFul);
+        uint act_sh = uint((g_Pc.vertex_buf_bda >> 48ul) & 0xFFFFul);
+        float2 ps = max(float2(float(phys_sw), float(phys_sh)), float2(1.0, 1.0));
+        float2 asc = float2(float(act_sw), float(act_sh));
+        uv *= (asc / ps);
+        src_uv_max = max((asc - 0.5) / ps, float2(0.0, 0.0));
+        uv = clamp(uv, float2(0.0, 0.0), src_uv_max);
+    }
 
     float4 s = float4(0.0, 0.0, 0.0, 0.0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(-hp.x * 2.0, 0.0), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(hp.x * 2.0, 0.0), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(0.0, -hp.y * 2.0), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(0.0, hp.y * 2.0), 0);
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(-hp.x, -hp.y), 0) * 2.0;
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(hp.x, -hp.y), 0) * 2.0;
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(-hp.x, hp.y), 0) * 2.0;
-    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, uv + float2(hp.x, hp.y), 0) * 2.0;
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(-hp.x * 2.0, 0.0), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(hp.x * 2.0, 0.0), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(0.0, -hp.y * 2.0), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(0.0, hp.y * 2.0), float2(0.0, 0.0), src_uv_max), 0);
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(-hp.x, -hp.y), float2(0.0, 0.0), src_uv_max), 0) * 2.0;
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(hp.x, -hp.y), float2(0.0, 0.0), src_uv_max), 0) * 2.0;
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(-hp.x, hp.y), float2(0.0, 0.0), src_uv_max), 0) * 2.0;
+    s += aether_sample_level(g_Pc.param0, kSamplerLinearClamp, clamp(uv + float2(hp.x, hp.y), float2(0.0, 0.0), src_uv_max), 0) * 2.0;
     s *= (1.0 / 12.0);
 
     aether_store(g_Pc.param1, tid.xy, max(s, float4(0.0, 0.0, 0.0, 0.0)));
@@ -85,7 +109,8 @@ float3 visualize_debug_mode(GpuFrameGlobals fg, uint mode, int2 p, float2 uv) {
         return float3(hair, max(base, cut * 0.55), cut);
     }
     if (mode == 7u) {
-        return aether_sample_level(fg.gbuffer_ids[1].x, kSamplerLinearClamp, uv, 0).xxx;
+        float2 suv = clamp(uv * fg.target_uv_scale.xy, float2(0.0, 0.0), fg.target_uv_scale.zw);
+        return aether_sample_level(fg.gbuffer_ids[1].x, kSamplerLinearClamp, suv, 0).xxx;
     }
     if (mode == 8u) {
         return aether_load(fg.gbuffer_extra_ids[0].z, p).xxx;
@@ -94,7 +119,8 @@ float3 visualize_debug_mode(GpuFrameGlobals fg, uint mode, int2 p, float2 uv) {
         return aether_load(fg.gbuffer_extra_ids[0].w, p).xxx;
     }
     if (mode == 10u) {
-        return aether_sample_level(fg.gbuffer_extra_ids[1].x, kSamplerLinearClamp, uv, 0).rgb;
+        float2 huv = clamp(uv * fg.target_half_uv_scale.xy, float2(0.0, 0.0), fg.target_half_uv_scale.zw);
+        return aether_sample_level(fg.gbuffer_extra_ids[1].x, kSamplerLinearClamp, huv, 0).rgb;
     }
     if (mode == 11u) {
         float cr = aether_load(fg.gbuffer_ids[1].y, p).x;
@@ -255,9 +281,10 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
     // Satsuei 1: Masked Bloom (attenuated over sharp ink/cel borders so crisp line art stays clean)
     float3 glow = float3(0.0, 0.0, 0.0);
     float3 raw_bloom_uv = float3(0.0, 0.0, 0.0);
+    float2 bloom_uv = clamp(uv * fg.target_half_uv_scale.xy, float2(0.0, 0.0), fg.target_half_uv_scale.zw);
     uint bloom_slot = fg.gbuffer_ids[1].z;
     if (bloom_slot != 0xFFFFFFFFu) {
-        raw_bloom_uv = aether_sample_level(bloom_slot, kSamplerLinearClamp, uv, 0).rgb;
+        raw_bloom_uv = aether_sample_level(bloom_slot, kSamplerLinearClamp, bloom_uv, 0).rgb;
         if (fg.post_params.y > 0.0001) {
             float ink_protect = 1.0 - saturate(raw_crease * 0.85);
             glow = raw_bloom_uv * (fg.post_params.y * ink_protect);
@@ -276,9 +303,11 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
     float hala_str = max(fg.satsuei_params.y, 0.0);
     float hala_thresh = max(fg.satsuei_params.z, 0.65);
     if (hala_str > 0.001 && bloom_slot != 0xFFFFFFFFu) {
-        float2 uv_off = (uv - 0.5) * 0.0045;
-        float3 b_r = aether_sample_level(bloom_slot, kSamplerLinearClamp, clamp(uv + uv_off, 0.0, 1.0), 0).rgb;
-        float3 b_b = aether_sample_level(bloom_slot, kSamplerLinearClamp, clamp(uv - uv_off, 0.0, 1.0), 0).rgb;
+        float2 uv_off = (uv - 0.5) * 0.0045 * fg.target_half_uv_scale.xy;
+        float3 b_r = aether_sample_level(bloom_slot, kSamplerLinearClamp,
+                                         clamp(bloom_uv + uv_off, float2(0.0, 0.0), fg.target_half_uv_scale.zw), 0).rgb;
+        float3 b_b = aether_sample_level(bloom_slot, kSamplerLinearClamp,
+                                         clamp(bloom_uv - uv_off, float2(0.0, 0.0), fg.target_half_uv_scale.zw), 0).rgb;
         float hala_gate = smoothstep(hala_thresh, hala_thresh + 0.5, luminance(hdr.rgb));
         glow += float3(b_r.r * 1.15, 0.45 * raw_bloom_uv.g, b_b.b * 0.35) * (hala_str * (0.25 + 0.75 * hala_gate));
     }

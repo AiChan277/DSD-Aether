@@ -1,5 +1,6 @@
 #include "ui/panels/lighting/lighting_stage_panels.hpp"
 
+#include "core/viewport_aspect.hpp"
 #include "renderer/frame_graph.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
@@ -18,6 +19,17 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
+
+[[nodiscard]] float point_to_segment_dist(ImVec2 p, ImVec2 a, ImVec2 b) noexcept {
+    const float abx = b.x - a.x;
+    const float aby = b.y - a.y;
+    const float len_sq = abx * abx + aby * aby;
+    if (len_sq <= 1e-4f) {
+        return std::hypot(p.x - a.x, p.y - a.y);
+    }
+    const float t = std::clamp(((p.x - a.x) * abx + (p.y - a.y) * aby) / len_sq, 0.0f, 1.0f);
+    return std::hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby));
+}
 
 std::array<float, 3> compute_pivot_ws(const DevShellAvatarView& avatar) noexcept {
     if (avatar.has_avatar && avatar.bone_head_y > 0.25f) {
@@ -42,7 +54,7 @@ ImVec2 project_world_to_canvas(const std::array<float, 16>& vp, const std::array
     return ImVec2(c0.x + (nx * 0.5f + 0.5f) * csz.x, c0.y + (0.5f - ny * 0.5f) * csz.y);
 }
 
-void draw_camera_pan_orbit_zoom(renderer::PreviewCamera& cam, bool hovered, bool active, bool allow_orbit,
+void draw_camera_pan_orbit_zoom(renderer::PreviewCamera& cam, float draw_h, bool hovered, bool active, bool allow_orbit,
                                 bool& out_dragging) noexcept {
     out_dragging = false;
     if (!hovered && !active) {
@@ -85,7 +97,12 @@ void draw_camera_pan_orbit_zoom(renderer::PreviewCamera& cam, bool hovered, bool
         const float uoy = rz * fx - rx * fz;
         const float uoz = rx * fy - ry * fx;
 
-        const float scale_m = cam.is_orthographic ? (cam.ortho_height * 0.0018f) : (cam.distance * 0.0018f);
+        const float safe_h = std::max(draw_h, 1.0f);
+        const float scale_m =
+            cam.is_orthographic
+                ? (std::max(0.05f, cam.ortho_height) / safe_h)
+                : ((2.0f * std::max(0.25f, cam.distance) * std::tan(std::clamp(cam.fovy_rad, 0.1f, 2.5f) * 0.5f)) /
+                   safe_h);
         cam.target_x += (-io.MouseDelta.x * rx + io.MouseDelta.y * uox) * scale_m;
         cam.target_y += (-io.MouseDelta.x * ry + io.MouseDelta.y * uoy) * scale_m;
         cam.target_z += (-io.MouseDelta.x * rz + io.MouseDelta.y * uoz) * scale_m;
@@ -273,6 +290,12 @@ void LightingStagePanels::export_stage_actions(const DevShellAvatarView& avatar,
     }
 
     vp_actions.request_stage_render = true;
+    vp_actions.desired_stage_w = desired_stage_w_;
+    vp_actions.desired_stage_h = desired_stage_h_;
+    vp_actions.desired_quad_top_w = desired_quad_top_w_;
+    vp_actions.desired_quad_top_h = desired_quad_top_h_;
+    vp_actions.desired_quad_right_w = desired_quad_right_w_;
+    vp_actions.desired_quad_right_h = desired_quad_right_h_;
     vp_actions.stage_camera = stage_camera_;
     vp_actions.stage_diag_mode = diag_mode_;
     vp_actions.stage_show_schematic = show_schematic_;
@@ -420,9 +443,22 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         return;
     }
 
-    // 1. Floating Top Stage Control Bar
+    // 1. Floating Top Stage Control Bar (wraps cleanly when window/panel is squeezed narrow)
     {
+        const float bar_max_x = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+        const float pad_x = 3.0f * scale;
+        bool need_same_line = false;
+        auto place_item = [&](float est_w, float extra_gap = 0.0f) {
+            if (need_same_line) {
+                ImGui::SameLine(0.0f, pad_x + extra_gap);
+                if (ImGui::GetCursorScreenPos().x + est_w > bar_max_x) {
+                    ImGui::NewLine();
+                }
+            }
+            need_same_line = true;
+        };
         auto view_btn = [&](renderer::StageCameraView v, const char* lbl) {
+            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale);
             const bool active = !quad_view_ && (stage_view_ == v);
             if (active) {
                 ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
@@ -437,7 +473,6 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             if (active) {
                 ImGui::PopStyleColor();
             }
-            ImGui::SameLine(0.0f, 3.0f * scale);
         };
         view_btn(renderer::StageCameraView::FreePerspective, "Persp");
         view_btn(renderer::StageCameraView::OrthoFront, "Front");
@@ -447,6 +482,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         view_btn(renderer::StageCameraView::OrthoTop, "Top");
         view_btn(renderer::StageCameraView::OrthoBottom, "Bot");
 
+        place_item(ImGui::CalcTextSize("Quad").x + 14.0f * scale);
         if (quad_view_) {
             ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
         }
@@ -459,9 +495,9 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Quad View (Ctrl+Alt+Q): Top / Right / Stage / Clean Broadcast Monitor");
         }
-        ImGui::SameLine(0.0f, 8.0f * scale);
 
-        auto diag_btn = [&](renderer::StageDiagnosticMode dm, const char* lbl) {
+        auto diag_btn = [&](renderer::StageDiagnosticMode dm, const char* lbl, float gap) {
+            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
             const bool active = (diag_mode_ == dm);
             if (active) {
                 ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
@@ -472,14 +508,13 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             if (active) {
                 ImGui::PopStyleColor();
             }
-            ImGui::SameLine(0.0f, 3.0f * scale);
         };
-        diag_btn(renderer::StageDiagnosticMode::Lit, "Lit");
-        diag_btn(renderer::StageDiagnosticMode::Clay, "Clay 18%");
-        diag_btn(renderer::StageDiagnosticMode::FalseColor, "EL-Zone");
+        diag_btn(renderer::StageDiagnosticMode::Lit, "Lit", 5.0f * scale);
+        diag_btn(renderer::StageDiagnosticMode::Clay, "Clay 18%", 0.0f);
+        diag_btn(renderer::StageDiagnosticMode::FalseColor, "EL-Zone", 0.0f);
 
-        ImGui::SameLine(0.0f, 8.0f * scale);
-        auto tgl = [&](bool& b, const char* lbl) {
+        auto tgl = [&](bool& b, const char* lbl, float gap) {
+            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
             if (b) {
                 ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
             }
@@ -489,11 +524,11 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             if (b) {
                 ImGui::PopStyleColor();
             }
-            ImGui::SameLine(0.0f, 3.0f * scale);
         };
-        tgl(show_schematic_, "Schem");
-        tgl(show_grid_, "Grid");
-        tgl(preview_25d_flatten_, "2.5D Flat");
+        tgl(show_schematic_, "Schem", 5.0f * scale);
+        tgl(show_grid_, "Grid", 0.0f);
+        tgl(preview_25d_flatten_, "2.5D Flat", 0.0f);
+        place_item(ImGui::CalcTextSize("Pilot").x + 14.0f * scale);
         if (pilot_light_) {
             ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
         }
@@ -503,7 +538,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         if (pilot_light_) {
             ImGui::PopStyleColor();
         }
-        ImGui::SameLine(0.0f, 3.0f * scale);
+        place_item(ImGui::CalcTextSize("Aim Head").x + 14.0f * scale);
         if (ImGui::SmallButton("Aim Head") && selected_light_idx_ >= 0 &&
             static_cast<uint32_t>(selected_light_idx_) < rig.studio_light_count) {
             auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
@@ -511,12 +546,10 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             sl.aim_lock = true;
             sync_key_fill_rim_mirror(rig, actions.viewport);
         }
-        ImGui::SameLine(0.0f, 3.0f * scale);
-        tgl(pip_monitor_open_, "PiP Cam");
+        tgl(pip_monitor_open_, "PiP Cam", 0.0f);
 
-        // Gizmo Q/W/E/R pills
-        ImGui::SameLine(0.0f, 8.0f * scale);
-        auto giz_btn = [&](GizmoTool gt, const char* lbl) {
+        auto giz_btn = [&](GizmoTool gt, const char* lbl, float gap) {
+            place_item(ImGui::CalcTextSize(lbl).x + 14.0f * scale, gap);
             const bool active = (gizmo_tool_ == gt);
             if (active) {
                 ImGui::PushStyleColor(ImGuiCol_Button, t.bg_selected);
@@ -527,24 +560,84 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             if (active) {
                 ImGui::PopStyleColor();
             }
-            ImGui::SameLine(0.0f, 2.0f * scale);
         };
-        giz_btn(GizmoTool::Select, "Q");
-        giz_btn(GizmoTool::Move, "W");
-        giz_btn(GizmoTool::Rotate, "E");
-        giz_btn(GizmoTool::Scale, "R");
-        ImGui::NewLine();
+        giz_btn(GizmoTool::Select, "Q", 5.0f * scale);
+        giz_btn(GizmoTool::Move, "W", 0.0f);
+        giz_btn(GizmoTool::Rotate, "E", 0.0f);
+        giz_btn(GizmoTool::Scale, "R", 0.0f);
     }
 
     const ImVec2 canvas_p0 = ImGui::GetCursorScreenPos();
-    const ImVec2 canvas_sz = ImGui::GetContentRegionAvail();
-    if (canvas_sz.x < 32.0f || canvas_sz.y < 32.0f) {
+    const ImVec2 raw_avail = ImGui::GetContentRegionAvail();
+    if (raw_avail.x < 32.0f || raw_avail.y < 32.0f) {
         return;
     }
+    const ImVec2 canvas_sz(std::floor(raw_avail.x), std::floor(raw_avail.y));
     const ImVec2 canvas_p1(canvas_p0.x + canvas_sz.x, canvas_p0.y + canvas_sz.y);
+    last_stage_draw_w_ = canvas_sz.x;
+    last_stage_draw_h_ = canvas_sz.y;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(canvas_p0, canvas_p1, true);
     dl->AddRectFilled(canvas_p0, canvas_p1, t.col32_bg_canvas);
+
+    auto draw_stage_tex = [&](VkDescriptorSet tex, ImVec2 p0, ImVec2 sz, uint32_t ren_w, uint32_t ren_h, uint32_t rt_w,
+                              uint32_t rt_h) {
+        if (tex == VK_NULL_HANDLE) {
+            return;
+        }
+        const uint32_t eff_rt_w = (rt_w > 0u) ? rt_w : ren_w;
+        const uint32_t eff_rt_h = (rt_h > 0u) ? rt_h : ren_h;
+        if (eff_rt_w == 0u || eff_rt_h == 0u || ren_w == 0u || ren_h == 0u) {
+            dl->AddImage(reinterpret_cast<ImTextureID>(tex), p0, ImVec2(p0.x + sz.x, p0.y + sz.y));
+            return;
+        }
+        const ImVec2 uv1(std::min(1.0f, static_cast<float>(ren_w) / static_cast<float>(eff_rt_w)),
+                         std::min(1.0f, static_cast<float>(ren_h) / static_cast<float>(eff_rt_h)));
+        const float rw = static_cast<float>(ren_w);
+        const float rh = static_cast<float>(ren_h);
+        if (std::fabs(rw - sz.x) <= 1.5f && std::fabs(rh - sz.y) <= 1.5f) {
+            dl->AddImage(reinterpret_cast<ImTextureID>(tex), p0, ImVec2(p0.x + sz.x, p0.y + sz.y), ImVec2(0.0f, 0.0f),
+                         uv1);
+        } else {
+            // 1-frame transient drag guard: preserve 1:1 texel aspect centered without temporary stretch
+            const ImVec2 cp1(p0.x + sz.x, p0.y + sz.y);
+            dl->PushClipRect(p0, cp1, true);
+            const ImVec2 ip0(p0.x + (sz.x - rw) * 0.5f, p0.y + (sz.y - rh) * 0.5f);
+            dl->AddImage(reinterpret_cast<ImTextureID>(tex), ip0, ImVec2(ip0.x + rw, ip0.y + rh), ImVec2(0.0f, 0.0f),
+                         uv1);
+            dl->PopClipRect();
+        }
+    };
+
+    auto draw_broadcast_pip_box = [&](ImVec2 box_p0, ImVec2 box_sz) {
+        const ImVec2 box_p1(box_p0.x + box_sz.x, box_p0.y + box_sz.y);
+        dl->AddRectFilled(box_p0, box_p1, t.col32_vp_aspect_matte);
+        const float bcast_aspect =
+            (avatar.broadcast_height > 0u)
+                ? (static_cast<float>(avatar.broadcast_width) / static_cast<float>(avatar.broadcast_height))
+                : (16.0f / 9.0f);
+        const core::ContainedRect cr = core::compute_contained_aspect_rect(box_sz.x, box_sz.y, bcast_aspect);
+        const ImVec2 ip0(box_p0.x + cr.x0, box_p0.y + cr.y0);
+        const ImVec2 ip1(box_p0.x + cr.x1, box_p0.y + cr.y1);
+        last_pip_inner_rect_ = {ip0.x, ip0.y, ip1.x, ip1.y};
+        const VkDescriptorSet pip_tex = (avatar.stage_broadcast_pip_texture != VK_NULL_HANDLE)
+                                            ? avatar.stage_broadcast_pip_texture
+                                            : avatar.viewport_texture;
+        if (pip_tex != VK_NULL_HANDLE) {
+            if (avatar.stage_broadcast_pip_texture == VK_NULL_HANDLE && avatar.viewport_w > 0u &&
+                avatar.viewport_h > 0u) {
+                const auto src_lay = core::compute_viewport_aspect_layout(
+                    cr.width(), cr.height(), static_cast<float>(avatar.viewport_w),
+                    static_cast<float>(avatar.viewport_h), core::ViewportAspectMode::FitAuto);
+                const float su0 = 0.5f - src_lay.uv_du * 0.5f;
+                const float sv0 = 0.5f - src_lay.uv_dv * 0.5f;
+                dl->AddImage(reinterpret_cast<ImTextureID>(pip_tex), ip0, ip1, ImVec2(su0, sv0),
+                             ImVec2(su0 + src_lay.uv_du, sv0 + src_lay.uv_dv));
+            } else {
+                dl->AddImage(reinterpret_cast<ImTextureID>(pip_tex), ip0, ip1);
+            }
+        }
+    };
 
     auto draw_stage_interaction = [&](ImVec2 p0, ImVec2 sz, const char* btn_id, renderer::PreviewCamera& cam,
                                       bool allow_gizmo_pick) {
@@ -558,7 +651,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         const bool act = ImGui::IsItemActive();
 
         bool cam_moving = false;
-        draw_camera_pan_orbit_zoom(cam, hov, act, !cam.is_orthographic, cam_moving);
+        draw_camera_pan_orbit_zoom(cam, sz.y, hov, act, !cam.is_orthographic, cam_moving);
         if (cam_moving) {
             fast_panning_ = true;
         }
@@ -576,6 +669,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             bool ok_c = false;
             const ImVec2 c_scr = project_world_to_canvas(vp, pose.position_ws, p0, sz, ok_c);
             if (ok_c) {
+                dl->PushClipRect(p0, p1, true);
                 const std::array<std::array<float, 3>, 3> axes{{
                     {1.0f, 0.0f, 0.0f},
                     {0.0f, 1.0f, 0.0f},
@@ -602,6 +696,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                     }
                 }
                 dl->AddCircleFilled(c_scr, 4.5f * scale, t.col32_stage_amber);
+                dl->PopClipRect();
 
                 const ImGuiIO& io = ImGui::GetIO();
                 if (hov && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt && !io.KeyShift) {
@@ -612,7 +707,9 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                         if (!tip_ok[a]) {
                             continue;
                         }
-                        const float d = std::hypot(mp.x - tips[a].x, mp.y - tips[a].y);
+                        const float d_tip = std::hypot(mp.x - tips[a].x, mp.y - tips[a].y);
+                        const float d_seg = point_to_segment_dist(mp, c_scr, tips[a]);
+                        const float d = std::min(d_tip, d_seg + 2.0f * scale);
                         if (d < best_d) {
                             best_d = d;
                             gizmo_active_axis_ = a;
@@ -624,19 +721,26 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                     }
                 }
                 if (gizmo_dragging_ && ImGui::IsMouseDown(ImGuiMouseButton_Left) && gizmo_active_axis_ >= 0) {
-                    const float drag_scale =
-                        cam.is_orthographic ? (cam.ortho_height / std::max(sz.y, 1.0f)) : (pose.distance_m * 0.0028f);
                     if (gizmo_tool_ == GizmoTool::Move && tip_ok[gizmo_active_axis_]) {
                         const float adx = tips[gizmo_active_axis_].x - c_scr.x;
                         const float ady = tips[gizmo_active_axis_].y - c_scr.y;
-                        const float alen = std::hypot(adx, ady);
-                        const float proj_px =
-                            (alen > 4.0f) ? ((io.MouseDelta.x * adx + io.MouseDelta.y * ady) / alen) : io.MouseDelta.x;
-                        sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] += proj_px * drag_scale;
+                        const float alen_sq = adx * adx + ady * ady;
+                        if (alen_sq > 16.0f) {
+                            // Projective 1:1 tracking: screen axis displacement == axis_len meters
+                            const float t_axis = (io.MouseDelta.x * adx + io.MouseDelta.y * ady) / alen_sq;
+                            sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] +=
+                                std::clamp(t_axis * axis_len, -0.5f, 0.5f);
+                        } else {
+                            const float fallback_m = cam.is_orthographic
+                                                         ? (cam.ortho_height / std::max(sz.y, 1.0f))
+                                                         : (pose.distance_m * 0.0028f);
+                            sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] += io.MouseDelta.x * fallback_m;
+                        }
                         sync_key_fill_rim_mirror(rig, actions.viewport);
                     } else if (gizmo_tool_ == GizmoTool::Rotate) {
                         sl.orbit_azimuth_deg += io.MouseDelta.x * 0.45f;
-                        sl.orbit_elevation_deg = std::clamp(sl.orbit_elevation_deg - io.MouseDelta.y * 0.35f, -85.0f, 85.0f);
+                        sl.orbit_elevation_deg =
+                            std::clamp(sl.orbit_elevation_deg - io.MouseDelta.y * 0.35f, -85.0f, 85.0f);
                         sl.use_orbit_angles = true;
                         sync_key_fill_rim_mirror(rig, actions.viewport);
                     } else if (gizmo_tool_ == GizmoTool::Scale) {
@@ -674,62 +778,90 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
     };
 
     if (quad_view_) {
-        const float half_w = std::floor(canvas_sz.x * 0.5f);
-        const float half_h = std::floor(canvas_sz.y * 0.5f);
-        const ImVec2 cell_sz(half_w - 2.0f, half_h - 2.0f);
+        const float split_x = std::floor(canvas_sz.x * 0.5f);
+        const float split_y = std::floor(canvas_sz.y * 0.5f);
+        const float left_w = std::max(32.0f, split_x - 2.0f);
+        const float right_w = std::max(32.0f, canvas_sz.x - split_x - 2.0f);
+        const float top_h = std::max(32.0f, split_y - 2.0f);
+        const float bot_h = std::max(32.0f, canvas_sz.y - split_y - 2.0f);
+
+        desired_quad_top_w_ = static_cast<uint32_t>(left_w);
+        desired_quad_top_h_ = static_cast<uint32_t>(top_h);
+        desired_quad_right_w_ = static_cast<uint32_t>(right_w);
+        desired_quad_right_h_ = static_cast<uint32_t>(top_h);
+        desired_stage_w_ = static_cast<uint32_t>(left_w);
+        desired_stage_h_ = static_cast<uint32_t>(bot_h);
+
         struct QuadCell {
             ImVec2 p0;
+            ImVec2 sz;
             VkDescriptorSet tex;
+            uint32_t ren_w;
+            uint32_t ren_h;
+            uint32_t rt_w;
+            uint32_t rt_h;
             const char* tag;
             const char* btn_id;
             renderer::PreviewCamera* cam;
             bool allow_pick;
         };
         const QuadCell cells[4]{
-            {canvas_p0, avatar.quad_top_texture, "TOP ORTHO (LIGHTING PLOT)", "##QTop", &quad_top_camera_, false},
-            {ImVec2(canvas_p0.x + half_w + 2.0f, canvas_p0.y), avatar.quad_right_texture,
+            {canvas_p0, ImVec2(left_w, top_h), avatar.quad_top_texture, avatar.quad_top_w, avatar.quad_top_h,
+             avatar.quad_top_rt_w, avatar.quad_top_rt_h, "TOP ORTHO (LIGHTING PLOT)", "##QTop", &quad_top_camera_,
+             false},
+            {ImVec2(canvas_p0.x + split_x + 2.0f, canvas_p0.y), ImVec2(right_w, top_h), avatar.quad_right_texture,
+             avatar.quad_right_w, avatar.quad_right_h, avatar.quad_right_rt_w, avatar.quad_right_rt_h,
              "RIGHT ORTHO (ELEVATION)", "##QRight", &quad_right_camera_, false},
-            {ImVec2(canvas_p0.x, canvas_p0.y + half_h + 2.0f), avatar.stage_viewport_texture,
+            {ImVec2(canvas_p0.x, canvas_p0.y + split_y + 2.0f), ImVec2(left_w, bot_h), avatar.stage_viewport_texture,
+             avatar.stage_viewport_w, avatar.stage_viewport_h, avatar.stage_viewport_rt_w, avatar.stage_viewport_rt_h,
              "STAGE 3D (SCHEMATIC)", "##QStage", &stage_camera_, true},
-            {ImVec2(canvas_p0.x + half_w + 2.0f, canvas_p0.y + half_h + 2.0f), avatar.viewport_texture,
-             "LIVE BROADCAST MONITOR (NO SCHEMATICS)", "##QBroadcast", &stage_camera_, false},
+            {ImVec2(canvas_p0.x + split_x + 2.0f, canvas_p0.y + split_y + 2.0f), ImVec2(right_w, bot_h),
+             VK_NULL_HANDLE, 0u, 0u, 0u, 0u, "LIVE BROADCAST MONITOR (16:9)", "##QBroadcast", &stage_camera_, false},
         };
         for (int idx = 0; idx < 4; ++idx) {
             const auto& c = cells[idx];
-            const ImVec2 cp1(c.p0.x + cell_sz.x, c.p0.y + cell_sz.y);
-            dl->AddRectFilled(c.p0, cp1, t.col32_bg_canvas);
-            if (c.tex != VK_NULL_HANDLE) {
-                dl->AddImage(reinterpret_cast<ImTextureID>(c.tex), c.p0, cp1);
+            const ImVec2 cp1(c.p0.x + c.sz.x, c.p0.y + c.sz.y);
+            last_quad_rects_[static_cast<size_t>(idx)] = {c.p0.x, c.p0.y, cp1.x, cp1.y};
+            dl->PushClipRect(c.p0, cp1, true);
+            if (idx == 3) {
+                draw_broadcast_pip_box(c.p0, c.sz);
+            } else {
+                dl->AddRectFilled(c.p0, cp1, t.col32_bg_canvas);
+                draw_stage_tex(c.tex, c.p0, c.sz, c.ren_w, c.ren_h, c.rt_w, c.rt_h);
             }
             dl->AddRect(c.p0, cp1, (idx == 3) ? t.col32_stage_pip_border : t.col32_node_border);
+            const float tag_w = std::min(c.sz.x - 12.0f, 250.0f * scale);
             dl->AddRectFilled(ImVec2(c.p0.x + 6.0f, c.p0.y + 6.0f),
-                              ImVec2(c.p0.x + 250.0f * scale, c.p0.y + 24.0f * scale), t.col32_stage_badge_bg, 4.0f);
-            dl->AddText(ImVec2(c.p0.x + 10.0f, c.p0.y + 8.0f), (idx == 3) ? t.col32_stage_cyan : t.col32_text_primary,
-                        c.tag);
+                              ImVec2(c.p0.x + 6.0f + std::max(40.0f, tag_w), c.p0.y + 24.0f * scale),
+                              t.col32_stage_badge_bg, 4.0f);
+            dl->AddText(ImVec2(c.p0.x + 10.0f, c.p0.y + 8.0f),
+                        (idx == 3) ? t.col32_stage_cyan : t.col32_text_primary, c.tag);
             if (idx < 3) {
-                draw_stage_interaction(c.p0, cell_sz, c.btn_id, *c.cam, c.allow_pick);
+                draw_stage_interaction(c.p0, c.sz, c.btn_id, *c.cam, c.allow_pick);
             }
+            dl->PopClipRect();
         }
     } else {
-        if (avatar.stage_viewport_texture != VK_NULL_HANDLE) {
-            dl->AddImage(reinterpret_cast<ImTextureID>(avatar.stage_viewport_texture), canvas_p0, canvas_p1);
-        }
+        desired_stage_w_ = static_cast<uint32_t>(canvas_sz.x);
+        desired_stage_h_ = static_cast<uint32_t>(canvas_sz.y);
+        draw_stage_tex(avatar.stage_viewport_texture, canvas_p0, canvas_sz, avatar.stage_viewport_w,
+                       avatar.stage_viewport_h, avatar.stage_viewport_rt_w, avatar.stage_viewport_rt_h);
         draw_stage_interaction(canvas_p0, canvas_sz, "##StageCanvas", stage_camera_, true);
 
-        // Docked / Floating PiP Live Broadcast Monitor in bottom-right corner
+        // Docked / Floating PiP Live Broadcast Monitor in bottom-right corner (strict 16:9 with #0B0D12 matte)
         if (pip_monitor_open_) {
-            const float pip_w = std::clamp(260.0f * scale, 160.0f, canvas_sz.x * 0.36f);
-            const float pip_h = pip_w * (9.0f / 16.0f);
-            const ImVec2 pip_p0(canvas_p1.x - pip_w - 14.0f * scale, canvas_p1.y - pip_h - 14.0f * scale);
-            const ImVec2 pip_p1(pip_p0.x + pip_w, pip_p0.y + pip_h);
-            dl->AddRectFilled(ImVec2(pip_p0.x - 2.0f, pip_p0.y - 20.0f * scale), ImVec2(pip_p1.x + 2.0f, pip_p1.y + 2.0f),
-                              t.col32_stage_badge_bg, 4.0f);
-            if (avatar.viewport_texture != VK_NULL_HANDLE) {
-                dl->AddImage(reinterpret_cast<ImTextureID>(avatar.viewport_texture), pip_p0, pip_p1);
-            }
+            const float max_pip_w = std::max(80.0f, canvas_sz.x * 0.36f);
+            const float max_pip_h = std::max(45.0f, canvas_sz.y * 0.36f);
+            const float pip_box_w = std::min(260.0f * scale, max_pip_w);
+            const float pip_box_h = std::min(pip_box_w * (9.0f / 16.0f), max_pip_h);
+            const ImVec2 pip_p0(canvas_p1.x - pip_box_w - 14.0f * scale, canvas_p1.y - pip_box_h - 14.0f * scale);
+            const ImVec2 pip_p1(pip_p0.x + pip_box_w, pip_p0.y + pip_box_h);
+            dl->AddRectFilled(ImVec2(pip_p0.x - 2.0f, pip_p0.y - 20.0f * scale),
+                              ImVec2(pip_p1.x + 2.0f, pip_p1.y + 2.0f), t.col32_stage_badge_bg, 4.0f);
+            draw_broadcast_pip_box(pip_p0, ImVec2(pip_box_w, pip_box_h));
             dl->AddRect(pip_p0, pip_p1, t.col32_stage_pip_border, 2.0f);
             dl->AddText(ImVec2(pip_p0.x + 6.0f, pip_p0.y - 17.0f * scale), t.col32_stage_cyan,
-                        "LIVE CAM · BroadcastView (Clean)");
+                        "LIVE CAM · Broadcast (16:9)");
         }
     }
 

@@ -3,6 +3,7 @@
 #include "core/paths.hpp"
 #include "core/telemetry.hpp"
 #include "core/viewport_aspect.hpp"
+#include "renderer/frame_graph.hpp"
 #include "rhi/rhi_device.hpp"
 #include "ui/palette/command_palette.hpp"
 #include "ui/panels/viewport/camera_presets.hpp"
@@ -1418,4 +1419,156 @@ TEST_CASE("Phase 2 Lighting Tab: 16-light Mixer, Rigs JSON roundtrip, 7 Stage Ca
     io.AddKeyEvent(ImGuiMod_Alt, false);
     io.AddKeyEvent(ImGuiMod_Ctrl, false);
     CHECK(rig.ws.lighting_stage().pilot_light_active());
+}
+
+TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and Ray-Picking across wide/tall resizes",
+          "[ui][phase2][lighting_stage][aspect]") {
+    using namespace aether::ui;
+    aether::rhi::RhiDeviceConfig rhi_cfg{};
+    rhi_cfg.enable_validation = false;
+    rhi_cfg.require_validation = false;
+    rhi_cfg.headless = true;
+    auto rhi_res = aether::rhi::RhiDevice::create(rhi_cfg);
+    REQUIRE(rhi_res.has_value());
+
+    aether::ui::ScopedUiRig rig{};
+    rig.rhi = rhi_res.value();
+    REQUIRE(rig.arena.init(16ULL * 1024ULL * 1024ULL));
+    REQUIRE(install_imgui_arena(rig.arena));
+
+    ImGui::CreateContext();
+    rig.imgui_init = true;
+    ImPlot::CreateContext();
+    rig.implot_init = true;
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1600.0f, 900.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigInputTrickleEventQueue = false;
+    unsigned char* tex_pixels = nullptr;
+    int tex_w = 0, tex_h = 0;
+    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
+    io.Fonts->SetTexID(static_cast<ImTextureID>(1));
+
+    aether::RuntimePaths paths{};
+    aether::HardwareInventory hw{};
+    rig.ws.init(paths, hw, 1.0f, nullptr, false);
+    rig.ws_init = true;
+    rig.ws.viewport_panel().set_persist_presets(false);
+
+    aether::TelemetrySnapshot telem{};
+    telem.render_fps = 60.0f;
+    DevShellInputEcho echo{};
+    DevShellAvatarView avatar{};
+    avatar.has_avatar = true;
+    avatar.has_camera = true;
+    avatar.bone_head_y = 1.46f;
+    avatar.broadcast_width = 1920u;
+    avatar.broadcast_height = 1080u;
+    DevShellTrackingView tracking{};
+    DevShellRenderView render_view{};
+    DevShellOutputView output_view{};
+    StudioActions actions{};
+
+    aether::renderer::LightingRig lrig = aether::renderer::LightingRig::default_three_point();
+    lrig.use_studio_lights = true;
+    lrig.studio_light_count = 2;
+    aether::renderer::configure_fixture_defaults(lrig.studio_lights[0],
+                                                 aether::renderer::StudioFixtureProfile::RectSoftbox);
+    lrig.studio_lights[0].use_orbit_angles = false;
+    lrig.studio_lights[0].position_ws = {-1.2f, 1.4f, -0.8f};
+    lrig.studio_lights[0].target_ws = {0.0f, 1.4f, 0.0f};
+    aether::renderer::configure_fixture_defaults(lrig.studio_lights[1],
+                                                 aether::renderer::StudioFixtureProfile::Octabox);
+    lrig.studio_lights[1].use_orbit_angles = false;
+    lrig.studio_lights[1].position_ws = {1.0f, 1.4f, 0.8f};
+    lrig.studio_lights[1].target_ws = {0.0f, 1.4f, 0.0f};
+    lrig.studio_lights[1].width_or_outer_m = 0.90f;
+
+    rig.ws.switch_mode(StudioMode::Lighting);
+    auto step_size = [&](float win_w, float win_h, int frames = 4) {
+        io.DisplaySize = ImVec2(win_w, win_h);
+        for (int f = 0; f < frames; ++f) {
+            actions.reset_per_frame();
+            actions.viewport.mutable_lighting_rig = &lrig;
+            io.DeltaTime = 1.0f / 60.0f;
+            ImGui::NewFrame();
+            rig.ws.render(0.016 * f, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view,
+                          output_view, actions);
+            ImGui::Render();
+        }
+    };
+
+    step_size(1600.0f, 900.0f, 6);
+    REQUIRE(actions.viewport.mutable_lighting_rig != nullptr);
+
+    const std::pair<float, float> kSizes[] = {{1600.0f, 900.0f}, {1600.0f, 360.0f}, {450.0f, 900.0f}};
+    for (const auto& sz : kSizes) {
+        // Test Free Cam (distance 4.5 to keep (1.0, 1.4, 0.8) in frame even on narrow 450x900) & Front Ortho
+        for (const auto view_mode : {aether::renderer::StageCameraView::FreePerspective,
+                                     aether::renderer::StageCameraView::OrthoFront}) {
+            rig.ws.lighting_stage().set_stage_view(view_mode, {0.0f, 1.35f, 0.0f});
+            step_size(sz.first, sz.second, 4);
+
+            // 1. desired_stage_w/h match exact drawn stage canvas rect
+            CHECK(actions.viewport.desired_stage_w ==
+                  static_cast<uint32_t>(rig.ws.lighting_stage().last_stage_draw_w()));
+            CHECK(actions.viewport.desired_stage_h ==
+                  static_cast<uint32_t>(rig.ws.lighting_stage().last_stage_draw_h()));
+
+            // 2. Live Camera Monitor (PiP) stays strictly 16:9 regardless of window container aspect
+            const auto pip = rig.ws.lighting_stage().last_pip_inner_rect();
+            const float pip_w = pip[2] - pip[0];
+            const float pip_h = pip[3] - pip[1];
+            CHECK(pip_w > 16.0f);
+            CHECK(pip_h > 9.0f);
+            CHECK(std::fabs((pip_w / pip_h) - (16.0f / 9.0f)) < 0.02f);
+        }
+
+        // 3. Quad View computes 4 independent quadrant rects & PiP stays strictly 16:9 inside quadrant 3
+        rig.ws.lighting_stage().toggle_quad_view();
+        step_size(sz.first, sz.second, 3);
+        CHECK(actions.viewport.stage_quad_view);
+        const auto q0 = rig.ws.lighting_stage().last_quad_rect(0);
+        const auto q1 = rig.ws.lighting_stage().last_quad_rect(1);
+        const auto q2 = rig.ws.lighting_stage().last_quad_rect(2);
+        const auto q3 = rig.ws.lighting_stage().last_quad_rect(3);
+        CHECK(actions.viewport.desired_quad_top_w == static_cast<uint32_t>(q0[2] - q0[0]));
+        CHECK(actions.viewport.desired_quad_top_h == static_cast<uint32_t>(q0[3] - q0[1]));
+        CHECK(actions.viewport.desired_quad_right_w == static_cast<uint32_t>(q1[2] - q1[0]));
+        CHECK(actions.viewport.desired_quad_right_h == static_cast<uint32_t>(q1[3] - q1[1]));
+        CHECK(actions.viewport.desired_stage_w == static_cast<uint32_t>(q2[2] - q2[0]));
+        CHECK(actions.viewport.desired_stage_h == static_cast<uint32_t>(q2[3] - q2[1]));
+        CHECK(q1[0] >= q0[2]); // horizontal non-overlap
+        CHECK(q2[1] >= q0[3]); // vertical non-overlap
+        CHECK(q3[2] > q3[0]);
+        const auto qpip = rig.ws.lighting_stage().last_pip_inner_rect();
+        CHECK(std::fabs(((qpip[2] - qpip[0]) / std::max(1.0f, qpip[3] - qpip[1])) - (16.0f / 9.0f)) < 0.02f);
+        rig.ws.lighting_stage().toggle_quad_view();
+        step_size(sz.first, sz.second, 2);
+    }
+
+    // 4. Ray-picking in world space hits light #1 at (1.0, 1.4, 0.8) cleanly across all 3 aspect ratios
+    const std::array<float, 3> p_tgt{1.0f, 1.4f, 0.8f};
+    const std::array<float, 3> eye_dummy{0.0f, 1.35f, 3.0f};
+    for (const auto& sz : {std::pair{1600.0f, 900.0f}, std::pair{1600.0f, 360.0f}, std::pair{450.0f, 900.0f}}) {
+        const float asp = sz.first / sz.second;
+        for (int vi = 0; vi <= 6; ++vi) {
+            auto cam = aether::renderer::make_stage_camera_preset(
+                static_cast<aether::renderer::StageCameraView>(vi), {0.0f, 1.35f, 0.0f}, 5.5f);
+            if (!cam.is_orthographic) {
+                cam.distance = 6.0f;
+            }
+            const auto vp = aether::renderer::compute_view_proj(cam, asp);
+            const float cx = vp[0] * p_tgt[0] + vp[4] * p_tgt[1] + vp[8] * p_tgt[2] + vp[12];
+            const float cy = vp[1] * p_tgt[0] + vp[5] * p_tgt[1] + vp[9] * p_tgt[2] + vp[13];
+            const float cw = vp[3] * p_tgt[0] + vp[7] * p_tgt[1] + vp[11] * p_tgt[2] + vp[15];
+            REQUIRE(cw > 0.05f);
+            const float u01 = (cx / cw) * 0.5f + 0.5f;
+            const float v01 = 0.5f - (cy / cw) * 0.5f;
+            INFO("aspect=" << asp << " vi=" << vi << " u01=" << u01 << " v01=" << v01);
+            CHECK(aether::renderer::pick_stage_studio_light(lrig, {0.0f, 1.35f, 0.0f}, eye_dummy, cam, u01, v01,
+                                                            asp, nullptr) == 1);
+        }
+    }
 }

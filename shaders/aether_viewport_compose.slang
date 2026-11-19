@@ -24,6 +24,27 @@ FsOut vs_fullscreen(uint vid : SV_VertexID) {
 
 [shader("fragment")]
 float4 ps_compose(FsOut i) : SV_Target0 {
+    if ((g_Pc.param1 & 4u) != 0u) {
+        float du = asfloat(g_Pc.param2);
+        float dv = asfloat(g_Pc.param3);
+        if (du <= 0.0) du = 1.0;
+        if (dv <= 0.0) dv = 1.0;
+        float max_u = (g_Pc.fparam2 > 0.0) ? g_Pc.fparam2 : 1.0;
+        float max_v = (g_Pc.fparam3 > 0.0) ? g_Pc.fparam3 : 1.0;
+        float2 src_uv = clamp(i.uv * float2(du, dv), float2(0.0, 0.0), float2(max_u, max_v));
+        float4 fg = aether_sample(g_Pc.param0, kSamplerLinearClamp, src_uv);
+        float a = saturate(fg.a);
+        float3 bg_lin = float3(0.0, 0.0, 0.0);
+        if ((g_Pc.param1 & 1u) != 0u) {
+            uint2 cell = uint2(i.clip_pos.xy) >> 3u;
+            bool alt = ((cell.x + cell.y) & 1u) != 0u;
+            float3 col_a = srgb_to_linear_rgb(float3(21.0, 23.0, 28.0) / 255.0);
+            float3 col_b = srgb_to_linear_rgb(float3(26.0, 29.0, 35.0) / 255.0);
+            bg_lin = alt ? col_b : col_a;
+        }
+        float3 comp_lin = fg.rgb + (1.0 - a) * bg_lin;
+        return float4(linear_to_srgb(comp_lin), 1.0);
+    }
     float x0 = g_Pc.fparam0;
     float y0 = g_Pc.fparam1;
     float x1 = max(x0 + 1e-4, g_Pc.fparam2);

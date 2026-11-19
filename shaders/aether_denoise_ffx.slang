@@ -32,6 +32,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float2 vp_size = float2(float(w), float(h));
     int2 max_gp = max_p;
     float2 gb_scale = float2(1.0, 1.0);
+    float2 hist_uv_scale = float2(1.0, 1.0);
+    float2 hist_uv_max = float2(1.0, 1.0);
 
     if (has_fg) {
         GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
@@ -43,6 +45,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         vp_size = max(fg.viewport_size.xy, float2(1.0, 1.0));
         max_gp = max(int2(vp_size) - 1, int2(0, 0));
         gb_scale = vp_size / float2(float(w), float(h));
+        bool is_half_res = (w < uint(vp_size.x * 0.75 + 0.5));
+        float4 hscale = is_half_res ? fg.target_half_uv_scale : fg.target_uv_scale;
+        hist_uv_scale = hscale.xy;
+        hist_uv_max = hscale.zw;
 
         int2 gp0 = clamp(int2((float2(p) + 0.5) * gb_scale), int2(0, 0), max_gp);
         center_d = aether_load(depth_slot, gp0).x;
@@ -100,7 +106,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         float2 uv = (float2(tid.xy) + 0.5) / float2(float(w), float(h));
         float2 prev_uv = uv - mv;
         if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
-            float4 hist = aether_sample_level(hist_slot, kSamplerLinearClamp, prev_uv, 0.0);
+            float2 hist_uv = clamp(prev_uv * hist_uv_scale, float2(0.0, 0.0), hist_uv_max);
+            float4 hist = aether_sample_level(hist_slot, kSamplerLinearClamp, hist_uv, 0.0);
             float motion_px = length(mv * vp_size);
             float alpha = is_path_trace ? lerp(0.10, max(g_Pc.fparam0, 0.22), saturate(motion_px * 0.15))
                                         : clamp(g_Pc.fparam0, 0.05, 1.0);

@@ -109,6 +109,10 @@ struct FrameRenderRequest {
         QuadRight = 2,
     };
     StageOutputSlot stage_output_slot{StageOutputSlot::MainStage};
+    // Live draw-rect dimensions for LightingStageView & Quad quadrants (0 = full target dims).
+    uint32_t stage_viewport_w{0};
+    uint32_t stage_viewport_h{0};
+    bool encode_stage_broadcast_pip{false};
     const animation::SpringColliderOverlay* spring_colliders{nullptr};
     uint32_t spring_collider_count{0};
     const animation::SpringSegmentOverlay* spring_segments{nullptr};
@@ -163,6 +167,8 @@ struct FrameGraphOutputs {
     VkImageView quad_top_view{VK_NULL_HANDLE};
     VkImage quad_right_image{VK_NULL_HANDLE};
     VkImageView quad_right_view{VK_NULL_HANDLE};
+    VkImage stage_broadcast_pip_image{VK_NULL_HANDLE};
+    VkImageView stage_broadcast_pip_view{VK_NULL_HANDLE};
     VkImage orbit_orb_image{VK_NULL_HANDLE};
     VkImageView orbit_orb_view{VK_NULL_HANDLE};
     VkImage rt_shadow_raw_image{VK_NULL_HANDLE};
@@ -170,6 +176,20 @@ struct FrameGraphOutputs {
     VkImage hdr_scene_image{VK_NULL_HANDLE};
     uint32_t width{0};
     uint32_t height{0};
+    uint32_t stage_viewport_width{0};
+    uint32_t stage_viewport_height{0};
+    uint32_t stage_viewport_rt_width{0};
+    uint32_t stage_viewport_rt_height{0};
+    uint32_t quad_top_width{0};
+    uint32_t quad_top_height{0};
+    uint32_t quad_top_rt_width{0};
+    uint32_t quad_top_rt_height{0};
+    uint32_t quad_right_width{0};
+    uint32_t quad_right_height{0};
+    uint32_t quad_right_rt_width{0};
+    uint32_t quad_right_rt_height{0};
+    uint32_t stage_broadcast_pip_width{0};
+    uint32_t stage_broadcast_pip_height{0};
     uint32_t output_width{0};
     uint32_t output_height{0};
     uint32_t output_slot{0};
@@ -202,6 +222,9 @@ class FrameGraph {
     [[nodiscard]] Expected<void> init(rhi::RhiDevice& device, const RendererConfig& cfg);
     [[nodiscard]] Expected<void> resize(uint32_t viewport_w, uint32_t viewport_h, uint32_t output_w = UINT32_MAX,
                                         uint32_t output_h = UINT32_MAX);
+    [[nodiscard]] Expected<void> ensure_stage_target_sizes(uint32_t stage_w, uint32_t stage_h, uint32_t qtop_w,
+                                                           uint32_t qtop_h, uint32_t qright_w, uint32_t qright_h,
+                                                           bool& out_rebuilt);
     void destroy() noexcept;
 
     [[nodiscard]] Expected<void> bind_avatar(const GpuAvatar* avatar);
@@ -345,6 +368,23 @@ class FrameGraph {
     RegisteredImage stage_viewport_out_{};
     RegisteredImage quad_top_out_{};
     RegisteredImage quad_right_out_{};
+    RegisteredImage stage_broadcast_pip_out_{};
+    uint32_t stage_rt_w_{0};
+    uint32_t stage_rt_h_{0};
+    uint32_t stage_active_w_{0};
+    uint32_t stage_active_h_{0};
+    uint32_t quad_top_rt_w_{0};
+    uint32_t quad_top_rt_h_{0};
+    uint32_t quad_top_active_w_{0};
+    uint32_t quad_top_active_h_{0};
+    uint32_t quad_right_rt_w_{0};
+    uint32_t quad_right_rt_h_{0};
+    uint32_t quad_right_active_w_{0};
+    uint32_t quad_right_active_h_{0};
+    uint32_t stage_pip_w_{0};
+    uint32_t stage_pip_h_{0};
+    uint32_t prev_stage_scene_w_{0};
+    uint32_t prev_stage_scene_h_{0};
 
     // Static targets
     RegisteredImage orbit_orb_out_{};

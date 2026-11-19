@@ -1263,3 +1263,165 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
     rhi->destroy();
     aether_runtime_shutdown();
 }
+
+TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resizes (Free Cam & 6 Ortho Views)",
+          "[renderer][phase2][lighting_stage][aspect]") {
+    using namespace aether::renderer;
+
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Vulkan LightingStage aspect test: Vulkan unavailable");
+        return;
+    }
+
+    // Build an exact 1.0m x 1.0m x 1.0m cube centered at (0, 1.0, 0) so FreePersp & all 6 Ortho views see 1m x 1m
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.96f, 0.96f, 0.96f);
+    mat.toon_params[0] = 0.0f;
+    mat.emissive_and_pad[0] = 0.95f;
+    mat.emissive_and_pad[1] = 0.95f;
+    mat.emissive_and_pad[2] = 0.95f;
+    mat.outline_width = 0.0f;
+    spec.materials.push_back(mat);
+    const float x0 = -0.5f, x1 = 0.5f, y0 = 0.5f, y1 = 1.5f, z0 = -0.5f, z1 = 0.5f;
+    const std::array<float, 3> p000{x0, y0, z0}, p100{x1, y0, z0}, p110{x1, y1, z0}, p010{x0, y1, z0};
+    const std::array<float, 3> p001{x0, y0, z1}, p101{x1, y0, z1}, p111{x1, y1, z1}, p011{x0, y1, z1};
+    aether::test::append_quad(spec, p001.data(), p101.data(), p111.data(), p011.data(),
+                              std::array<float, 3>{0, 0, 1}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p100.data(), p000.data(), p010.data(), p110.data(),
+                              std::array<float, 3>{0, 0, -1}.data(), std::array<float, 3>{-1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p101.data(), p100.data(), p110.data(), p111.data(),
+                              std::array<float, 3>{1, 0, 0}.data(), std::array<float, 3>{0, 0, -1}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p000.data(), p001.data(), p011.data(), p010.data(),
+                              std::array<float, 3>{-1, 0, 0}.data(), std::array<float, 3>{0, 0, 1}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p011.data(), p111.data(), p110.data(), p010.data(),
+                              std::array<float, 3>{0, 1, 0}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p000.data(), p100.data(), p101.data(), p001.data(),
+                              std::array<float, 3>{0, -1, 0}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kBufW = 1600u;
+    constexpr uint32_t kBufH = 900u;
+    RendererConfig rcfg{};
+    rcfg.width = kBufW;
+    rcfg.height = kBufH;
+    rcfg.enable_rt = false;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.lights[0].color[0] = 1.0f;
+    rig.lights[0].color[1] = 1.0f;
+    rig.lights[0].color[2] = 1.0f;
+    rig.lights[0].intensity = 1.8f;
+    rig.bloom_intensity = 0.0f;
+    rig.satsuei.halation_strength = 0.0f;
+    rig.satsuei.light_wrap_strength = 0.0f;
+
+    auto measure_vk = [&](uint32_t vw, uint32_t vh, StageCameraView sv, uint64_t fidx) -> std::pair<uint32_t, uint32_t> {
+        PreviewCamera cam = make_stage_camera_preset(sv, {0.0f, 1.0f, 0.0f}, 2.20f);
+        if (sv == StageCameraView::FreePerspective) {
+            cam.yaw_rad = 0.0f;
+            cam.pitch_rad = 0.0f;
+            cam.distance = 4.5f;
+            cam.fovy_rad = 0.52f;
+        }
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.view_kind = RenderViewKind::LightingStage;
+        req.stage_viewport_w = vw;
+        req.stage_viewport_h = vh;
+        req.stage_diag_mode = StageDiagnosticMode::Lit;
+        req.show_stage_schematic = false;
+        req.show_stage_grid = false;
+        req.preview_25d_flatten = false;
+        req.lighting_mode = 0u;
+        req.rt_enabled = false;
+        req.aa_mode = 0u;
+        req.outline_width_scale = 0.0f;
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.render_csm_shadow = false;
+        req.frame_index = fidx;
+        req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+
+        const auto outs = renderer.graph().outputs();
+        CHECK(outs.stage_viewport_width == vw);
+        CHECK(outs.stage_viewport_height == vh);
+        auto px_res = renderer.graph().readback_image_rgba8(
+            outs.stage_viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, outs.stage_viewport_rt_width,
+            outs.stage_viewport_rt_height);
+        REQUIRE(px_res.has_value());
+        const auto& px = px_res.value();
+        uint32_t min_x = vw, max_x = 0u, min_y = vh, max_y = 0u;
+        for (uint32_t y = 0; y < vh; ++y) {
+            for (uint32_t x = 0; x < vw; ++x) {
+                const size_t o = (static_cast<size_t>(y) * outs.stage_viewport_rt_width + x) * 4u;
+                if (px[o] > 30u || px[o + 1] > 30u || px[o + 2] > 30u) {
+                    min_x = std::min(min_x, x);
+                    max_x = std::max(max_x, x);
+                    min_y = std::min(min_y, y);
+                    max_y = std::max(max_y, y);
+                }
+            }
+        }
+        REQUIRE(max_x > min_x);
+        REQUIRE(max_y > min_y);
+        return {max_x - min_x + 1u, max_y - min_y + 1u};
+    };
+
+    uint64_t fidx = 1u;
+    for (int vi = 0; vi <= 6; ++vi) {
+        const auto sv = static_cast<StageCameraView>(vi);
+        const auto m16_9 = measure_vk(1600u, 900u, sv, fidx++);
+        const auto mwide = measure_vk(1600u, 360u, sv, fidx++);
+        const auto mtall = measure_vk(450u, 900u, sv, fidx++);
+        const float r_16_9 = static_cast<float>(m16_9.first) / static_cast<float>(m16_9.second);
+        const float r_wide = static_cast<float>(mwide.first) / static_cast<float>(mwide.second);
+        const float r_tall = static_cast<float>(mtall.first) / static_cast<float>(mtall.second);
+        INFO("Vulkan vi=" << vi << " 1600x900=" << m16_9.first << "x" << m16_9.second << " (" << r_16_9 << ") "
+                          << "1600x360=" << mwide.first << "x" << mwide.second << " (" << r_wide << ") "
+                          << "450x900=" << mtall.first << "x" << mtall.second << " (" << r_tall << ")");
+        CHECK(std::fabs(r_16_9 - 1.0f) < 0.005f);
+        CHECK(std::fabs(r_wide - 1.0f) < 0.005f);
+        CHECK(std::fabs(r_tall - 1.0f) < 0.005f);
+        CHECK(std::abs(static_cast<int>(m16_9.second) - static_cast<int>(mtall.second)) <= 1);
+    }
+
+    FrameRenderRequest b_req{};
+    b_req.avatar = avatar.get();
+    b_req.rig = &rig;
+    b_req.camera = make_stage_camera_preset(StageCameraView::FreePerspective, {0.0f, 1.0f, 0.0f});
+    b_req.view_kind = RenderViewKind::Broadcast;
+    b_req.encode_stage_broadcast_pip = true;
+    b_req.frame_index = fidx++;
+    REQUIRE(renderer.render_headless_frame(b_req).has_value());
+    const auto b_outs = renderer.graph().outputs();
+    CHECK(b_outs.stage_broadcast_pip_image != VK_NULL_HANDLE);
+    CHECK(b_outs.stage_broadcast_pip_width == 640u);
+    CHECK(b_outs.stage_broadcast_pip_height == 360u);
+    REQUIRE(rhi->validation_error_count() == 0);
+    REQUIRE(rhi->validation_warning_count() == 0);
+
+    renderer.destroy();
+    avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}

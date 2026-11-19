@@ -1138,6 +1138,7 @@ int run_application(const AppLaunchOptions& opts) {
         VkDescriptorSet stage_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet quad_top_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet quad_right_tex_set = VK_NULL_HANDLE;
+        VkDescriptorSet stage_broadcast_pip_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet orb_tex_set = VK_NULL_HANDLE;
         VkDescriptorSet preview_tex_set = VK_NULL_HANDLE;
         rhi::RhiImage preview_img{};
@@ -1202,6 +1203,7 @@ int run_application(const AppLaunchOptions& opts) {
             drop_tex(stage_tex_set);
             drop_tex(quad_top_tex_set);
             drop_tex(quad_right_tex_set);
+            drop_tex(stage_broadcast_pip_tex_set);
             drop_tex(orb_tex_set);
             const auto out = npr_renderer.graph().outputs();
             if (vp_sampler != VK_NULL_HANDLE) {
@@ -1220,6 +1222,10 @@ int run_application(const AppLaunchOptions& opts) {
                 if (out.quad_right_view != VK_NULL_HANDLE) {
                     quad_right_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.quad_right_view,
                                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+                if (out.stage_broadcast_pip_view != VK_NULL_HANDLE) {
+                    stage_broadcast_pip_tex_set = ImGui_ImplVulkan_AddTexture(
+                        vp_sampler, out.stage_broadcast_pip_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
                 if (out.orbit_orb_view != VK_NULL_HANDLE) {
                     orb_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.orbit_orb_view,
@@ -2315,6 +2321,16 @@ int run_application(const AppLaunchOptions& opts) {
                     }
                 }
             }
+            if (vp_actions.request_stage_render) {
+                bool stage_rebuilt = false;
+                if (auto sg_rc = npr_renderer.graph().ensure_stage_target_sizes(
+                        vp_actions.desired_stage_w, vp_actions.desired_stage_h, vp_actions.desired_quad_top_w,
+                        vp_actions.desired_quad_top_h, vp_actions.desired_quad_right_w, vp_actions.desired_quad_right_h,
+                        stage_rebuilt);
+                    sg_rc && stage_rebuilt) {
+                    refresh_vp_descriptors();
+                }
+            }
 
             // Apply a backend change requested from the Inspector/Graphics Settings (render.backend), then reclaim
             // retired objects.
@@ -2547,6 +2563,7 @@ int run_application(const AppLaunchOptions& opts) {
             render_req.avatar_rot_y_deg = cur_render_avatar_rot_y_deg;
             render_req.avatar_scale = cur_render_avatar_scale;
             render_req.viewport_aspect_mode = vp_actions.viewport_aspect_mode;
+            render_req.encode_stage_broadcast_pip = vp_actions.request_stage_render;
             if (skin_snap.frame_sequence != 0ULL) {
                 render_req.spring_colliders = skin_snap.spring_colliders.data();
                 render_req.spring_collider_count = skin_snap.spring_collider_count;
@@ -2592,10 +2609,13 @@ int run_application(const AppLaunchOptions& opts) {
             if (vp_actions.request_stage_render && has_avatar_ready) {
                 auto run_stage_pass = [&](const renderer::PreviewCamera& cam_in,
                                           renderer::FrameRenderRequest::StageOutputSlot slot, bool allow_schem,
-                                          bool fast_pan) {
+                                          bool fast_pan, uint32_t vp_w, uint32_t vp_h) {
                     renderer::FrameRenderRequest sreq = render_req;
                     sreq.view_kind = renderer::RenderViewKind::LightingStage;
                     sreq.camera = cam_in;
+                    sreq.stage_viewport_w = vp_w;
+                    sreq.stage_viewport_h = vp_h;
+                    sreq.encode_stage_broadcast_pip = false;
                     sreq.stage_diag_mode = vp_actions.stage_diag_mode;
                     sreq.show_stage_schematic = allow_schem;
                     sreq.show_stage_grid = vp_actions.stage_show_grid;
@@ -2621,13 +2641,16 @@ int run_application(const AppLaunchOptions& opts) {
                     npr_renderer.graph().record_ui_passes(frame.cmd, sreq);
                 };
                 run_stage_pass(vp_actions.stage_camera, renderer::FrameRenderRequest::StageOutputSlot::MainStage,
-                               vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                               vp_actions.stage_show_schematic, vp_actions.stage_fast_panning,
+                               vp_actions.desired_stage_w, vp_actions.desired_stage_h);
                 if (vp_actions.stage_quad_view) {
                     run_stage_pass(vp_actions.quad_top_camera, renderer::FrameRenderRequest::StageOutputSlot::QuadTop,
-                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning,
+                                   vp_actions.desired_quad_top_w, vp_actions.desired_quad_top_h);
                     run_stage_pass(vp_actions.quad_right_camera,
                                    renderer::FrameRenderRequest::StageOutputSlot::QuadRight,
-                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning);
+                                   vp_actions.stage_show_schematic, vp_actions.stage_fast_panning,
+                                   vp_actions.desired_quad_right_w, vp_actions.desired_quad_right_h);
                 }
             }
 
@@ -2639,11 +2662,24 @@ int run_application(const AppLaunchOptions& opts) {
             avatar_view.stage_viewport_texture = stage_tex_set;
             avatar_view.quad_top_texture = quad_top_tex_set;
             avatar_view.quad_right_texture = quad_right_tex_set;
+            avatar_view.stage_broadcast_pip_texture = stage_broadcast_pip_tex_set;
             avatar_view.orbit_orb_texture = orb_tex_set;
             avatar_view.viewport_w = fg_out.width;
             avatar_view.viewport_h = fg_out.height;
-            avatar_view.stage_viewport_w = fg_out.width;
-            avatar_view.stage_viewport_h = fg_out.height;
+            avatar_view.stage_viewport_w = fg_out.stage_viewport_width;
+            avatar_view.stage_viewport_h = fg_out.stage_viewport_height;
+            avatar_view.stage_viewport_rt_w = fg_out.stage_viewport_rt_width;
+            avatar_view.stage_viewport_rt_h = fg_out.stage_viewport_rt_height;
+            avatar_view.quad_top_w = fg_out.quad_top_width;
+            avatar_view.quad_top_h = fg_out.quad_top_height;
+            avatar_view.quad_top_rt_w = fg_out.quad_top_rt_width;
+            avatar_view.quad_top_rt_h = fg_out.quad_top_rt_height;
+            avatar_view.quad_right_w = fg_out.quad_right_width;
+            avatar_view.quad_right_h = fg_out.quad_right_height;
+            avatar_view.quad_right_rt_w = fg_out.quad_right_rt_width;
+            avatar_view.quad_right_rt_h = fg_out.quad_right_rt_height;
+            avatar_view.stage_broadcast_pip_w = fg_out.stage_broadcast_pip_width;
+            avatar_view.stage_broadcast_pip_h = fg_out.stage_broadcast_pip_height;
             avatar_view.wireframe_supported =
                 (active_backend == renderer::RenderBackend::DirectX12) ||
                 ((active_backend == renderer::RenderBackend::Vulkan) && npr_renderer.wireframe_supported());
@@ -3161,6 +3197,7 @@ int run_application(const AppLaunchOptions& opts) {
         drop_tex_exit(stage_tex_set);
         drop_tex_exit(quad_top_tex_set);
         drop_tex_exit(quad_right_tex_set);
+        drop_tex_exit(stage_broadcast_pip_tex_set);
         drop_tex_exit(orb_tex_set);
         destroy_vp_sampler();
         npr_renderer.destroy();

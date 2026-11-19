@@ -283,14 +283,16 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
             rim_occ = aether_load(rim_slot, pix_i).x;
         }
         float2 vp_uv = (float2(pix_i) + 0.5) * fg.viewport_size.zw;
+        float2 full_uv = clamp(vp_uv * fg.target_uv_scale.xy, float2(0.0, 0.0), fg.target_uv_scale.zw);
+        float2 half_uv = clamp(vp_uv * fg.target_half_uv_scale.xy, float2(0.0, 0.0), fg.target_half_uv_scale.zw);
         if (bounce_slot != 0xFFFFFFFFu) {
-            bounce_rgb = aether_sample_level(bounce_slot, kSamplerLinearClamp, vp_uv, 0).rgb;
+            bounce_rgb = aether_sample_level(bounce_slot, kSamplerLinearClamp, half_uv, 0).rgb;
         }
         if (rt_shadow_active && fg.studio_slots1.z != 0xFFFFFFFFu) {
-            aov_backscatter = aether_sample_level(fg.studio_slots1.z, kSamplerLinearClamp, vp_uv, 0).rgb;
+            aov_backscatter = aether_sample_level(fg.studio_slots1.z, kSamplerLinearClamp, full_uv, 0).rgb;
         }
         if (rt_shadow_active && fg.studio_slots1.w != 0xFFFFFFFFu) {
-            aov_cornea_rt = aether_sample_level(fg.studio_slots1.w, kSamplerLinearClamp, vp_uv, 0).rgb;
+            aov_cornea_rt = aether_sample_level(fg.studio_slots1.w, kSamplerLinearClamp, full_uv, 0).rgb;
         }
     }
 

@@ -1592,7 +1592,204 @@ TEST_CASE("Phase 2 Visual Capture on 8590.vrm: Clean Broadcast vs Stage Persp / 
     snap_vk("phase2_8590_stage_falsecolor.png", RenderViewKind::LightingStage, studio_cam,
             StageDiagnosticMode::FalseColor, false, false, 5u);
 
+    // Wide (4.44:1 -> 1280x288) & Tall (0.5:1 -> 360x720) Stage snapshots inside LightingStageView
+    {
+        auto snap_aspect = [&](const std::string& fname, uint32_t w, uint32_t h, const PreviewCamera& cam,
+                               uint64_t fidx) {
+            REQUIRE(renderer.resize(w, h, 1280u, 720u).has_value());
+            FrameRenderRequest req{};
+            req.avatar = avatar.get();
+            req.rig = &rig;
+            req.camera = cam;
+            req.studio_camera = studio_cam;
+            req.has_studio_frustum = true;
+            req.studio_frustum_aspect = 16.0f / 9.0f;
+            req.view_kind = RenderViewKind::LightingStage;
+            req.stage_viewport_w = w;
+            req.stage_viewport_h = h;
+            req.stage_diag_mode = StageDiagnosticMode::Lit;
+            req.show_stage_schematic = true;
+            req.show_stage_grid = true;
+            req.preview_25d_flatten = false;
+            req.selected_studio_light_idx = 0;
+            req.lighting_mode = 1;
+            req.rt_enabled = rhi->rt_supported();
+            req.show_checkerboard = false;
+            req.show_orbit_orb = false;
+            req.frame_index = fidx;
+            req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
+            req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
+            REQUIRE(renderer.render_headless_frame(req).has_value());
+            const auto outs = renderer.graph().outputs();
+            auto px = renderer.graph().readback_image_rgba8(outs.stage_viewport_image,
+                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, w, h);
+            REQUIRE(px.has_value());
+            CHECK(aether::test::save_rgba8_png(snapshot_out_dir() / fname, w, h, px.value().data()));
+        };
+        snap_aspect("phase2_8590_stage_wide_1280x288.png", 1280u, 288u, stage_persp, 6u);
+        snap_aspect("phase2_8590_stage_tall_360x720.png", 360u, 720u, stage_persp, 7u);
+    }
+
     renderer.destroy();
     avatar->destroy();
+    rhi->destroy();
+}
+
+TEST_CASE("LightingStageView DirectX 12 1:1 Pixel Aspect Ratio Across Wide/Tall Resizes & Sub-Rects",
+          "[dx12][phase2][lighting_stage][aspect]") {
+    using namespace aether::renderer;
+
+    aether::rhi::RhiDeviceConfig rcfg{};
+    rcfg.enable_validation = false;
+    rcfg.require_validation = false;
+    rcfg.headless = true;
+    auto vk_res = aether::rhi::RhiDevice::create(rcfg);
+    if (!vk_res) {
+        SUCCEED("Skipped DX12 LightingStage aspect test: Vulkan helper unavailable");
+        return;
+    }
+    auto rhi = std::unique_ptr<aether::rhi::RhiDevice>(vk_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = rhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = rhi->gpu_info().luid;
+    auto d3d12_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d12_res) {
+        rhi->destroy();
+        SUCCEED("Skipped DX12 LightingStage aspect test: D3D12 unavailable");
+        return;
+    }
+    auto d3d12 = std::unique_ptr<aether::rhi::D3D12Device>(d3d12_res.value());
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.96f, 0.96f, 0.96f);
+    mat.toon_params[0] = 0.0f;
+    mat.emissive_and_pad[0] = 0.95f;
+    mat.emissive_and_pad[1] = 0.95f;
+    mat.emissive_and_pad[2] = 0.95f;
+    mat.outline_width = 0.0f;
+    spec.materials.push_back(mat);
+    const float x0 = -0.5f, x1 = 0.5f, y0 = 0.5f, y1 = 1.5f, z0 = -0.5f, z1 = 0.5f;
+    const std::array<float, 3> p000{x0, y0, z0}, p100{x1, y0, z0}, p110{x1, y1, z0}, p010{x0, y1, z0};
+    const std::array<float, 3> p001{x0, y0, z1}, p101{x1, y0, z1}, p111{x1, y1, z1}, p011{x0, y1, z1};
+    aether::test::append_quad(spec, p001.data(), p101.data(), p111.data(), p011.data(),
+                              std::array<float, 3>{0, 0, 1}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p100.data(), p000.data(), p010.data(), p110.data(),
+                              std::array<float, 3>{0, 0, -1}.data(), std::array<float, 3>{-1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p101.data(), p100.data(), p110.data(), p111.data(),
+                              std::array<float, 3>{1, 0, 0}.data(), std::array<float, 3>{0, 0, -1}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p000.data(), p001.data(), p011.data(), p010.data(),
+                              std::array<float, 3>{-1, 0, 0}.data(), std::array<float, 3>{0, 0, 1}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p011.data(), p111.data(), p110.data(), p010.data(),
+                              std::array<float, 3>{0, 1, 0}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    aether::test::append_quad(spec, p000.data(), p100.data(), p101.data(), p001.data(),
+                              std::array<float, 3>{0, -1, 0}.data(), std::array<float, 3>{1, 0, 0}.data(), 1, 1, 1, 0,
+                              AETHER_SUBMESH_FLAG_OPAQUE);
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    Dx12FrameGraph dx_fg;
+    constexpr uint32_t kBufW = 1600u;
+    constexpr uint32_t kBufH = 900u;
+    REQUIRE(dx_fg.init(*d3d12, kBufW, kBufH, 65536u, false).has_value());
+    REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.lights[0].color[0] = 1.0f;
+    rig.lights[0].color[1] = 1.0f;
+    rig.lights[0].color[2] = 1.0f;
+    rig.lights[0].intensity = 1.8f;
+    rig.bloom_intensity = 0.0f;
+    rig.satsuei.halation_strength = 0.0f;
+    rig.satsuei.light_wrap_strength = 0.0f;
+
+    auto measure_dx = [&](uint32_t vw, uint32_t vh, uint32_t sub_w, uint32_t sub_h, StageCameraView sv,
+                          uint64_t fidx) -> std::pair<uint32_t, uint32_t> {
+        PreviewCamera cam = make_stage_camera_preset(sv, {0.0f, 1.0f, 0.0f}, 2.20f);
+        if (sv == StageCameraView::FreePerspective) {
+            cam.yaw_rad = 0.0f;
+            cam.pitch_rad = 0.0f;
+            cam.distance = 4.5f;
+            cam.fovy_rad = 0.52f;
+        }
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = cam;
+        req.view_kind = RenderViewKind::LightingStage;
+        req.stage_viewport_w = sub_w;
+        req.stage_viewport_h = sub_h;
+        req.stage_diag_mode = StageDiagnosticMode::Lit;
+        req.show_stage_schematic = false;
+        req.show_stage_grid = false;
+        req.preview_25d_flatten = false;
+        req.lighting_mode = 0u;
+        req.rt_enabled = false;
+        req.aa_mode = 0u;
+        req.outline_width_scale = 0.0f;
+        req.show_checkerboard = false;
+        req.show_orbit_orb = false;
+        req.render_csm_shadow = false;
+        req.frame_index = fidx;
+        req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::kD3D12FrameCount);
+        REQUIRE(dx_fg.render_frame(req, true).has_value());
+
+        std::vector<uint8_t> rgba(static_cast<size_t>(vw) * vh * 4u, 0u);
+        REQUIRE(dx_fg.readback_rgba8(rgba));
+        const uint32_t mw = (sub_w > 0u) ? sub_w : vw;
+        const uint32_t mh = (sub_h > 0u) ? sub_h : vh;
+        uint32_t min_x = mw, max_x = 0u, min_y = mh, max_y = 0u;
+        for (uint32_t y = 0; y < mh; ++y) {
+            for (uint32_t x = 0; x < mw; ++x) {
+                const size_t o = (static_cast<size_t>(y) * vw + x) * 4u;
+                if (rgba[o] > 30u || rgba[o + 1] > 30u || rgba[o + 2] > 30u) {
+                    min_x = std::min(min_x, x);
+                    max_x = std::max(max_x, x);
+                    min_y = std::min(min_y, y);
+                    max_y = std::max(max_y, y);
+                }
+            }
+        }
+        REQUIRE(max_x > min_x);
+        REQUIRE(max_y > min_y);
+        return {max_x - min_x + 1u, max_y - min_y + 1u};
+    };
+
+    // 1. Sub-rect zero-hitch mode across all 7 stage camera modes inside 1600x900 buffer
+    uint64_t fidx = 1u;
+    for (int vi = 0; vi <= 6; ++vi) {
+        const auto sv = static_cast<StageCameraView>(vi);
+        const auto m16_9 = measure_dx(kBufW, kBufH, 1600u, 900u, sv, fidx++);
+        const auto mwide = measure_dx(kBufW, kBufH, 1600u, 360u, sv, fidx++);
+        const auto mtall = measure_dx(kBufW, kBufH, 450u, 900u, sv, fidx++);
+        const float r_16_9 = static_cast<float>(m16_9.first) / static_cast<float>(m16_9.second);
+        const float r_wide = static_cast<float>(mwide.first) / static_cast<float>(mwide.second);
+        const float r_tall = static_cast<float>(mtall.first) / static_cast<float>(mtall.second);
+        INFO("DX12 subrect vi=" << vi << " 1600x900=" << r_16_9 << " 1600x360=" << r_wide << " 450x900=" << r_tall);
+        CHECK(std::fabs(r_16_9 - 1.0f) < 0.005f);
+        CHECK(std::fabs(r_wide - 1.0f) < 0.005f);
+        CHECK(std::fabs(r_tall - 1.0f) < 0.005f);
+        CHECK(std::abs(static_cast<int>(m16_9.second) - static_cast<int>(mtall.second)) <= 1);
+    }
+
+    // 2. Explicit Dx12FrameGraph::resize to 1600x360 and 450x900
+    REQUIRE(dx_fg.resize(1600u, 360u).has_value());
+    const auto r_dx_w = measure_dx(1600u, 360u, 0u, 0u, StageCameraView::OrthoTop, fidx++);
+    CHECK(std::fabs((static_cast<float>(r_dx_w.first) / static_cast<float>(r_dx_w.second)) - 1.0f) < 0.005f);
+
+    REQUIRE(dx_fg.resize(450u, 900u).has_value());
+    const auto r_dx_t = measure_dx(450u, 900u, 0u, 0u, StageCameraView::FreePerspective, fidx++);
+    CHECK(std::fabs((static_cast<float>(r_dx_t.first) / static_cast<float>(r_dx_t.second)) - 1.0f) < 0.005f);
+
+    dx_fg.destroy();
+    avatar->destroy();
+    d3d12->destroy();
     rhi->destroy();
 }

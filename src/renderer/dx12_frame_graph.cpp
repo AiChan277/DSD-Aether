@@ -498,6 +498,8 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
     destroy_size_dependent_targets();
     width_ = w;
     height_ = h;
+    prev_stage_w_ = 0;
+    prev_stage_h_ = 0;
     for (auto& hb : history_) {
         hb.have_prev_view_proj = false;
     }
@@ -1119,26 +1121,52 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     ID3D12GraphicsCommandList4* cmd = cmd_res.value();
     FrameUploadSlice& sl = upload_slices_[frame_slot % rhi::kD3D12FrameCount];
 
-    const uint32_t w = width_;
-    const uint32_t h = height_;
-    const uint32_t gx = (w + 7u) / 8u;
-    const uint32_t gy = (h + 7u) / 8u;
+    const uint32_t buf_w = width_;
+    const uint32_t buf_h = height_;
     const LightingRig& rig = *req.rig;
     const bool has_avatar = (req.avatar != nullptr && bound_avatar_ == req.avatar && avatar_vertex_count_ > 0);
     const bool rt_hardware_ready = device_->dxr_supported() && dxr_ready_ && pso_ray_effects_ != nullptr;
 
     const bool is_stage_view = (req.view_kind == RenderViewKind::LightingStage);
+    const detail::StageRenderRegion sreg =
+        is_stage_view
+            ? detail::compute_stage_render_region(req, buf_w, buf_h, buf_w, buf_h)
+            : detail::StageRenderRegion{buf_w, buf_h, buf_w, buf_h,
+                                        static_cast<float>(buf_w) / static_cast<float>(buf_h),
+                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    const uint32_t w = sreg.scene_w;
+    const uint32_t h = sreg.scene_h;
+    const uint32_t gx = (w + 7u) / 8u;
+    const uint32_t gy = (h + 7u) / 8u;
+
     const bool allow_view_hist =
         !is_stage_view || (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::MainStage);
     const uint32_t view_bank = is_stage_view ? 1u : 0u;
     TemporalHistoryBank& hb = history_[view_bank];
+    const bool stage_size_changed = is_stage_view && allow_view_hist && (w != prev_stage_w_ || h != prev_stage_h_);
+    if (is_stage_view && allow_view_hist) {
+        prev_stage_w_ = w;
+        prev_stage_h_ = h;
+    }
     const bool fast_stage_pan = is_stage_view && req.stage_fast_panning;
-    const bool hist_valid = allow_view_hist && hb.have_prev_view_proj && !fast_stage_pan;
+    const bool hist_valid = allow_view_hist && hb.have_prev_view_proj && !fast_stage_pan && !stage_size_changed;
+
+    const uint32_t phys_hw = std::max(1u, (buf_w + 1u) / 2u);
+    const uint32_t phys_hh = std::max(1u, (buf_h + 1u) / 2u);
+    const uint32_t act_hw = std::min(phys_hw, std::max(1u, (w + 1u) / 2u));
+    const uint32_t act_hh = std::min(phys_hh, std::max(1u, (h + 1u) / 2u));
+    const std::array<float, 4> uv_scale{sreg.uv_scale_x, sreg.uv_scale_y, sreg.uv_max_u, sreg.uv_max_v};
+    const std::array<float, 4> half_uv_scale{
+        is_stage_view ? (static_cast<float>(act_hw) / static_cast<float>(phys_hw)) : 1.0f,
+        is_stage_view ? (static_cast<float>(act_hh) / static_cast<float>(phys_hh)) : 1.0f,
+        is_stage_view ? std::max(0.0f, (static_cast<float>(act_hw) - 0.5f) / static_cast<float>(phys_hw)) : 1.0f,
+        is_stage_view ? std::max(0.0f, (static_cast<float>(act_hh) - 0.5f) / static_cast<float>(phys_hh)) : 1.0f};
 
     GpuFrameGlobals fg{};
     GpuMat4 next_prev_vp{};
     const uint8_t eff_mode = detail::populate_shared_frame_globals(
-        req, w, h, has_avatar, rt_hardware_ready, hist_valid, hb.prev_view_proj, fg, next_prev_vp);
+        req, w, h, has_avatar, rt_hardware_ready, hist_valid, hb.prev_view_proj, fg, next_prev_vp,
+        is_stage_view ? sreg.proj_aspect : 0.0f, &uv_scale, &half_uv_scale);
     last_eff_lighting_mode_ = eff_mode;
     const bool use_rt = (eff_mode != 0u);
     if (has_avatar && allow_view_hist) {
@@ -1529,37 +1557,59 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, crease_mask_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 9: 6-Mip Dual-Kawase Bloom
+        const bool subrect_bloom = (w < buf_w) || (h < buf_h);
+        auto pack_subrect = [](uint32_t psw, uint32_t psh, uint32_t asw, uint32_t ash) noexcept -> uint64_t {
+            return static_cast<uint64_t>(std::min(psw, 0xFFFFu)) |
+                   (static_cast<uint64_t>(std::min(psh, 0xFFFFu)) << 16u) |
+                   (static_cast<uint64_t>(std::min(asw, 0xFFFFu)) << 32u) |
+                   (static_cast<uint64_t>(std::min(ash, 0xFFFFu)) << 48u);
+        };
+        std::array<uint32_t, kBloomMipCount> act_mip_w{};
+        std::array<uint32_t, kBloomMipCount> act_mip_h{};
         uint32_t src_slot = hdr_scene_.srv_index;
-        uint32_t sw = w;
-        uint32_t sh = h;
+        uint32_t phys_sw = buf_w;
+        uint32_t phys_sh = buf_h;
+        uint32_t act_sw = w;
+        uint32_t act_sh = h;
         cmd->SetPipelineState(pso_bloom_down_);
         for (uint32_t m = 0; m < kBloomMipCount; ++m) {
             device_->cmd_transition_texture(cmd, bloom_mips_[m], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const uint32_t mw = bloom_mips_[m].width;
-            const uint32_t mh = bloom_mips_[m].height;
+            const uint32_t phys_mw = bloom_mips_[m].width;
+            const uint32_t phys_mh = bloom_mips_[m].height;
+            const uint32_t mw = subrect_bloom ? std::min(phys_mw, std::max(1u, act_sw >> 1u)) : phys_mw;
+            const uint32_t mh = subrect_bloom ? std::min(phys_mh, std::max(1u, act_sh >> 1u)) : phys_mh;
+            act_mip_w[m] = mw;
+            act_mip_h[m] = mh;
             GpuPushConstants p{};
+            p.vertex_buf_bda = subrect_bloom ? pack_subrect(phys_sw, phys_sh, act_sw, act_sh) : 0ULL;
             p.param0 = src_slot;
             p.param1 = bloom_mips_[m].uav_index;
             p.param2 = mw;
             p.param3 = mh;
             p.fparam0 = (m == 0u) ? rig.bloom_threshold : 0.0f;
-            p.fparam1 = 0.5f / static_cast<float>(std::max(1u, sw));
-            p.fparam2 = 0.5f / static_cast<float>(std::max(1u, sh));
+            p.fparam1 = 0.5f / static_cast<float>(std::max(1u, phys_sw));
+            p.fparam2 = 0.5f / static_cast<float>(std::max(1u, phys_sh));
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch((mw + 7u) / 8u, (mh + 7u) / 8u, 1u);
             device_->cmd_transition_texture(cmd, bloom_mips_[m], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
             src_slot = bloom_mips_[m].srv_index;
-            sw = mw;
-            sh = mh;
+            phys_sw = phys_mw;
+            phys_sh = phys_mh;
+            act_sw = mw;
+            act_sh = mh;
         }
         cmd->SetPipelineState(pso_bloom_up_);
         for (int m = static_cast<int>(kBloomMipCount) - 2; m >= 0; --m) {
             const uint32_t dst_idx = static_cast<uint32_t>(m);
             const uint32_t up_src = dst_idx + 1u;
             device_->cmd_transition_texture(cmd, bloom_mips_[dst_idx], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            const uint32_t mw = bloom_mips_[dst_idx].width;
-            const uint32_t mh = bloom_mips_[dst_idx].height;
+            const uint32_t mw = act_mip_w[dst_idx];
+            const uint32_t mh = act_mip_h[dst_idx];
             GpuPushConstants p{};
+            p.vertex_buf_bda =
+                subrect_bloom ? pack_subrect(bloom_mips_[up_src].width, bloom_mips_[up_src].height,
+                                             act_mip_w[up_src], act_mip_h[up_src])
+                              : 0ULL;
             p.param0 = bloom_mips_[up_src].srv_index;
             p.param1 = bloom_mips_[dst_idx].uav_index;
             p.param2 = mw;
@@ -1598,6 +1648,12 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     device_->cmd_transition_texture(cmd, out_rgba16f_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
     // Pass 11: Encode out_rgba16f_ -> out_rgba8_ (universal RGBA8) & Broadcast-only out_bgra8_ (Spout2 D3D11On12)
+    if (w < buf_w || h < buf_h) {
+        device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const float clr[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        cmd_clear_rtv(*device_, cmd, out_rgba8_, clr);
+    }
+    device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
     cmd->SetPipelineState(pso_encode_bgra_);
     device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     {
@@ -1623,7 +1679,9 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         sp.show_frustum = req.has_studio_frustum;
         sp.has_studio_frustum = req.has_studio_frustum;
         sp.studio_cam = req.studio_camera;
-        sp.studio_aspect = (h > 0u) ? (static_cast<float>(w) / static_cast<float>(h)) : req.studio_frustum_aspect;
+        sp.studio_aspect = (req.studio_frustum_aspect > 0.05f)
+                               ? req.studio_frustum_aspect
+                               : ((h > 0u) ? (static_cast<float>(w) / static_cast<float>(h)) : (16.0f / 9.0f));
         sp.pivot_ws = head_target_ws;
         sp.eye_pos_ws = eye_pos_ws;
         const uint32_t elem_cnt = build_stage_schematic_overlay(*req.rig, sp, stage_overlay_scratch_);

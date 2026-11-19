@@ -158,4 +158,41 @@ struct ViewportAspectLayout {
     return r;
 }
 
+struct ContainedRect {
+    float x0{0.0f};
+    float y0{0.0f};
+    float x1{1.0f};
+    float y1{1.0f};
+
+    [[nodiscard]] float width() const noexcept { return std::max(1.0f, x1 - x0); }
+    [[nodiscard]] float height() const noexcept { return std::max(1.0f, y1 - y0); }
+    [[nodiscard]] float aspect() const noexcept { return width() / height(); }
+};
+
+/**
+ * Fits a rectangle of fixed aspect ratio `content_aspect` (e.g., 16:9 StudioBroadcastView) centered
+ * inside an arbitrary container `(container_w x container_h)` using aspect-preserving letterbox/pillarbox.
+ */
+[[nodiscard]] inline ContainedRect compute_contained_aspect_rect(float container_w, float container_h,
+                                                                 float content_aspect) noexcept {
+    const float cw = std::max(1.0f, container_w);
+    const float ch = std::max(1.0f, container_h);
+    const float ca = std::max(1e-4f, content_aspect);
+    const float box_aspect = cw / ch;
+    float rw = cw;
+    float rh = ch;
+    if (box_aspect >= ca) {
+        rh = ch;
+        rw = std::min(cw, rh * ca);
+    } else {
+        rw = cw;
+        rh = std::min(ch, rw / ca);
+    }
+    rw = std::max(1.0f, rw);
+    rh = std::max(1.0f, rh);
+    const float mx = (cw - rw) * 0.5f;
+    const float my = (ch - rh) * 0.5f;
+    return {mx, my, mx + rw, my + rh};
+}
+
 } // namespace aether::core

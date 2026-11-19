@@ -342,12 +342,17 @@ void StudioWorkspace::build_dock_layout(ImGuiID dockspace_id, StudioMode mode) {
         return;
     }
 
-    const float total_w = std::max(640.0f, avail_size.x);
+    const float total_w = std::max(320.0f, avail_size.x);
     const float left_px = t.left_dock_w_px * dpi * (mode == StudioMode::Rigging ? 1.05f : 1.0f);
     const float right_px = t.right_dock_w_px * dpi * (mode == StudioMode::Rigging ? 1.06f : 1.0f);
-    const float left_frac = std::clamp(left_px / total_w, 0.12f, 0.30f);
-    const float right_frac = std::clamp(right_px / (total_w * (1.0f - left_frac)), 0.14f, 0.36f);
-    const float bottom_frac = (mode == StudioMode::Nodes) ? 0.65f : (mode == StudioMode::Rigging ? 0.24f : 0.28f);
+    const float max_left_frac = (avail_size.x < 680.0f) ? 0.24f : 0.30f;
+    const float max_right_frac = (avail_size.x < 680.0f) ? 0.26f : 0.36f;
+    const float left_frac = std::clamp(left_px / total_w, 0.12f, max_left_frac);
+    const float right_frac = std::clamp(right_px / (total_w * (1.0f - left_frac)), 0.14f, max_right_frac);
+    float bottom_frac = (mode == StudioMode::Nodes) ? 0.65f : (mode == StudioMode::Rigging ? 0.24f : 0.28f);
+    if (avail_size.y < 420.0f && mode != StudioMode::Nodes) {
+        bottom_frac = std::min(bottom_frac, 0.22f);
+    }
 
     ImGuiID left_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Left, left_frac, nullptr, &main_id);
     ImGuiID right_id = ImGui::DockBuilderSplitNode(main_id, ImGuiDir_Right, right_frac, nullptr, &main_id);
@@ -974,9 +979,31 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     ImGui::PopStyleVar(3);
 
     const ImGuiID dockspace_id = ImGui::GetID("##AetherDockSpace");
+    const bool host_resized =
+        (std::fabs(dock_sz.x - last_dock_host_w_) > 1.5f || std::fabs(dock_sz.y - last_dock_host_h_) > 1.5f);
+    if (host_resized) {
+        dock_resize_check_frames_ = 2u;
+    }
+    if (!dock_layout_dirty_ && !layout_maximized_ && dock_resize_check_frames_ > 0u) {
+        if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockspace_id); cn != nullptr) {
+            const bool starved_x = (cn->Size.x > 0.0f && cn->Size.x < 120.0f && dock_sz.x >= 320.0f);
+            const bool starved_y = (cn->Size.y > 0.0f && cn->Size.y < 110.0f && dock_sz.y >= 240.0f);
+            if (starved_x || starved_y) {
+                dock_layout_dirty_ = true;
+                dock_resize_check_frames_ = 0u;
+            } else {
+                --dock_resize_check_frames_;
+            }
+        } else {
+            --dock_resize_check_frames_;
+        }
+    }
     if (dock_layout_dirty_) {
         build_dock_layout(dockspace_id, mode_);
+        dock_resize_check_frames_ = 0u;
     }
+    last_dock_host_w_ = dock_sz.x;
+    last_dock_host_h_ = dock_sz.y;
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
 

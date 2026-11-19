@@ -112,8 +112,9 @@ float3 eval_bounce_hit_radiance(uint tri_id, float2 bary, float3 hit_world, floa
                     float scene_vz = -fg.proj.col3.z / (h_depth + fg.proj.col2.z);
                     float hit_vz = mul_col(fg.view, float4(hit_world, 1.0)).z;
                     if (abs(hit_vz - scene_vz) < 0.04) {
+                        float2 hdr_uv = clamp(hit_uv * fg.target_uv_scale.xy, float2(0.0, 0.0), fg.target_uv_scale.zw);
                         float3 prev_hdr =
-                            aether_sample_level(fg.gbuffer_ids[1].w, kSamplerLinearClamp, hit_uv, 0).rgb;
+                            aether_sample_level(fg.gbuffer_ids[1].w, kSamplerLinearClamp, hdr_uv, 0).rgb;
                         hit_rad = lerp(hit_rad, prev_hdr, 0.40);
                     }
                 }

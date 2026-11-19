@@ -345,6 +345,24 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
             }
             save_snapshot("studio_lighting_quad_100.png", w, h);
             ws.lighting_stage().toggle_quad_view();
+
+            // Resized wide strip (1600x360) and tall narrow strip (450x900) Lighting tab snapshots
+            io.DisplaySize = ImVec2(1600.0f, 360.0f);
+            for (int f = 0; f < 6; ++f) {
+                rig.frame(ws);
+            }
+            save_snapshot("studio_lighting_wide_1600x360.png", 1600, 360);
+
+            io.DisplaySize = ImVec2(450.0f, 900.0f);
+            for (int f = 0; f < 6; ++f) {
+                rig.frame(ws);
+            }
+            save_snapshot("studio_lighting_tall_450x900.png", 450, 900);
+
+            io.DisplaySize = ImVec2(static_cast<float>(w), static_cast<float>(h));
+            for (int f = 0; f < 4; ++f) {
+                rig.frame(ws);
+            }
         }
 
         // 100% DPI: also capture interactive Move 3D Gizmo + Wireframe/Colliders in Live mode,

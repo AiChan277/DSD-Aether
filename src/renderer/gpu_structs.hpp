@@ -184,6 +184,9 @@ struct alignas(16) GpuFrameGlobals {
     uint64_t uv_delta_bda{0};
     uint64_t material_grade_bda{0};
     uint64_t _phase3_pad_bda{0};
+    // Active sub-rect UV mapping inside physical render targets: xy = active_size / buf_size, zw = max_valid_uv
+    float target_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
+    float target_half_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);

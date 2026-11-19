@@ -194,6 +194,8 @@ struct GpuFrameGlobals {
     uint64_t uv_delta_bda;
     uint64_t material_grade_bda;
     uint64_t _phase3_pad_bda;
+    float4 target_uv_scale;
+    float4 target_half_uv_scale;
     GpuLight lights[8];
 };
 
