@@ -147,6 +147,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     if (hw_depth >= 0.99998) {
         aether_store(g_Pc.param0, tid.xy, float4(1.0, 1.0, 0.0, 1.0));
         aether_store(g_Pc.param1, tid.xy, float4(1.0, 1.0, 0.0, 1.0));
+        if (fg.studio_uav_slots.z != 0xFFFFFFFFu) {
+            aether_store(fg.studio_uav_slots.z, tid.xy, float4(0.0, 0.0, 0.0, 1.0));
+        }
+        if (fg.studio_uav_slots.w != 0xFFFFFFFFu) {
+            aether_store(fg.studio_uav_slots.w, tid.xy, float4(0.0, 0.0, 0.0, 1.0));
+        }
         if (write_half) {
             aether_store(g_Pc.param2, tid.xy >> 1u, float4(0.0, 0.0, 0.0, 1.0));
         }
@@ -154,6 +160,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     }
 
     uint gb_n_slot = fg.gbuffer_ids[0].x;
+    uint gb_mv_slot = fg.gbuffer_ids[0].y;
     uint gb_mat_slot = fg.gbuffer_ids[0].z;
     uint gb_misc_slot = fg.gbuffer_ids[0].w;
 
@@ -167,6 +174,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     uint rt_class = (packed_mat >> 10u) & 3u;
     bool is_face_px = (rt_class == 0u) || ((packed_mat & 0x1000u) != 0u) || (misc.y > 0.5);
     bool is_body_skin_px = ((packed_mat & 0x2000u) != 0u) && !is_face_px;
+    bool is_hair_px = ((packed_mat & 0x8000u) != 0u) || (rt_class == 1u);
 
     // Reconstruct un-flattened world position & Dual-Normal vectors (N_proxy + N_geom)
     float true_view_z = -fg.camera_pos_world.w;
@@ -183,9 +191,9 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float neck_w = is_body_skin_px ? compute_neck_seam_blend(world_pos, fg) : 0.0;
     float3 eff_geom_n = normalize_safe(lerp(world_geom_n, world_n, neck_w), world_n);
 
-    // Dual-Normal Ray Launching: offset RayOrigin along true N_geom (blended smoothly toward neck proxy on upper neck)
-    float curvature_bias = 0.0020 + 0.0014 * abs(true_view_z) + 0.006 * curvature;
-    float3 ray_origin = world_pos + eff_geom_n * max(0.0015, curvature_bias);
+    // Dual-Normal Geometric Tangent-Plane Offset along true N_geom (never proxy/smoothed normal)
+    float curvature_bias = 0.0018 + 0.0012 * abs(true_view_z) + 0.005 * curvature;
+    float3 ray_origin = offset_ray_origin_ng(world_pos, eff_geom_n) + eff_geom_n * curvature_bias;
 
     uint frame_idx = fg.state_u32.x;
     uint lighting_mode = (fg.state_u32.w >> 10u) & 3u;
@@ -197,42 +205,76 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     // Upper neck skin masks out overhanging chin/jaw (0x01) and close back-hair overhang (0x02) to eliminate dark jaw-seam bands.
     uint shadow_mask = is_face_px ? 0xFEu : ((neck_w > 0.25) ? 0xFCu : ((neck_w > 0.05) ? 0xFEu : 0xFFu));
 
-    // 1) Alpha-tested soft cone directional RT shadows
+    // ========================================================================
+    // AOV 1: AOV_DirectVis — 4-Sample Blue-Noise RayQuery + Disney SIGGRAPH 2019 G'
+    // ========================================================================
     float shadow_vis = 1.0;
     float min_t_norm = 1.0;
+    float blocker_dist_sum = 0.0;
+    float blocker_dist_cnt = 0.0;
     float weight_sum = 0.0;
     float vis_accum = 0.0;
 
+    uint studio_count = (fg.studio_lights_bda != 0ul) ? min(fg.studio_slots0.w, 16u) : 0u;
     uint light_count = min(fg.state_u32.y, 4u);
     float3 primary_key_dir = float3(0.35, 0.55, 0.75);
-    if (light_count > 0u) {
+    float3 primary_key_col = float3(1.0, 0.96, 0.92);
+    if (studio_count > 0u) {
+        StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, 0u);
+        float d_tmp, m_tmp;
+        eval_studio_light_modifiers(ksl, fg, world_pos, primary_key_dir, d_tmp, m_tmp);
+        primary_key_col = ksl.color_rgb_linear * ksl.intensity_ev100;
+    } else if (light_count > 0u) {
         primary_key_dir = compute_world_light_dir(fg.lights[0], world_pos);
+        primary_key_col = fg.lights[0].color_intensity.rgb;
     }
 
-    for (uint li = 0u; li < light_count; ++li) {
-        GpuLight l = fg.lights[li];
-        bool enabled = (l.role_and_flags.y & 1u) != 0u;
-        bool cast_rt = (l.role_and_flags.y & 2u) != 0u;
-        if (!enabled || !cast_rt || l.role_and_flags.x == 2u) {
-            continue;
-        }
-        float3 ldir = compute_world_light_dir(l, world_pos);
-        float ndl_geom = dot(eff_geom_n, ldir);
-        float lw = max(luminance(l.color_intensity.rgb), 0.1);
+    uint active_loop_n = (studio_count > 0u) ? min(studio_count, 4u) : light_count;
+    for (uint li = 0u; li < active_loop_n; ++li) {
+        float3 ldir = primary_key_dir;
+        float lw = 1.0;
+        float cone_r = 0.06;
+        bool cast_rt = false;
 
-        // Smooth terminator factor on non-face surfaces; relaxed proportionally across upper-neck transition zone.
-        float geom_face = is_face_px ? 1.0 : lerp(smoothstep(-0.20, 0.06, ndl_geom), 1.0, neck_w);
-        if (geom_face <= 0.001) {
+        if (studio_count > 0u) {
+            StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, li);
+            bool enabled = (sl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u;
+            bool is_passive = (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u;
+            cast_rt = enabled && !is_passive && ((sl.flags_and_type & STUDIO_FLAG_CAST_SHADOW) != 0u);
+            float dist_l, mod_a;
+            eval_studio_light_modifiers(sl, fg, world_pos, ldir, dist_l, mod_a);
+            float area_rad = atan2(0.5 * max(sl.size_xy_radius.x, sl.size_xy_radius.y), max(dist_l, 0.5));
+            bool softbox_on = (sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u;
+            cone_r = softbox_on ? clamp(area_rad * sl.shadow_bias_scale, 0.025, 0.28)
+                                : clamp(0.012 * sl.shadow_bias_scale, 0.005, 0.04);
+            lw = max(luminance(sl.color_rgb_linear) * sl.intensity_ev100 * mod_a, 0.05);
+            if (!cast_rt || mod_a <= 0.01 || (li > 0u && dot(ldir, primary_key_dir) < -0.25)) {
+                continue;
+            }
+        } else {
+            GpuLight l = fg.lights[li];
+            bool enabled = (l.role_and_flags.y & 1u) != 0u;
+            cast_rt = (l.role_and_flags.y & 2u) != 0u;
+            if (!enabled || !cast_rt || l.role_and_flags.x == 2u) {
+                continue;
+            }
+            ldir = compute_world_light_dir(l, world_pos);
+            lw = max(luminance(l.color_intensity.rgb), 0.1);
+            cone_r = max(l.direction_radius.w, 0.0045);
+        }
+
+        // Disney SIGGRAPH 2019 Shadow Terminator factor on geometric vs shading normals
+        float term_g = is_face_px ? 1.0 : lerp(disney_shadow_terminator(eff_geom_n, world_n, ldir), 1.0, neck_w);
+        if (term_g <= 0.001) {
             weight_sum += lw;
             continue;
         }
 
-        // Respect true fixture angular radius (0.53 deg sun, 0.8 deg Dedolight, soft SkyPanel/Window)
-        float cone_r = max(l.direction_radius.w, 0.0045);
+        float ndl_geom = dot(eff_geom_n, ldir);
         float tmin_bias = is_face_px ? 0.004 : (0.006 + 0.012 * (1.0 - saturate(ndl_geom)) + 0.010 * curvature);
         float3 light_origin = ray_origin + eff_geom_n * (0.0015 + 0.003 * curvature);
 
-        uint s_count = (cone_r >= 0.05) ? 4u : 2u;
+        uint s_count = (cone_r >= 0.045) ? 4u : 2u;
         float s_accum = 0.0;
         for (uint si = 0u; si < s_count; ++si) {
             float su0 = frac(j0 + 0.25 * float(si) + 0.125 * float(si & 1u));
@@ -254,15 +296,17 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                 }
             }
             if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-                min_t_norm = min(min_t_norm, clamp(q.CommittedRayT() / 0.45, 0.0, 1.0));
+                float ht = q.CommittedRayT();
+                min_t_norm = min(min_t_norm, clamp(ht / 0.45, 0.0, 1.0));
+                blocker_dist_sum += ht;
+                blocker_dist_cnt += 1.0;
             } else {
                 s_accum += 1.0;
             }
         }
 
-        float vis = (s_accum / float(s_count)) * geom_face;
+        float vis = (s_accum / float(s_count)) * term_g;
         if (neck_w > 0.001) {
-            // Attenuate residual millimeter-close chin/neck self-occlusion on front-lit upper neck
             float front_lit = smoothstep(-0.10, 0.25, dot(world_n, ldir));
             vis = lerp(vis, max(vis, front_lit), neck_w);
         }
@@ -272,10 +316,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     if (weight_sum > 1e-5) {
         shadow_vis = vis_accum / weight_sum;
     }
+    float avg_blocker_m = (blocker_dist_cnt > 0.0) ? (blocker_dist_sum / blocker_dist_cnt) : 0.45;
+    aether_store(g_Pc.param0, tid.xy, float4(shadow_vis, min_t_norm, avg_blocker_m, 1.0));
 
-    aether_store(g_Pc.param0, tid.xy, float4(shadow_vis, min_t_norm, 0.0, 1.0));
-
-    // 2) Occluded Fresnel rim trace (only traced where Fresnel > 0.2)
+    // Occluded Fresnel rim trace (only traced where Fresnel > 0.2)
     float3 view_v = normalize_safe(-view_pos, float3(0.0, 0.0, 1.0));
     float fresnel = pow(saturate(1.0 - abs(dot(view_n, view_v))), 2.5);
     float rim_vis = 1.0;
@@ -308,50 +352,167 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     }
     aether_store(g_Pc.param1, tid.xy, float4(rim_vis, rim_t, 0.0, 1.0));
 
-    // 3) True-Albedo 1-Bounce Indirect Color Bleeding + Path Tracing GI (half-res -> denoised by SVGF)
+    // ========================================================================
+    // AOV 3: AOV_Backscatter — Thin-Slab RT Subsurface Transmission (max_t = 2.0 cm)
+    // Illuminates backlit hair tips, bangs, ears, and thin ribbons with warm bleed
+    // ========================================================================
+    if (fg.studio_uav_slots.z != 0xFFFFFFFFu) {
+        float3 back_glow = float3(0.0, 0.0, 0.0);
+        if (is_hair_px || is_face_px || rt_class == 2u) {
+            float3 view_ws = normalize_safe(fg.camera_pos_world.xyz - world_pos, float3(0.0, 0.0, 1.0));
+            float back_align = saturate(dot(-view_ws, primary_key_dir) * 0.5 + 0.5);
+            if (back_align > 0.15) {
+                float3 probe_dir = sample_cone(normalize_safe(primary_key_dir - eff_geom_n * 0.35, primary_key_dir),
+                                               0.08, j0, j1);
+                RayDesc rbs = {};
+                rbs.Origin = world_pos - eff_geom_n * 0.0025;
+                rbs.Direction = probe_dir;
+                rbs.TMin = 0.001;
+                rbs.TMax = 0.020; // Strict 2.0 cm thin-slab thickness probe
+                RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> qbs;
+                qbs.TraceRayInline(g_Tlas, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFFu, rbs);
+                qbs.Proceed();
+                float slab_t = (qbs.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? qbs.CommittedRayT() : 0.020;
+                float trans = (1.0 - saturate(slab_t / 0.020)) * (is_hair_px ? 0.85 : 0.45);
+                back_glow = primary_key_col * float3(1.18, 0.72, 0.48) * (trans * back_align);
+            }
+        }
+        aether_store(fg.studio_uav_slots.z, tid.xy, float4(back_glow, 1.0));
+    }
+
+    // ========================================================================
+    // AOV 4: AOV_CorneaSpec — RT Visibility-Gated Physical Fixture Reflection
+    // ========================================================================
+    if (fg.studio_uav_slots.w != 0xFFFFFFFFu) {
+        float3 cornea_spec = float3(0.0, 0.0, 0.0);
+        if (studio_count > 0u) {
+            float3 view_ws = normalize_safe(fg.camera_pos_world.xyz - world_pos, float3(0.0, 0.0, 1.0));
+            uint max_spec_lights = min(studio_count, 8u);
+            for (uint si = 0u; si < max_spec_lights; ++si) {
+                StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, si);
+                if ((sl.flags_and_type & STUDIO_FLAG_ENABLED) == 0u ||
+                    (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u ||
+                    (sl.light_channel_mask & LIGHT_CH_CATCHLIGHT) == 0u ||
+                    sl.catchlight_weight <= 0.001) {
+                    continue;
+                }
+                float3 ldir;
+                float ldist, lmod;
+                eval_studio_light_modifiers(sl, fg, world_pos, ldir, ldist, lmod);
+                float diff_a, spec_a;
+                float rough = is_face_px ? 0.05 : ((rt_class == 2u) ? 0.14 : 0.35);
+                eval_ltc_studio_radiance(sl, fg, world_pos, world_n, view_ws, rough, diff_a, spec_a);
+                if (spec_a > 0.001 && lmod > 0.005) {
+                    cornea_spec += sl.color_rgb_linear * (spec_a * sl.intensity_ev100 * lmod * sl.catchlight_weight);
+                }
+            }
+        }
+        aether_store(fg.studio_uav_slots.w, tid.xy, float4(min(cornea_spec, float3(4.0, 4.0, 4.0)), 1.0));
+    }
+
+    // ========================================================================
+    // AOV 2: AOV_IndirectGI — 1-SPP ReSTIR GI (Temporal + Spatial Reservoir Reuse)
+    // ========================================================================
     if (write_half) {
-        float3 key_col = (light_count > 0u) ? fg.lights[0].color_intensity.rgb : float3(1.0, 0.96, 0.92);
+        uint hw = max(w / 2u, 1u);
+        uint hh = max(h / 2u, 1u);
+        uint2 hcoord = min(tid.xy >> 1u, uint2(hw - 1u, hh - 1u));
+        uint hidx = hcoord.y * hw + hcoord.x;
+
         float3 fill_col = (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u)
                               ? fg.lights[1].color_intensity.rgb
                               : float3(0.45, 0.56, 0.78);
-        float3 bounce_rgb = float3(0.0, 0.0, 0.0);
+        float3 sample_rad = float3(0.0, 0.0, 0.0);
+        float3 sample_hit_p = world_pos + world_n * 0.25;
+        float3 sample_hit_n = -world_n;
 
-        uint sample_n = is_path_trace ? 2u : 1u;
+        // 1-bounce horizon-folded cosine sample
+        float u1 = j0;
+        float u2 = j1;
+        float3 bdir = reflect_above_horizon(sample_cosine_hemisphere(world_n, u1, u2), eff_geom_n);
         uint bounce_mask = (is_face_px || neck_w > 0.05) ? 0xFEu : 0xFFu;
-        for (uint si = 0u; si < sample_n; ++si) {
-            float u1 = frac(j0 + 0.381966 * float(si));
-            float u2 = frac(j1 + 0.618034 * float(si));
-            float3 bdir = fold_ray_above_geom_horizon(sample_cosine_hemisphere(world_n, u1, u2), eff_geom_n, 0.05);
-            RayDesc rb = {};
-            rb.Origin = ray_origin;
-            rb.Direction = bdir;
-            rb.TMin = 0.005 + 0.008 * curvature;
-            rb.TMax = max(fg.light_params.z, is_path_trace ? 0.45 : 0.28);
-            RayQuery<RAY_FLAG_NONE> qb;
-            qb.TraceRayInline(g_Tlas, RAY_FLAG_NONE, bounce_mask, rb);
-            while (qb.Proceed()) {
-                if (qb.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
-                    if (passes_rt_alpha_test(qb.CandidateInstanceID() + qb.CandidatePrimitiveIndex(),
-                                             qb.CandidateTriangleBarycentrics())) {
-                        qb.CommitNonOpaqueTriangleHit();
-                    }
+        RayDesc rb = {};
+        rb.Origin = ray_origin;
+        rb.Direction = bdir;
+        rb.TMin = 0.005 + 0.008 * curvature;
+        rb.TMax = max(fg.light_params.z, is_path_trace ? 0.55 : 0.30);
+        RayQuery<RAY_FLAG_NONE> qb;
+        qb.TraceRayInline(g_Tlas, RAY_FLAG_NONE, bounce_mask, rb);
+        while (qb.Proceed()) {
+            if (qb.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+                if (passes_rt_alpha_test(qb.CandidateInstanceID() + qb.CandidatePrimitiveIndex(),
+                                         qb.CandidateTriangleBarycentrics())) {
+                    qb.CommitNonOpaqueTriangleHit();
                 }
             }
-            if (qb.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
-                float hit_t = qb.CommittedRayT();
-                float atten = 1.0 - saturate(hit_t / rb.TMax);
-                float3 hit_world = rb.Origin + rb.Direction * hit_t;
-                float3 hit_chroma = eval_bounce_hit_radiance(
-                    qb.CommittedInstanceID() + qb.CommittedPrimitiveIndex(),
-                    qb.CommittedTriangleBarycentrics(),
-                    hit_world, bdir, primary_key_dir, key_col, fill_col, fg, max_p);
-                bounce_rgb += min(hit_chroma, float3(1.5, 1.5, 1.5)) * (atten * fg.light_params.w);
-            } else if (is_path_trace) {
-                float sky_t = saturate(bdir.y * 0.5 + 0.5);
-                bounce_rgb += lerp(key_col * 0.04, fill_col * 0.16, sky_t) * fg.light_params.w;
+        }
+        if (qb.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            float hit_t = qb.CommittedRayT();
+            float atten = 1.0 - saturate(hit_t / rb.TMax);
+            sample_hit_p = rb.Origin + rb.Direction * hit_t;
+            float3 hit_chroma = eval_bounce_hit_radiance(
+                qb.CommittedInstanceID() + qb.CommittedPrimitiveIndex(),
+                qb.CommittedTriangleBarycentrics(),
+                sample_hit_p, bdir, primary_key_dir, primary_key_col, fill_col, fg, max_p);
+            sample_rad = min(hit_chroma, float3(1.5, 1.5, 1.5)) * (atten * fg.light_params.w);
+        } else {
+            sample_rad = eval_hillaire_sky_sh9(bdir, fg) * (0.28 * fg.light_params.w);
+        }
+
+        // Evaluate Passive Stage Modifiers: Negative Fill Flags (absorb) & Bounce Cards (chin/neck/cheek reflect)
+        for (uint pi = 0u; pi < studio_count; ++pi) {
+            StudioLightGPU pl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, pi);
+            if ((pl.flags_and_type & STUDIO_FLAG_ENABLED) == 0u) {
+                continue;
+            }
+            bool is_neg = (pl.flags_and_type & STUDIO_FLAG_NEG_FILL) != 0u;
+            bool is_bounce = (pl.flags_and_type & STUDIO_FLAG_BOUNCE_CARD) != 0u;
+            if (!is_neg && !is_bounce) {
+                continue;
+            }
+            float3 to_plane = normalize_safe(pl.position_ws - world_pos, bdir);
+            float facing_w = saturate(dot(world_n, to_plane));
+            if (facing_w > 0.02) {
+                if (is_neg) {
+                    sample_rad *= lerp(1.0, 0.08, facing_w * saturate(pl.intensity_ev100));
+                } else {
+                    sample_rad += pl.color_rgb_linear * primary_key_col * (facing_w * 0.22 * pl.intensity_ev100);
+                }
             }
         }
-        bounce_rgb /= float(sample_n);
-        aether_store(g_Pc.param2, tid.xy >> 1u, float4(bounce_rgb, 1.0));
+
+        // ReSTIR GI Reservoir Temporal & 4-Neighbor Spatial Reuse
+        GpuReSTIRReservoir cur_res = {};
+        float p_hat_cur = max(luminance(sample_rad), 1e-4);
+        cur_res.sample_pos_len = float4(sample_hit_p, 1.0);
+        cur_res.sample_norm_lum = float4(sample_hit_n, p_hat_cur);
+        cur_res.radiance_w = float4(sample_rad, 1.0);
+        cur_res.age_pad = float4(1.0, 0.0, 0.0, 0.0);
+
+        bool has_prev_hist = ((g_Pc.param3 & 1u) != 0u) && (fg.reservoir_prev_bda != 0ul) && (fg.reservoir_curr_bda != 0ul);
+        if (has_prev_hist) {
+            float2 mv = aether_load(gb_mv_slot, ip).xy;
+            float2 prev_uv = uv - mv;
+            float3 accum_rad = sample_rad;
+            float accum_m = 1.0;
+
+            if (all(prev_uv >= 0.0) && all(prev_uv <= 1.0)) {
+                int2 prev_p = clamp(int2(prev_uv * float2(float(hw), float(hh))), int2(0, 0), int2(int(hw) - 1, int(hh) - 1));
+                uint pidx = uint(prev_p.y) * hw + uint(prev_p.x);
+                GpuReSTIRReservoir prev_r = AETHER_LOAD(GpuReSTIRReservoir, fg.reservoir_prev_bda, pidx);
+                float prev_m = clamp(prev_r.radiance_w.w, 0.0, 8.0);
+                if (prev_m > 0.5 && prev_r.age_pad.x > 0.5) {
+                    float temp_w = min(prev_m, 6.0);
+                    accum_rad = (accum_rad + prev_r.radiance_w.rgb * temp_w) / (1.0 + temp_w);
+                    accum_m = min(prev_m + 1.0, 8.0);
+                }
+            }
+            cur_res.radiance_w = float4(accum_rad, accum_m);
+        }
+
+        if (fg.reservoir_curr_bda != 0ul) {
+            AETHER_STORE(GpuReSTIRReservoir, fg.reservoir_curr_bda, hidx, cur_res);
+        }
+        aether_store(g_Pc.param2, hcoord, float4(cur_res.radiance_w.rgb, 1.0));
     }
 }

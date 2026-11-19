@@ -5,6 +5,7 @@
 #include "renderer/frame_graph.hpp"
 #include "renderer/gpu_structs.hpp"
 #include "renderer/lighting_rig.hpp"
+#include "renderer/studio_lighting.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -134,7 +135,8 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     out_vp = mul_mat4(out_proj, out_view);
 }
 
-[[nodiscard]] inline GpuMat4 build_csm_ortho_matrix(const Mat4Vec3& target, const Mat4Vec3& light_dir_to_light) noexcept {
+[[nodiscard]] inline GpuMat4 build_csm_ortho_matrix(const Mat4Vec3& target,
+                                                    const Mat4Vec3& light_dir_to_light) noexcept {
     const Mat4Vec3 fwd = normalize3({-light_dir_to_light.x, -light_dir_to_light.y, -light_dir_to_light.z});
     const Mat4Vec3 up_cand = (std::abs(fwd.y) < 0.99f) ? Mat4Vec3{0.0f, 1.0f, 0.0f} : Mat4Vec3{0.0f, 0.0f, 1.0f};
     const Mat4Vec3 right = normalize3(cross3(fwd, up_cand));
@@ -388,8 +390,7 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
         return fallback;
     };
     const Mat4Vec3 head_ws = resolve_bone_world(AETHER_BONE_HEAD, pivot_ws);
-    Mat4Vec3 neck_ws =
-        resolve_bone_world(AETHER_BONE_NECK, {head_ws.x, head_ws.y - 0.070f * av_scale, head_ws.z});
+    Mat4Vec3 neck_ws = resolve_bone_world(AETHER_BONE_NECK, {head_ws.x, head_ws.y - 0.070f * av_scale, head_ws.z});
     const float dx_nh = head_ws.x - neck_ws.x;
     const float dy_nh = head_ws.y - neck_ws.y;
     const float dz_nh = head_ws.z - neck_ws.z;
@@ -404,6 +405,44 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     fg.neck_seam_head_str[1] = head_ws.y;
     fg.neck_seam_head_str[2] = head_ws.z;
     fg.neck_seam_head_str[3] = std::clamp(rig.neck_seam_blend, 0.0f, 1.0f);
+
+    const Mat4Vec3 chest_ws =
+        resolve_bone_world(AETHER_BONE_CHEST, {neck_ws.x, neck_ws.y - 0.145f * av_scale, neck_ws.z});
+    fg.neck_chest_ws[0] = chest_ws.x;
+    fg.neck_chest_ws[1] = chest_ws.y;
+    fg.neck_chest_ws[2] = chest_ws.z;
+    fg.neck_chest_ws[3] = 0.148f * av_scale;
+
+    fg.chin_pos_ws[0] = head_ws.x + fg.head_fwd_world[0] * 0.045f * av_scale;
+    fg.chin_pos_ws[1] = 0.5f * (head_ws.y + neck_ws.y) - 0.015f * av_scale;
+    fg.chin_pos_ws[2] = head_ws.z + fg.head_fwd_world[2] * 0.045f * av_scale;
+    fg.chin_pos_ws[3] = 1.0f;
+
+    fg.split_avatar_grade[0] = rig.split_grading.avatar_contrast;
+    fg.split_avatar_grade[1] = rig.split_grading.avatar_saturation;
+    fg.split_avatar_grade[2] = rig.split_grading.avatar_warmth;
+    fg.split_avatar_grade[3] = rig.split_grading.avatar_ev_bias;
+    fg.split_bg_grade[0] = rig.split_grading.bg_contrast;
+    fg.split_bg_grade[1] = rig.split_grading.bg_saturation;
+    fg.split_bg_grade[2] = rig.split_grading.bg_exposure;
+    fg.split_bg_grade[3] = rig.split_grading.master_grade_strength;
+
+    fg.satsuei_params[0] = rig.satsuei.light_wrap_strength;
+    fg.satsuei_params[1] = rig.satsuei.halation_strength;
+    fg.satsuei_params[2] = rig.satsuei.halation_threshold;
+    fg.satsuei_params[3] = rig.satsuei.backscatter_strength;
+
+    const Mat4Vec3 key_for_sky = scene_light_dir_to_light(rig.lights[0]);
+    std::array<std::array<float, 4>, 9> sh9{};
+    const float sky_str = std::max(0.28f, fg.photometric_params1[1]);
+    compute_hillaire_sky_sh9({key_for_sky.x, key_for_sky.y, key_for_sky.z},
+                             {rig.lights[0].color[0], rig.lights[0].color[1], rig.lights[0].color[2]}, sky_str,
+                             std::max(0.25f, fg.photometric_params1[2]), sh9);
+    for (int k = 0; k < 9; ++k) {
+        for (int c = 0; c < 4; ++c) {
+            fg.sky_sh9[k][c] = sh9[static_cast<size_t>(k)][static_cast<size_t>(c)];
+        }
+    }
     if (has_avatar) {
         for (int c = 0; c < 4; ++c) {
             fg.face_skin_ref_rgb[c] = req.avatar->face_skin_ref_linear[static_cast<size_t>(c)];
@@ -450,8 +489,9 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
         gl.role_and_flags[1] = (sl.enabled ? 1u : 0u) | (sl.cast_rt_shadow ? 2u : 0u);
         gl.role_and_flags[2] = 0xFFu;
     }
-    const Mat4Vec3 key_for_csm =
-        (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) ? coaxial_dir : scene_light_dir_to_light(rig.lights[0]);
+    const Mat4Vec3 key_for_csm = (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight)
+                                     ? coaxial_dir
+                                     : scene_light_dir_to_light(rig.lights[0]);
     fg.shadow_view_proj[0] = build_csm_ortho_matrix(pivot_ws, key_for_csm);
     return eff_mode;
 }

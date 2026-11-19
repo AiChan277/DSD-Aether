@@ -3,6 +3,8 @@
 #include "flip_metric.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "renderer/sdf_generator.hpp"
+#include "renderer/studio_lighting.hpp"
+#include "rhi/d3d12_device.hpp"
 #include "synthetic_avatar_helper.hpp"
 #include "test_png_io.hpp"
 
@@ -846,6 +848,196 @@ TEST_CASE("Vulkan wireframe mode, AvatarRoot 3D transform, and Rigging spring-bo
 
     renderer.destroy();
     avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtures, Modifiers & 4+ light OKLab",
+          "[renderer][phase1][studio_lighting]") {
+    using namespace aether::renderer;
+
+    // 1. Discrete GPU strictly ranks at Index 0 ahead of integrated GPUs in both Vulkan & DX12
+    {
+        auto vk_adapters = aether::rhi::RhiDevice::enumerate_vulkan_devices();
+        REQUIRE(vk_adapters.has_value());
+        bool has_vk_disc = false;
+        for (const auto& a : vk_adapters.value()) {
+            if (a.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                has_vk_disc = true;
+            }
+        }
+        if (has_vk_disc) {
+            CHECK(vk_adapters.value()[0].device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+        }
+
+        auto dx_adapters = aether::rhi::D3D12Device::enumerate_adapters();
+        REQUIRE(dx_adapters.has_value());
+        bool has_dx_disc = false;
+        for (const auto& d : dx_adapters.value()) {
+            if (d.is_discrete) {
+                has_dx_disc = true;
+            }
+        }
+        if (has_dx_disc) {
+            CHECK(dx_adapters.value()[0].is_discrete);
+        }
+    }
+
+    // 2. CPU precomputed 64x64 Heitz LTC LUTs, 256x64 IES LM-63-19 LUT, & all 12 fixture profiles
+    {
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> inv_m{};
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> amp{};
+        generate_heitz_ltc_luts(inv_m, amp);
+        CHECK(std::isfinite(inv_m[0]));
+        CHECK(inv_m[0] > 0.0f);
+        CHECK(amp[0] > 0.3f);
+        CHECK(amp[0] <= 1.0f);
+
+        std::array<float, kIesLutWidth * kIesLutRows> ies{};
+        generate_ies_lm63_lut(ies);
+        // Spot/Dedolight beam profile row 5 must peak on axis and attenuate strongly off axis
+        CHECK(ies[5u * kIesLutWidth + 0u] > 0.9f);
+        CHECK(ies[5u * kIesLutWidth + 128u] < 0.05f);
+
+        LightingRig rig = LightingRig::default_three_point();
+        rig.use_studio_lights = true;
+        rig.studio_light_count = 12;
+        for (uint32_t f = 0; f < 12u; ++f) {
+            configure_fixture_defaults(rig.studio_lights[f], static_cast<StudioFixtureProfile>(f));
+            rig.studio_lights[f].enabled = true;
+        }
+        std::array<StudioLightGPU, kMaxStudioLights> packed{};
+        const uint32_t cnt = pack_studio_lights_gpu(rig, {0.0f, 1.35f, 0.0f}, {0.0f, 1.35f, 2.0f}, packed);
+        CHECK(cnt == 12u);
+        for (uint32_t f = 0; f < 12u; ++f) {
+            CHECK((packed[f].flags_and_type & 0x0Fu) == f);
+        }
+    }
+
+    // 3. Quantitative Photometric Modifier & 4+ Light OKLab Equilibrium Rendering Verification
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped GPU render portion: Vulkan unavailable in environment");
+        return;
+    }
+
+    // Build wide quad torso/face proxy panel spanning [-0.9..+0.9] X and [-0.7..+0.7] Y
+    aether::test::SyntheticMeshSpec spec{};
+    spec.materials.push_back(aether::test::make_basic_npr_material(0.92f, 0.88f, 0.86f));
+    spec.materials[0].toon_params[0] = 0.0f; // smooth shading transition across modifiers
+    const float p0[3] = {-0.90f, -0.70f, 0.0f};
+    const float p1[3] = {0.90f, -0.70f, 0.0f};
+    const float p2[3] = {0.90f, 0.70f, 0.0f};
+    const float p3[3] = {-0.90f, 0.70f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.92f, 0.88f, 0.86f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+
+    PreviewCamera cam{};
+    cam.target_x = 0.0f;
+    cam.target_y = 0.0f;
+    cam.target_z = 0.0f;
+    cam.distance = 2.0f;
+    cam.fovy_rad = 0.75f;
+
+    auto region_luma = [](const std::vector<uint8_t>& px, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
+        double sum = 0.0;
+        uint64_t cnt = 0;
+        for (uint32_t y = y0; y < y1; ++y) {
+            for (uint32_t x = x0; x < x1; ++x) {
+                const size_t i = (static_cast<size_t>(y) * 128u + x) * 4u;
+                sum += 0.2126 * px[i + 0] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+                ++cnt;
+            }
+        }
+        return (cnt > 0u) ? (sum / static_cast<double>(cnt)) : 0.0;
+    };
+
+    // (a) Softbox + Honeycomb Grid (30 deg) measurably attenuates peripheral edges relative to ungridded softbox
+    LightingRig rig_open = LightingRig::default_three_point();
+    rig_open.use_studio_lights = true;
+    rig_open.studio_light_count = 1;
+    configure_fixture_defaults(rig_open.studio_lights[0], StudioFixtureProfile::RectSoftbox);
+    rig_open.studio_lights[0].use_orbit_angles = false;
+    rig_open.studio_lights[0].position_ws = {0.0f, 0.0f, 1.3f};
+    rig_open.studio_lights[0].target_ws = {0.0f, 0.0f, 0.0f};
+    rig_open.studio_lights[0].aim_lock = false;
+    rig_open.studio_lights[0].intensity_ev100 = 1.25f;
+    rig_open.studio_lights[0].grid_enabled = false;
+    const auto px_open = render_synthetic_once(*rhi, spec, 128u, 128u, cam, rig_open);
+
+    LightingRig rig_grid = rig_open;
+    rig_grid.studio_lights[0].grid_enabled = true;
+    rig_grid.studio_lights[0].grid_angle_deg = 30.0f;
+    const auto px_grid = render_synthetic_once(*rhi, spec, 128u, 128u, cam, rig_grid);
+
+    const double edge_open = region_luma(px_open, 12u, 48u, 28u, 80u);
+    const double edge_grid = region_luma(px_grid, 12u, 48u, 28u, 80u);
+    INFO("Honeycomb Grid 30 deg lateral edge luma: open=" << edge_open << " grid=" << edge_grid);
+    CHECK(edge_grid < edge_open - 4.0);
+
+    // (b) 4-Leaf Barn Doors bottom cut measurably darkens lower torso band while leaving upper center lit
+    LightingRig rig_barn = rig_open;
+    rig_barn.studio_lights[0].barn_doors_enabled = true;
+    rig_barn.studio_lights[0].barn_door_cuts_deg = {45.0f, 6.0f, 45.0f, 45.0f};
+    const auto px_barn = render_synthetic_once(*rhi, spec, 128u, 128u, cam, rig_barn);
+    const double bot_open = region_luma(px_open, 48u, 96u, 80u, 114u);
+    const double bot_barn = region_luma(px_barn, 48u, 96u, 80u, 114u);
+    INFO("Barn Doors bottom cut luma: open=" << bot_open << " cut=" << bot_barn);
+    CHECK(bot_barn < bot_open - 6.0);
+
+    // (c) 4+ simultaneous studio lights with soft-knee compression + OKLab accent color preservation
+    LightingRig rig_4l = rig_open;
+    rig_4l.studio_light_count = 4;
+    rig_4l.studio_lights[0].intensity_ev100 = 1.6f; // bright white key
+    rig_4l.studio_lights[1] = rig_open.studio_lights[0];
+    configure_fixture_defaults(rig_4l.studio_lights[1], StudioFixtureProfile::LanternChinaBall);
+    rig_4l.studio_lights[1].use_orbit_angles = false;
+    rig_4l.studio_lights[1].position_ws = {-0.6f, 0.2f, 1.5f};
+    rig_4l.studio_lights[1].intensity_ev100 = 0.7f;
+    rig_4l.studio_lights[2] = rig_open.studio_lights[0];
+    configure_fixture_defaults(rig_4l.studio_lights[2], StudioFixtureProfile::LedTubeAstera);
+    rig_4l.studio_lights[2].use_orbit_angles = false;
+    rig_4l.studio_lights[2].position_ws = {-1.1f, 0.0f, 0.6f};
+    rig_4l.studio_lights[2].target_ws = {-0.5f, 0.0f, 0.0f};
+    rig_4l.studio_lights[2].aim_lock = false;
+    rig_4l.studio_lights[2].gel_enabled = true;
+    rig_4l.studio_lights[2].gel = StudioGelPreset::CyberCyan;
+    rig_4l.studio_lights[2].intensity_ev100 = 1.1f;
+    rig_4l.studio_lights[3] = rig_open.studio_lights[2];
+    rig_4l.studio_lights[3].position_ws = {1.1f, 0.0f, 0.6f};
+    rig_4l.studio_lights[3].target_ws = {0.5f, 0.0f, 0.0f};
+    rig_4l.studio_lights[3].gel = StudioGelPreset::StageMagenta;
+    rig_4l.studio_lights[3].intensity_ev100 = 1.1f;
+    const auto px_4l = render_synthetic_once(*rhi, spec, 128u, 128u, cam, rig_4l);
+
+    int max_clipped = 0;
+    double left_b_minus_r = 0.0;
+    double right_r_minus_g = 0.0;
+    for (uint32_t y = 40u; y < 88u; ++y) {
+        for (uint32_t x = 24u; x < 104u; ++x) {
+            const size_t i = (static_cast<size_t>(y) * 128u + x) * 4u;
+            if (px_4l[i] >= 254 && px_4l[i + 1] >= 254 && px_4l[i + 2] >= 254) {
+                ++max_clipped;
+            }
+            if (x < 48u) {
+                left_b_minus_r += static_cast<double>(px_4l[i + 2]) - static_cast<double>(px_4l[i + 0]);
+            }
+            if (x >= 80u) {
+                right_r_minus_g += static_cast<double>(px_4l[i + 0]) - static_cast<double>(px_4l[i + 1]);
+            }
+        }
+    }
+    INFO("4-Light Equilibrium clipped=" << max_clipped << " left(B-R)=" << left_b_minus_r
+                                        << " right(R-G)=" << right_r_minus_g);
+    CHECK(max_clipped < 200);       // Soft-knee prevents blown-out white center
+    CHECK(left_b_minus_r > 150.0);  // CyberCyan accent hue preserved on left
+    CHECK(right_r_minus_g > 150.0); // StageMagenta accent hue preserved on right
+
     rhi->destroy();
     aether_runtime_shutdown();
 }

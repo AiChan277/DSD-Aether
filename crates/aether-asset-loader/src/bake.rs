@@ -366,6 +366,210 @@ pub fn bake_into_arena(
             }
         }
     }
+
+    // Jaw-to-neck seam outline suppression (`< 1.5 cm` open boundary between Face and Body/Neck skin)
+    let mut seam_outline_mult = vec![1.0f32; v_count];
+    if is_face_vert.iter().any(|&b| b) {
+        let pack_grid = |pos: [f32; 3]| -> i64 {
+            const CELL: f32 = 0.015;
+            let ix = (pos[0] / CELL).floor() as i64;
+            let iy = (pos[1] / CELL).floor() as i64;
+            let iz = (pos[2] / CELL).floor() as i64;
+            ((ix & 0x1F_FFFF) << 42) | ((iy & 0x1F_FFFF) << 21) | (iz & 0x1F_FFFF)
+        };
+        let mut is_body_neck_vert = vec![false; v_count];
+        for (s_idx, sm) in avatar.submeshes.iter().enumerate() {
+            if submesh_is_face[s_idx] {
+                continue;
+            }
+            let lower_sm = sm.name.to_ascii_lowercase();
+            let lower_mat = avatar
+                .materials
+                .get(sm.material_index as usize)
+                .map(|m| m.name.to_ascii_lowercase())
+                .unwrap_or_default();
+            if lower_sm.contains("body")
+                || lower_sm.contains("neck")
+                || lower_mat.contains("body")
+                || lower_mat.contains("neck")
+                || lower_mat.contains("skin")
+            {
+                for &vi in &sm.indices {
+                    if (vi as usize) < v_count {
+                        is_body_neck_vert[vi as usize] = true;
+                    }
+                }
+            }
+        }
+        // Detect open boundary vertices on face meshes via undirected edge incidence
+        let mut face_edge_counts: AHashMap<(u64, u64), u32> = AHashMap::with_capacity(v_count);
+        for (s_idx, sm) in avatar.submeshes.iter().enumerate() {
+            if !submesh_is_face[s_idx] {
+                continue;
+            }
+            for tri in sm.indices.chunks_exact(3) {
+                let keys = [
+                    quantize_weld_key(avatar.vertices[tri[0] as usize].position, eps),
+                    quantize_weld_key(avatar.vertices[tri[1] as usize].position, eps),
+                    quantize_weld_key(avatar.vertices[tri[2] as usize].position, eps),
+                ];
+                for &(a, b) in &[(0usize, 1usize), (1, 2), (2, 0)] {
+                    let ek = if keys[a] <= keys[b] {
+                        (keys[a], keys[b])
+                    } else {
+                        (keys[b], keys[a])
+                    };
+                    *face_edge_counts.entry(ek).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut is_face_open_boundary = vec![false; v_count];
+        for (s_idx, sm) in avatar.submeshes.iter().enumerate() {
+            if !submesh_is_face[s_idx] {
+                continue;
+            }
+            for tri in sm.indices.chunks_exact(3) {
+                let keys = [
+                    quantize_weld_key(avatar.vertices[tri[0] as usize].position, eps),
+                    quantize_weld_key(avatar.vertices[tri[1] as usize].position, eps),
+                    quantize_weld_key(avatar.vertices[tri[2] as usize].position, eps),
+                ];
+                for &(a, b) in &[(0usize, 1usize), (1, 2), (2, 0)] {
+                    let ek = if keys[a] <= keys[b] {
+                        (keys[a], keys[b])
+                    } else {
+                        (keys[b], keys[a])
+                    };
+                    if face_edge_counts.get(&ek).copied().unwrap_or(0) == 1 {
+                        is_face_open_boundary[tri[a] as usize] = true;
+                        is_face_open_boundary[tri[b] as usize] = true;
+                    }
+                }
+            }
+        }
+        let mut body_grid: AHashMap<i64, Vec<usize>> = AHashMap::new();
+        for (vi, &is_b) in is_body_neck_vert.iter().enumerate() {
+            if is_b {
+                body_grid
+                    .entry(pack_grid(avatar.vertices[vi].position))
+                    .or_default()
+                    .push(vi);
+            }
+        }
+        let max_dist_sq = 0.015f32 * 0.015f32;
+        for i in 0..v_count {
+            if !is_face_vert[i] || !is_face_open_boundary[i] {
+                continue;
+            }
+            let p = avatar.vertices[i].position;
+            let pv = Vec3::from_array(p);
+            let cell = 0.015f32;
+            let bx = (p[0] / cell).floor() as i64;
+            let by = (p[1] / cell).floor() as i64;
+            let bz = (p[2] / cell).floor() as i64;
+            let mut near_neck = false;
+            'search_body: for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let key = (((bx + dx) & 0x1F_FFFF) << 42)
+                            | (((by + dy) & 0x1F_FFFF) << 21)
+                            | ((bz + dz) & 0x1F_FFFF);
+                        if let Some(list) = body_grid.get(&key) {
+                            for &bj in list {
+                                let bp = Vec3::from_array(avatar.vertices[bj].position);
+                                if pv.distance_squared(bp) < max_dist_sq {
+                                    near_neck = true;
+                                    seam_outline_mult[bj] = 0.0;
+                                    break 'search_body;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if near_neck {
+                seam_outline_mult[i] = 0.0;
+            }
+        }
+    }
+
+    // Hair crown tangent smoothing: eliminate coarse low-poly crown block discontinuities for dual-lobe Kajiya-Kay
+    let mut hair_smoothed_tangents: Vec<Option<Vec3>> = vec![None; v_count];
+    {
+        let mut is_hair_vert = vec![false; v_count];
+        for sm in &avatar.submeshes {
+            let lower_sm = sm.name.to_ascii_lowercase();
+            let lower_mat = avatar
+                .materials
+                .get(sm.material_index as usize)
+                .map(|m| m.name.to_ascii_lowercase())
+                .unwrap_or_default();
+            if lower_sm.contains("hair") || lower_mat.contains("hair") || sm.name.contains("髪") {
+                for &vi in &sm.indices {
+                    if (vi as usize) < v_count {
+                        is_hair_vert[vi as usize] = true;
+                    }
+                }
+            }
+        }
+        let mut crown_accum = Vec3::ZERO;
+        let mut crown_cnt = 0usize;
+        let mut hair_max_y = f32::NEG_INFINITY;
+        for (vi, &h) in is_hair_vert.iter().enumerate() {
+            if h {
+                let p = Vec3::from_array(avatar.vertices[vi].position);
+                crown_accum += p;
+                crown_cnt += 1;
+                hair_max_y = hair_max_y.max(p.y);
+            }
+        }
+        if crown_cnt > 0 {
+            let crown_center = crown_accum / (crown_cnt as f32);
+            let crown_apex = Vec3::new(crown_center.x, hair_max_y, crown_center.z);
+            let mut hair_weld_normal: AHashMap<u64, Vec3> = AHashMap::new();
+            let hair_eps = eps.max(1e-4) * 8.0;
+            for (vi, &h) in is_hair_vert.iter().enumerate() {
+                if h {
+                    let n = Vec3::from_array(avatar.vertices[vi].normal).normalize_or_zero();
+                    let k = quantize_weld_key(avatar.vertices[vi].position, hair_eps);
+                    hair_weld_normal
+                        .entry(k)
+                        .and_modify(|acc| *acc += n)
+                        .or_insert(n);
+                }
+            }
+            for (vi, &h) in is_hair_vert.iter().enumerate() {
+                if !h {
+                    continue;
+                }
+                let p = Vec3::from_array(avatar.vertices[vi].position);
+                let k = quantize_weld_key(avatar.vertices[vi].position, hair_eps);
+                let n = hair_weld_normal
+                    .get(&k)
+                    .copied()
+                    .unwrap_or_else(|| Vec3::from_array(avatar.vertices[vi].normal))
+                    .normalize_or_zero();
+                let mut radial_up = (crown_apex - p).normalize_or_zero();
+                if radial_up.length_squared() < 1e-4 {
+                    radial_up = Vec3::Y;
+                }
+                // Strand flow down along hair surface projected onto smooth normal plane
+                let mut flow = radial_up - n * radial_up.dot(n);
+                if flow.length_squared() < 1e-4 {
+                    flow = Vec3::Y - n * n.y;
+                }
+                let flow_n = flow.normalize_or_zero();
+                let bitangent = if flow_n.length_squared() > 1e-4 && n.length_squared() > 1e-4 {
+                    n.cross(flow_n).normalize_or_zero()
+                } else {
+                    Vec3::X
+                };
+                if bitangent.length_squared() > 1e-4 {
+                    hair_smoothed_tangents[vi] = Some(bitangent);
+                }
+            }
+        }
+    }
     let true_normals: Vec<Vec3> = avatar
         .vertices
         .iter()
@@ -401,7 +605,9 @@ pub fn bake_into_arena(
                     for dx in -1..=1 {
                         if let Some(bucket) = grid.get(&(s_idx, gx + dx, gy + dy, gz + dz)) {
                             for &j in bucket {
-                                if j == i || avatar.submeshes[vert_submesh[j]].material_index != mat_i {
+                                if j == i
+                                    || avatar.submeshes[vert_submesh[j]].material_index != mat_i
+                                {
                                     continue;
                                 }
                                 let p_j = Vec3::from_array(avatar.vertices[j].position);
@@ -484,7 +690,7 @@ pub fn bake_into_arena(
 
             *v25 = AetherVertex25D {
                 position: rv.position,
-                outline_width_scale: rv.edge_scale,
+                outline_width_scale: rv.edge_scale * seam_outline_mult[i],
                 true_normal: tn.to_array(),
                 z_flatten_weight: z_flat,
                 proxy_normal: proxy.to_array(),
@@ -492,7 +698,9 @@ pub fn bake_into_arena(
                 smooth_tangent: [smooth.x, smooth.y, smooth.z, 1.0],
             };
 
-            let any_tangent = tn.any_orthonormal_vector().to_array();
+            let any_tangent = hair_smoothed_tangents[i]
+                .unwrap_or_else(|| tn.any_orthonormal_vector())
+                .to_array();
             *vsurf = AetherVertexSurface {
                 uv0: rv.uv0,
                 uv1: rv.uv1,
@@ -657,5 +865,174 @@ pub fn bake_into_arena(
     BakedSummary {
         face_center_head_local,
         submesh_flags,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{RawMaterial, RawSubmesh, RawVertex, SourceUnitMetadata};
+    use std::path::PathBuf;
+
+    fn make_raw_mat(name: &str) -> RawMaterial {
+        RawMaterial {
+            name: name.to_string(),
+            base_color: [1.0; 4],
+            explicit_shade_color: None,
+            rim_color: [0.0; 3],
+            rim_lighting_mix: 0.0,
+            rim_fresnel_power: 1.0,
+            rim_lift: 0.0,
+            outline_color: [0.0; 3],
+            outline_lighting_mix: 0.0,
+            outline_width: 0.002,
+            outline_screen_space: false,
+            emissive: [0.0; 3],
+            matcap_color: [0.0; 3],
+            matcap_add_mix: 0.0,
+            matcap_strength: 0.0,
+            gi_equalization: 0.0,
+            shading_shift: 0.0,
+            shading_toony: 0.9,
+            uv_scroll: [0.0; 2],
+            uv_rotation: 0.0,
+            alpha_mode: 0,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            unlit: false,
+            has_vrm_mtoon: true,
+            render_queue_offset: 0,
+            flatten_override: None,
+            tex_base: None,
+            tex_shade: None,
+            tex_shading_shift: None,
+            tex_normal: None,
+            tex_emissive: None,
+            tex_rim: None,
+            tex_matcap: None,
+            tex_outline_width: None,
+            tex_uv_mask: None,
+            tex_ramp: None,
+            tex_sdf_face: None,
+        }
+    }
+
+    fn make_raw_vert(pos: [f32; 3]) -> RawVertex {
+        RawVertex {
+            position: pos,
+            normal: [0.0, 0.0, 1.0],
+            uv0: [0.5, 0.5],
+            uv1: [0.5, 0.5],
+            color: [255, 255, 255, 255],
+            joints: [0; 8],
+            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            edge_scale: 1.0,
+            flatten_override: -1.0,
+        }
+    }
+
+    #[test]
+    fn jaw_neck_seam_suppresses_close_outline_and_keeps_outer_outline() {
+        // Face quad bottom edge at y=1.400 (< 1.5 cm from Neck top edge at y=1.394),
+        // Face top edge at y=1.520 (> 12 cm away from Body/Neck).
+        let vertices = vec![
+            make_raw_vert([-0.03, 1.400, 0.04]), // 0: face jaw bottom-left (seam)
+            make_raw_vert([0.03, 1.400, 0.04]),  // 1: face jaw bottom-right (seam)
+            make_raw_vert([0.03, 1.520, 0.04]),  // 2: face forehead top-right (far)
+            make_raw_vert([-0.03, 1.520, 0.04]), // 3: face forehead top-left (far)
+            make_raw_vert([-0.03, 1.394, 0.036]), // 4: neck top-left (< 1.5 cm from 0)
+            make_raw_vert([0.03, 1.394, 0.036]), // 5: neck top-right (< 1.5 cm from 1)
+            make_raw_vert([0.03, 1.250, 0.036]), // 6: chest bottom-right (far)
+            make_raw_vert([-0.03, 1.250, 0.036]), // 7: chest bottom-left (far)
+        ];
+        let avatar = ParsedAvatar {
+            source_format: 0,
+            base_dir: PathBuf::new(),
+            unit_meta: SourceUnitMetadata {
+                explicit_unit_scale: Some(1.0),
+                resolved_unit_scale: 1.0,
+                scale_guessed: false,
+                left_handed_flipped: false,
+            },
+            warnings_mask: 0,
+            vertices,
+            submeshes: vec![
+                RawSubmesh {
+                    name: "Face_00_SKIN".to_string(),
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    material_index: 0,
+                    is_eye_or_brow_hint: false,
+                },
+                RawSubmesh {
+                    name: "Body_00_SKIN".to_string(),
+                    indices: vec![4, 6, 5, 4, 7, 6],
+                    material_index: 1,
+                    is_eye_or_brow_hint: false,
+                },
+            ],
+            materials: vec![make_raw_mat("Face_00_SKIN"), make_raw_mat("Body_00_SKIN")],
+            joints: vec![],
+            morphs: vec![],
+            expr_presets: vec![],
+            spring_chains: vec![],
+            colliders: vec![],
+            textures: vec![],
+        };
+        let matched = HumanoidMatchResult {
+            humanoid_to_joint: [0xFFFF; 55],
+            bone_match_score: [0.0; 55],
+            joint_humanoid: vec![0xFFFF],
+            joint_regions: vec![AETHER_JOINT_REGION_HEAD],
+            head_joint: 0,
+            warnings_mask: 0,
+        };
+        let poses = vec![NormalisedJointPose {
+            bind_translation: [0.0, 1.48, 0.0],
+            bind_rotation_quat: [0.0, 0.0, 0.0, 1.0],
+            bind_scale: [1.0; 3],
+            tail_length: 0.1,
+            rest_to_tpose_quat: [0.0, 0.0, 0.0, 1.0],
+            inverse_bind_matrix_row_major: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, -1.48],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            world_pos: [0.0, 1.48, 0.0],
+        }];
+
+        let mut v25d = vec![bytemuck::Zeroable::zeroed(); avatar.vertices.len()];
+        let mut surf = vec![bytemuck::Zeroable::zeroed(); avatar.vertices.len()];
+        let mut skin = vec![bytemuck::Zeroable::zeroed(); avatar.vertices.len()];
+        let mut indices = vec![0u32; 12];
+        let mut submeshes = vec![bytemuck::Zeroable::zeroed(); 2];
+        let mut str_buf = Vec::new();
+        bake_into_arena(
+            &avatar,
+            &matched,
+            &poses,
+            1.6,
+            false,
+            true,
+            true,
+            &mut v25d,
+            &mut surf,
+            &mut skin,
+            &mut indices,
+            &mut [],
+            &mut [],
+            &mut submeshes,
+            &mut str_buf,
+        );
+
+        // Seam vertices (0, 1 on jaw; 4, 5 on upper neck) must suppress outlines to 0.0
+        assert_eq!(v25d[0].outline_width_scale, 0.0);
+        assert_eq!(v25d[1].outline_width_scale, 0.0);
+        assert_eq!(v25d[4].outline_width_scale, 0.0);
+        assert_eq!(v25d[5].outline_width_scale, 0.0);
+        // Far forehead & chest vertices (> 1.5 cm away) keep outline_width_scale == 1.0
+        assert_eq!(v25d[2].outline_width_scale, 1.0);
+        assert_eq!(v25d[3].outline_width_scale, 1.0);
+        assert_eq!(v25d[6].outline_width_scale, 1.0);
+        assert_eq!(v25d[7].outline_width_scale, 1.0);
     }
 }

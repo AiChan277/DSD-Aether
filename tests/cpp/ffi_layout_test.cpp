@@ -90,6 +90,26 @@ static_assert(offsetof(AetherGraphTelemetryReadout, pin_indices) == 12320);
 static_assert(offsetof(AetherGraphTelemetryReadout, pin_kinds) == 12704);
 static_assert(offsetof(AetherGraphTelemetryReadout, _reserved_tail) == 13088);
 
+static_assert(sizeof(AetherStudioLightGpu) == 128);
+static_assert(alignof(AetherStudioLightGpu) == 64);
+static_assert(offsetof(AetherStudioLightGpu, position_ws) == 0);
+static_assert(offsetof(AetherStudioLightGpu, flags_and_type) == 12);
+static_assert(offsetof(AetherStudioLightGpu, direction_ws) == 16);
+static_assert(offsetof(AetherStudioLightGpu, intensity_ev100) == 28);
+static_assert(offsetof(AetherStudioLightGpu, tangent_u_ws) == 32);
+static_assert(offsetof(AetherStudioLightGpu, kelvin_cct) == 44);
+static_assert(offsetof(AetherStudioLightGpu, color_rgb_linear) == 48);
+static_assert(offsetof(AetherStudioLightGpu, light_channel_mask) == 60);
+static_assert(offsetof(AetherStudioLightGpu, size_xy_radius) == 64);
+static_assert(offsetof(AetherStudioLightGpu, inner_outer_cos) == 72);
+static_assert(offsetof(AetherStudioLightGpu, barn_door_cuts) == 80);
+static_assert(offsetof(AetherStudioLightGpu, grid_collimation_cos) == 96);
+static_assert(offsetof(AetherStudioLightGpu, diffusion_softness) == 100);
+static_assert(offsetof(AetherStudioLightGpu, ies_profile_index) == 104);
+static_assert(offsetof(AetherStudioLightGpu, catchlight_weight) == 108);
+static_assert(offsetof(AetherStudioLightGpu, shadow_bias_scale) == 112);
+static_assert(offsetof(AetherStudioLightGpu, padding) == 116);
+
 namespace {
 
 struct ExpectedFieldOffset {
@@ -336,6 +356,28 @@ TEST_CASE("FFI layout table JSON matches C++ sizeof, alignof, and offsetof", "[f
     };
     verify_struct_in_json(map, "AetherGraphTelemetryReadout", sizeof(AetherGraphTelemetryReadout),
                           alignof(AetherGraphTelemetryReadout), telemetry_fields);
+
+    const ExpectedFieldOffset studio_light_fields[] = {
+        {"position_ws", offsetof(AetherStudioLightGpu, position_ws)},
+        {"flags_and_type", offsetof(AetherStudioLightGpu, flags_and_type)},
+        {"direction_ws", offsetof(AetherStudioLightGpu, direction_ws)},
+        {"intensity_ev100", offsetof(AetherStudioLightGpu, intensity_ev100)},
+        {"tangent_u_ws", offsetof(AetherStudioLightGpu, tangent_u_ws)},
+        {"kelvin_cct", offsetof(AetherStudioLightGpu, kelvin_cct)},
+        {"color_rgb_linear", offsetof(AetherStudioLightGpu, color_rgb_linear)},
+        {"light_channel_mask", offsetof(AetherStudioLightGpu, light_channel_mask)},
+        {"size_xy_radius", offsetof(AetherStudioLightGpu, size_xy_radius)},
+        {"inner_outer_cos", offsetof(AetherStudioLightGpu, inner_outer_cos)},
+        {"barn_door_cuts", offsetof(AetherStudioLightGpu, barn_door_cuts)},
+        {"grid_collimation_cos", offsetof(AetherStudioLightGpu, grid_collimation_cos)},
+        {"diffusion_softness", offsetof(AetherStudioLightGpu, diffusion_softness)},
+        {"ies_profile_index", offsetof(AetherStudioLightGpu, ies_profile_index)},
+        {"catchlight_weight", offsetof(AetherStudioLightGpu, catchlight_weight)},
+        {"shadow_bias_scale", offsetof(AetherStudioLightGpu, shadow_bias_scale)},
+        {"padding", offsetof(AetherStudioLightGpu, padding)},
+    };
+    verify_struct_in_json(map, "AetherStudioLightGpu", sizeof(AetherStudioLightGpu), alignof(AetherStudioLightGpu),
+                          studio_light_fields);
 }
 
 TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "[ffi]") {

@@ -204,8 +204,7 @@ impl PlanExchange {
                 self.pin_kinds[idx].store(plan.pin_kinds[idx], Ordering::Relaxed);
                 let vals = plan.pin_values[idx];
                 for lane in 0..4 {
-                    self.pin_values_bits[idx][lane]
-                        .store(vals[lane].to_bits(), Ordering::Relaxed);
+                    self.pin_values_bits[idx][lane].store(vals[lane].to_bits(), Ordering::Relaxed);
                 }
             }
             self.pin_readout_count

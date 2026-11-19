@@ -138,13 +138,44 @@ struct alignas(16) GpuFrameGlobals {
     float neck_seam_head_str[4]{0.0f, 1.33f, 0.0f, 1.0f};
     // rgb = sampled linear Face chin/lower-cheek reference skin RGB, w = valid flag (1.0 when sampled)
     float face_skin_ref_rgb[4]{0.85f, 0.68f, 0.58f, 0.0f};
+    // xyz = animated world-space Chest/Clavicle center, w = clavicle radius (m) for Unified Head-Neck-Chest field
+    float neck_chest_ws[4]{0.0f, 1.15f, 0.0f, 0.145f};
+    // xyz = animated world-space Chin anchor, w = valid flag
+    float chin_pos_ws[4]{0.0f, 1.32f, 0.04f, 0.0f};
+    // Split-Layer Holo-Grading (Avatar): x=contrast, y=saturation, z=warmth, w=ev_bias
+    float split_avatar_grade[4]{1.04f, 1.05f, 0.0f, 0.0f};
+    // Split-Layer Holo-Grading (Background): x=contrast, y=saturation, z=exposure, w=master_grade
+    float split_bg_grade[4]{1.02f, 0.96f, 1.0f, 1.0f};
+    // Satsuei optical composite: x=light_wrap, y=halation_str, z=halation_thresh, w=backscatter_str
+    float satsuei_params[4]{0.22f, 0.18f, 0.95f, 0.55f};
+    // Hillaire (2020) 3-band SH9 sky environment dome RGB coefficients
+    float sky_sh9[9][4]{};
+    // x=ltc_inv_slot, y=ltc_amp_slot, z=ies_lut_slot, w=studio_light_count
+    uint32_t studio_slots0[4]{0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u};
+    // x=aov_direct_vis_slot, y=aov_indirect_gi_slot, z=aov_backscatter_slot, w=aov_cornea_spec_slot
+    uint32_t studio_slots1[4]{0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    // x=aov_direct_vis_uav, y=aov_indirect_gi_uav, z=aov_backscatter_uav, w=aov_cornea_spec_uav
+    uint32_t studio_uav_slots[4]{0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint64_t studio_lights_bda{0};
+    uint64_t reservoir_curr_bda{0};
+    uint64_t reservoir_prev_bda{0};
+    uint32_t studio_aux_u32[2]{0u, 0u};
     GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);
 static_assert(sizeof(GpuFrameGlobals) <= 4096);
 static_assert(AETHER_OFFSETOF(GpuFrameGlobals, lights) + 8 * sizeof(GpuLight) == sizeof(GpuFrameGlobals));
 
+struct alignas(64) GpuReSTIRReservoir {
+    float sample_pos_len[4]{};  // xyz = hit point world pos, w = W_sum * p_hat^-1
+    float sample_norm_lum[4]{}; // xyz = hit normal, w = target_pdf / M
+    float radiance_w[4]{};      // rgb = incoming radiance, w = sample count M
+    float age_pad[4]{};         // x = age/history valid, yzw = reserved
+};
+static_assert(sizeof(GpuReSTIRReservoir) == 64);
+
 static_assert(sizeof(AetherVertex25D) == 64);
 static_assert(sizeof(AetherNprMaterial) == 192);
+static_assert(sizeof(AetherStudioLightGpu) == 128);
 
 } // namespace aether::renderer

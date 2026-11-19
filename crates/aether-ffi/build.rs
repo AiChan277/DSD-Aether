@@ -17,10 +17,10 @@ use types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
     AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
-    AetherHostEvent, AetherJointDesc,
-    AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
-    AetherRuntimeConfig, AetherSpringJointDesc, AetherSubmeshDesc, AetherTextureDesc,
-    AetherTrackingFrame, AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
+    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc,
+    AetherNprMaterial, AetherRuntimeConfig, AetherSpringJointDesc, AetherStudioLightGpu,
+    AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame, AetherVertex25D, AetherVertexSkin,
+    AetherVertexSurface,
 };
 
 struct FieldEntry {
@@ -484,6 +484,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pin_indices,
             pin_kinds,
             _reserved_tail
+        ]
+    );
+    struct_entry!(
+        &mut json,
+        &mut first,
+        AetherStudioLightGpu,
+        [
+            position_ws,
+            flags_and_type,
+            direction_ws,
+            intensity_ev100,
+            tangent_u_ws,
+            kelvin_cct,
+            color_rgb_linear,
+            light_channel_mask,
+            size_xy_radius,
+            inner_outer_cos,
+            barn_door_cuts,
+            grid_collimation_cos,
+            diffusion_softness,
+            ies_profile_index,
+            catchlight_weight,
+            shadow_bias_scale,
+            padding
         ]
     );
 

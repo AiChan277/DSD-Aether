@@ -1329,7 +1329,9 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             mesh_node_morph_base.insert(node_idx, mesh_first_morph);
         }
         // VRM 0.x blendShapeGroups bind `(mesh, index)` by glTF mesh index.
-        mesh_index_morph_base.entry(mesh.index()).or_insert(mesh_first_morph);
+        mesh_index_morph_base
+            .entry(mesh.index())
+            .or_insert(mesh_first_morph);
         let mesh_target_names: Option<Vec<String>> = parse_raw_json_value(mesh.extras().as_deref())
             .and_then(|v| {
                 v.get("targetNames").and_then(Value::as_array).map(|a| {
@@ -1458,7 +1460,6 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                             .collect()
                     })
                 });
-
 
             for (t_i, target) in prim.morph_targets().enumerate() {
                 let tname = prim_target_names

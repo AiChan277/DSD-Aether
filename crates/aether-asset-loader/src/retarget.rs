@@ -89,7 +89,12 @@ fn normalise_vrm0_forward_if_needed(avatar: &mut ParsedAvatar, matched: &Humanoi
     }
     let world_pos = compute_joint_world_positions(&avatar.joints);
     let mut needs_flip = false;
-    for &(h_l, h_r) in &[(18usize, 22usize), (17usize, 21usize), (1usize, 5usize), (15usize, 16usize)] {
+    for &(h_l, h_r) in &[
+        (18usize, 22usize),
+        (17usize, 21usize),
+        (1usize, 5usize),
+        (15usize, 16usize),
+    ] {
         let jl = matched.humanoid_to_joint[h_l];
         let jr = matched.humanoid_to_joint[h_r];
         if jl != 0xFFFF && jr != 0xFFFF {
@@ -567,7 +572,11 @@ fn map_preset_to_slots(name: &str, centroid_x: f32, has_per_eye_blink: bool) -> 
     if lower.contains("surprise") || trimmed.contains("驚") || trimmed.contains("びっくり") {
         return vec![(SLOT_SURPRISED, 1.0)];
     }
-    if lower.contains("blush") || lower.contains("cheek") || trimmed.contains("照れ") || trimmed.contains("赤面") {
+    if lower.contains("blush")
+        || lower.contains("cheek")
+        || trimmed.contains("照れ")
+        || trimmed.contains("赤面")
+    {
         return vec![(SLOT_BLUSH, 1.0)];
     }
     if lower.contains("sparkle")
@@ -818,8 +827,14 @@ mod expression_slot_tests {
 
     #[test]
     fn blink_preset_never_stacks_on_per_eye_presets() {
-        assert_eq!(map_preset_to_slots("Blink", 0.0, true), Vec::<(u32, f32)>::new());
-        assert_eq!(map_preset_to_slots("Blink", 0.0, false), vec![(0, 0.5), (7, 0.5)]);
+        assert_eq!(
+            map_preset_to_slots("Blink", 0.0, true),
+            Vec::<(u32, f32)>::new()
+        );
+        assert_eq!(
+            map_preset_to_slots("Blink", 0.0, false),
+            vec![(0, 0.5), (7, 0.5)]
+        );
         assert_eq!(map_preset_to_slots("Blink_L", 0.0, true), vec![(0, 1.0)]);
         assert_eq!(map_preset_to_slots("Blink_R", 0.0, true), vec![(7, 1.0)]);
     }
@@ -828,12 +843,23 @@ mod expression_slot_tests {
     fn emotions_use_dedicated_slots_not_tracking_channels() {
         assert_eq!(map_preset_to_slots("Joy", 0.0, true), vec![(SLOT_JOY, 1.0)]);
         assert_eq!(map_preset_to_slots("Fun", 0.0, true), vec![(SLOT_JOY, 1.0)]);
-        assert_eq!(map_preset_to_slots("Angry", 0.0, true), vec![(SLOT_ANGRY, 1.0)]);
-        assert_eq!(map_preset_to_slots("Sorrow", 0.0, true), vec![(SLOT_SORROW, 1.0)]);
-        assert_eq!(map_preset_to_slots("Surprised", 0.0, true), vec![(SLOT_SURPRISED, 1.0)]);
+        assert_eq!(
+            map_preset_to_slots("Angry", 0.0, true),
+            vec![(SLOT_ANGRY, 1.0)]
+        );
+        assert_eq!(
+            map_preset_to_slots("Sorrow", 0.0, true),
+            vec![(SLOT_SORROW, 1.0)]
+        );
+        assert_eq!(
+            map_preset_to_slots("Surprised", 0.0, true),
+            vec![(SLOT_SURPRISED, 1.0)]
+        );
         for name in ["Joy", "Angry", "Sorrow", "Surprised", "Fun"] {
             assert!(
-                map_preset_to_slots(name, 0.0, true).iter().all(|&(s, _)| s >= 57),
+                map_preset_to_slots(name, 0.0, true)
+                    .iter()
+                    .all(|&(s, _)| s >= 57),
                 "{name} must not bind to an ARKit tracking slot"
             );
         }
@@ -843,9 +869,21 @@ mod expression_slot_tests {
     fn vowels_lookat_and_neutral() {
         assert_eq!(map_preset_to_slots("A", 0.0, true), vec![(52, 1.0)]);
         assert_eq!(map_preset_to_slots("O", 0.0, true), vec![(56, 1.0)]);
-        assert_eq!(map_preset_to_slots("LookUp", 0.0, true), vec![(4, 0.5), (11, 0.5)]);
-        assert_eq!(map_preset_to_slots("LookLeft", 0.0, true), vec![(3, 0.5), (9, 0.5)]);
-        assert_eq!(map_preset_to_slots("Neutral", 0.0, true), Vec::<(u32, f32)>::new());
-        assert_eq!(map_preset_to_slots("MyCustomFace", 0.0, true), vec![(SLOT_CUSTOM, 1.0)]);
+        assert_eq!(
+            map_preset_to_slots("LookUp", 0.0, true),
+            vec![(4, 0.5), (11, 0.5)]
+        );
+        assert_eq!(
+            map_preset_to_slots("LookLeft", 0.0, true),
+            vec![(3, 0.5), (9, 0.5)]
+        );
+        assert_eq!(
+            map_preset_to_slots("Neutral", 0.0, true),
+            Vec::<(u32, f32)>::new()
+        );
+        assert_eq!(
+            map_preset_to_slots("MyCustomFace", 0.0, true),
+            vec![(SLOT_CUSTOM, 1.0)]
+        );
     }
 }

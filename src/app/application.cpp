@@ -948,8 +948,7 @@ int run_application(const AppLaunchOptions& opts) {
     pipe_cfg.mic_gain = boot_params.get_float(ui::ParamId::TrackingMicGain);
     pipe_cfg.mic_noise_gate_db = boot_params.get_float(ui::ParamId::TrackingMicNoiseGate);
     pipe_cfg.preferred_mic_id = boot_settings.preferred_mic_id;
-    pipe_cfg.preferred_ep =
-        ui::tracking_ep_mode_to_router_override(boot_params.get_int(ui::ParamId::TrackingEpMode));
+    pipe_cfg.preferred_ep = ui::tracking_ep_mode_to_router_override(boot_params.get_int(ui::ParamId::TrackingEpMode));
     pipe_cfg.ov_cache_dir = std::filesystem::path(paths.cache_dir) / "ov_cache";
     pipe_cfg.output_device = rhi;
     pipe_cfg.output_cfg = init_out_cfg;
@@ -1158,8 +1157,8 @@ int run_application(const AppLaunchOptions& opts) {
                                                     VK_IMAGE_ASPECT_COLOR_BIT, false);
                 img_res) {
                 preview_img = img_res.value();
-                preview_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, preview_img.view,
-                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                preview_tex_set =
+                    ImGui_ImplVulkan_AddTexture(vp_sampler, preview_img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             } else {
                 AETHER_LOG_WARN("renderer", "Failed to create live camera preview image: %s", img_res.error().c_str());
             }
@@ -1309,22 +1308,24 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.crease_disguise_enabled = npr_renderer.lighting().crease_disguise_enabled;
         vp_actions.crease_disguise_strength = npr_renderer.lighting().crease_disguise_strength;
         if (opts.smoke_frames == 0) {
-            if (rhi->is_intel_igpu() || !rhi->rt_supported()) {
+            const auto& active_gpu = rhi->gpu_info();
+            const bool is_any_igpu = !active_gpu.is_discrete || active_gpu.is_uma || rhi->is_intel_igpu();
+            if (is_any_igpu || !rhi->rt_supported()) {
                 (void)shell.workspace().params().set(ui::ParamId::RenderLightingMode, 0.0);
                 (void)shell.workspace().params().set(ui::ParamId::RenderRtEnabled, 0.0);
                 vp_actions.lighting_mode = 0u;
                 vp_actions.rt_enabled = false;
             } else {
-                vp_actions.lighting_mode = static_cast<uint8_t>(
-                    std::clamp(boot_params.get_int(ui::ParamId::RenderLightingMode), 0, 2));
-                vp_actions.rt_enabled = (vp_actions.lighting_mode > 0u) && boot_params.get_bool(ui::ParamId::RenderRtEnabled);
+                vp_actions.lighting_mode =
+                    static_cast<uint8_t>(std::clamp(boot_params.get_int(ui::ParamId::RenderLightingMode), 0, 2));
+                vp_actions.rt_enabled =
+                    (vp_actions.lighting_mode > 0u) && boot_params.get_bool(ui::ParamId::RenderRtEnabled);
             }
             vp_actions.target_fps_mode = static_cast<uint8_t>(boot_params.get_int(ui::ParamId::RenderTargetFps));
             vp_actions.vsync_enabled = boot_params.get_bool(ui::ParamId::RenderVsync);
             vp_actions.background_eco_mode = boot_params.get_bool(ui::ParamId::RenderBackgroundEco);
-            vp_actions.render_resolution_scale =
-                std::clamp(static_cast<float>(boot_params.get_int(ui::ParamId::RenderResolutionScalePct)) * 0.01f,
-                           0.50f, 2.00f);
+            vp_actions.render_resolution_scale = std::clamp(
+                static_cast<float>(boot_params.get_int(ui::ParamId::RenderResolutionScalePct)) * 0.01f, 0.50f, 2.00f);
             vp_actions.aa_mode = static_cast<uint8_t>(boot_params.get_int(ui::ParamId::RenderAaMode));
         } else {
             vp_actions.target_fps_mode = 3U; // Uncapped during smoke tests
@@ -1422,7 +1423,8 @@ int run_application(const AppLaunchOptions& opts) {
 
             double recovery_ms = 0.0;
             if (is_device_lost) {
-                const auto rec = npr_renderer.recover_from_device_lost(*rhi, rhi_cfg, render_cfg, nullptr, paths.crash_dir);
+                const auto rec =
+                    npr_renderer.recover_from_device_lost(*rhi, rhi_cfg, render_cfg, nullptr, paths.crash_dir);
                 if (!rec.recovered) {
                     AETHER_LOG_FATAL("rhi", "Device recovery failed: %s", rec.error_message.c_str());
                     return false;
@@ -1432,12 +1434,12 @@ int run_application(const AppLaunchOptions& opts) {
                 const uint64_t t0_us = now_us();
                 npr_renderer.destroy();
                 if (auto dev_res = rhi->recreate_after_device_lost(rhi_cfg); !dev_res) {
-                    AETHER_LOG_ERROR("rhi", "GPU switch failed during RhiDevice recreate: %s",
-                                     dev_res.error().c_str());
+                    AETHER_LOG_ERROR("rhi", "GPU switch failed during RhiDevice recreate: %s", dev_res.error().c_str());
                     return false;
                 }
-                    render_cfg.enable_rt = rhi->rt_supported();
-                if (rhi->is_intel_igpu() || !rhi->rt_supported()) {
+                render_cfg.enable_rt = rhi->rt_supported();
+                if (!rhi->gpu_info().is_discrete || rhi->gpu_info().is_uma || rhi->is_intel_igpu() ||
+                    !rhi->rt_supported()) {
                     (void)shell.workspace().params().set(ui::ParamId::RenderLightingMode, 0.0);
                     (void)shell.workspace().params().set(ui::ParamId::RenderRtEnabled, 0.0);
                     vp_actions.lighting_mode = 0u;
@@ -1496,9 +1498,9 @@ int run_application(const AppLaunchOptions& opts) {
                 AETHER_LOG_INFO("rhi", "Switched Vulkan adapter to %s in %.1f ms", rhi->gpu_info().device_name.c_str(),
                                 recovery_ms);
             }
-            shell.workspace().push_toast(
-                ui::ToastSeverity::Success, toast_title,
-                toast_msg != nullptr ? toast_msg : last_recovery_msg.data(), static_cast<double>(now_us()) * 1e-6);
+            shell.workspace().push_toast(ui::ToastSeverity::Success, toast_title,
+                                         toast_msg != nullptr ? toast_msg : last_recovery_msg.data(),
+                                         static_cast<double>(now_us()) * 1e-6);
             if (!last_loaded_avatar_path.empty()) {
                 asset_job.start_load(*rhi, last_loaded_avatar_path);
             }
@@ -2007,9 +2009,13 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.circadian_timezone = vp_actions.circadian_timezone_idx;
                 rig.circadian_time_minutes = vp_actions.circadian_time_override_min;
                 if (!vp_actions.circadian_enabled) {
-                    const auto preset = static_cast<renderer::LightingFixturePreset>(
-                        std::clamp(vp_actions.lighting_fixture, 0, 5));
+                    const auto preset =
+                        static_cast<renderer::LightingFixturePreset>(std::clamp(vp_actions.lighting_fixture, 0, 5));
                     renderer::apply_lighting_fixture_preset(rig, preset, vp_actions.photometric_beam_angle_deg);
+                    if (vp_actions.studio_fixture > 0) {
+                        rig.key_studio_profile_override =
+                            static_cast<int8_t>(std::clamp(vp_actions.studio_fixture, 0, 11));
+                    }
                     rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
                     rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
                     rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
@@ -2035,6 +2041,19 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.eye_catchlight_size = vp_actions.eye_catchlight_size;
                 rig.crease_disguise_enabled = vp_actions.crease_disguise_enabled;
                 rig.crease_disguise_strength = vp_actions.crease_disguise_strength;
+                rig.key_softbox_enabled = vp_actions.key_softbox_enabled;
+                rig.key_grid_enabled = vp_actions.key_grid_enabled;
+                rig.key_grid_angle_deg = vp_actions.key_grid_angle_deg;
+                rig.key_barn_doors_enabled = vp_actions.key_barn_doors_enabled;
+                rig.key_diffusion_enabled = vp_actions.key_diffusion_enabled;
+                rig.key_diffusion_density = vp_actions.key_diffusion_density;
+                rig.key_gel_enabled = vp_actions.key_gel_enabled;
+                rig.key_gel = static_cast<renderer::StudioGelPreset>(std::clamp(vp_actions.key_gel_preset, 0, 11));
+                rig.satsuei.light_wrap_strength = vp_actions.satsuei_light_wrap;
+                rig.satsuei.halation_strength = vp_actions.satsuei_halation;
+                rig.satsuei.backscatter_strength = vp_actions.satsuei_backscatter;
+                rig.split_grading.avatar_contrast = vp_actions.holo_avatar_contrast;
+                rig.split_grading.bg_exposure = vp_actions.holo_bg_exposure;
                 vp_actions.lighting_dirty = false;
             }
             if (vp_actions.npu_bounds_dirty) {
@@ -2092,8 +2111,7 @@ int run_application(const AppLaunchOptions& opts) {
             if (vp_actions.reset_camera && current_avatar != nullptr) {
                 renderer::PreviewCamera goal = renderer::fit_camera_to_avatar(*current_avatar);
                 if (vp_actions.request_focal_mm > 0.0f) {
-                    const float new_fovy =
-                        2.0f * std::atan(12.0f / std::max(8.0f, vp_actions.request_focal_mm));
+                    const float new_fovy = 2.0f * std::atan(12.0f / std::max(8.0f, vp_actions.request_focal_mm));
                     goal.distance = std::clamp(
                         goal.distance * std::tan(goal.fovy_rad * 0.5f) / std::tan(new_fovy * 0.5f), 0.25f, 60.0f);
                     goal.fovy_rad = new_fovy;
@@ -2118,15 +2136,13 @@ int run_application(const AppLaunchOptions& opts) {
                 goal.distance = std::clamp(vp_actions.target_cam_distance, 0.25f, 60.0f);
                 goal.fovy_rad = std::clamp(vp_actions.target_cam_fovy_rad, 0.05f, 1.50f);
                 if (vp_actions.request_builtin_preset >= 0 && current_avatar != nullptr) {
-                    const float vp_aspect =
-                        (vp_actions.desired_vp_h > 0U)
-                            ? (static_cast<float>(vp_actions.desired_vp_w) /
-                               static_cast<float>(vp_actions.desired_vp_h))
-                            : (16.0f / 9.0f);
+                    const float vp_aspect = (vp_actions.desired_vp_h > 0U)
+                                                ? (static_cast<float>(vp_actions.desired_vp_w) /
+                                                   static_cast<float>(vp_actions.desired_vp_h))
+                                                : (16.0f / 9.0f);
                     const ui::CameraFramingPreset p = ui::compute_builtin_framing_preset(
-                        vp_actions.request_builtin_preset, avatar_bone_heights.hips_y,
-                        avatar_bone_heights.chest_y, avatar_bone_heights.head_y, vp_actions.avatar_pos,
-                        vp_actions.avatar_scale, vp_aspect);
+                        vp_actions.request_builtin_preset, avatar_bone_heights.hips_y, avatar_bone_heights.chest_y,
+                        avatar_bone_heights.head_y, vp_actions.avatar_pos, vp_actions.avatar_scale, vp_aspect);
                     goal.target_x = p.target_x;
                     goal.target_y = p.target_y;
                     goal.target_z = p.target_z;
@@ -2139,10 +2155,9 @@ int run_application(const AppLaunchOptions& opts) {
                 if (vp_actions.camera_transition_speed_s > 1e-4f && opts.smoke_frames == 0U) {
                     if (vp_actions.target_preset_has_avatar_xform) {
                         cam_transition_.start_with_avatar(
-                            camera, goal, cur_render_avatar_pos, cur_render_avatar_rot_y_deg,
-                            cur_render_avatar_scale, vp_actions.target_preset_avatar_pos,
-                            vp_actions.target_preset_avatar_rot_y_deg, vp_actions.target_preset_avatar_scale,
-                            vp_actions.camera_transition_speed_s);
+                            camera, goal, cur_render_avatar_pos, cur_render_avatar_rot_y_deg, cur_render_avatar_scale,
+                            vp_actions.target_preset_avatar_pos, vp_actions.target_preset_avatar_rot_y_deg,
+                            vp_actions.target_preset_avatar_scale, vp_actions.camera_transition_speed_s);
                     } else {
                         cam_transition_.start(camera, goal, vp_actions.camera_transition_speed_s);
                     }
@@ -2195,9 +2210,8 @@ int run_application(const AppLaunchOptions& opts) {
             const uint32_t live_h =
                 static_cast<uint32_t>(live_cr.bottom > live_cr.top ? (live_cr.bottom - live_cr.top) : 0);
             const bool pending_resize = shared.resize_pending.exchange(false, std::memory_order_acq_rel);
-            if (pending_resize ||
-                (live_w > 0U && live_h > 0U &&
-                 (live_w != swapchain.extent().width || live_h != swapchain.extent().height))) {
+            if (pending_resize || (live_w > 0U && live_h > 0U &&
+                                   (live_w != swapchain.extent().width || live_h != swapchain.extent().height))) {
                 const uint32_t nw = live_w > 0U ? live_w : shared.pending_w.load(std::memory_order_acquire);
                 const uint32_t nh = live_h > 0U ? live_h : shared.pending_h.load(std::memory_order_acquire);
                 if (nw > 0U && nh > 0U) {
@@ -2239,11 +2253,11 @@ int run_application(const AppLaunchOptions& opts) {
             if (vp_actions.desired_vp_w >= 64U && vp_actions.desired_vp_h >= 64U) {
                 const float res_scale = std::clamp(vp_actions.render_resolution_scale, 0.50f, 2.00f);
                 const uint32_t clamped_w = std::clamp(
-                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_w) * res_scale)),
-                    64U, 4096U);
+                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_w) * res_scale)), 64U,
+                    4096U);
                 const uint32_t clamped_h = std::clamp(
-                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_h) * res_scale)),
-                    64U, 4096U);
+                    static_cast<uint32_t>(std::lround(static_cast<double>(vp_actions.desired_vp_h) * res_scale)), 64U,
+                    4096U);
                 const uint32_t target_out_w = active_out_cfg.width;
                 const uint32_t target_out_h = active_out_cfg.height;
                 const auto cur_out = npr_renderer.graph().outputs();
@@ -2257,7 +2271,8 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
-            // Apply a backend change requested from the Inspector/Graphics Settings (render.backend), then reclaim retired objects.
+            // Apply a backend change requested from the Inspector/Graphics Settings (render.backend), then reclaim
+            // retired objects.
             if (vp_actions.render_backend != requested_backend_ui) {
                 const bool first_sync = (requested_backend_ui == 0xFFU);
                 requested_backend_ui = vp_actions.render_backend;
@@ -2334,8 +2349,7 @@ int run_application(const AppLaunchOptions& opts) {
                 }
             }
 
-            if (preview_cache != nullptr && preview_tex_set != VK_NULL_HANDLE &&
-                preview_img.handle != VK_NULL_HANDLE) {
+            if (preview_cache != nullptr && preview_tex_set != VK_NULL_HANDLE && preview_img.handle != VK_NULL_HANDLE) {
                 (void)pipeline->acquire_live_preview(*preview_cache);
                 const auto& sb = preview_staging[frame.frame_slot];
                 if (preview_cache->valid && preview_cache->sequence != preview_uploaded_seq &&
@@ -2456,11 +2470,11 @@ int run_application(const AppLaunchOptions& opts) {
             render_req.frame_slot = frame.frame_slot;
             render_req.debug_view =
                 static_cast<renderer::ShadingDebugView>(std::min<uint8_t>(vp_actions.debug_view, 13));
-            render_req.rt_enabled = vp_actions.rt_enabled &&
-                                    ((active_backend == renderer::RenderBackend::DirectX12)
-                                         ? (dx12_bridge.d3d12_device() != nullptr &&
-                                            dx12_bridge.d3d12_device()->dxr_supported())
-                                         : rhi->rt_supported());
+            render_req.rt_enabled =
+                vp_actions.rt_enabled &&
+                ((active_backend == renderer::RenderBackend::DirectX12)
+                     ? (dx12_bridge.d3d12_device() != nullptr && dx12_bridge.d3d12_device()->dxr_supported())
+                     : rhi->rt_supported());
             render_req.lighting_mode = vp_actions.lighting_mode;
             render_req.hair_velocity_ws = skin_snap.hair_velocity_ws;
             render_req.premul_alpha = active_out_cfg.premul_alpha;
@@ -2691,8 +2705,8 @@ int run_application(const AppLaunchOptions& opts) {
                 ImGui_ImplVulkan_NewFrame();
                 ImGui_ImplWin32_NewFrame();
                 if (frame.extent.width > 0U && frame.extent.height > 0U) {
-                    io.DisplaySize = ImVec2(static_cast<float>(frame.extent.width),
-                                            static_cast<float>(frame.extent.height));
+                    io.DisplaySize =
+                        ImVec2(static_cast<float>(frame.extent.width), static_cast<float>(frame.extent.height));
                     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
                 }
 
@@ -2803,7 +2817,8 @@ int run_application(const AppLaunchOptions& opts) {
                                                                            ov.head_axes_norm[a * 2U + 1U]};
                             }
                         }
-                        tracking_view.hand_tracking_enabled = ov.hand_tracking_enabled || track_hud.hand_tracking_enabled;
+                        tracking_view.hand_tracking_enabled =
+                            ov.hand_tracking_enabled || track_hud.hand_tracking_enabled;
                         tracking_view.left_hand_detected = ov.left_hand_detected;
                         tracking_view.right_hand_detected = ov.right_hand_detected;
                         tracking_view.left_hand_bbox_obb = ov.left_hand_bbox_obb;
@@ -2896,8 +2911,7 @@ int run_application(const AppLaunchOptions& opts) {
             }
 
             const uint64_t t3_submit_done_us = now_us();
-            const bool has_valid_tracking_frame = !host_status.tracking_paused &&
-                                                  (skin_snap.frame_sequence != 0ULL) &&
+            const bool has_valid_tracking_frame = !host_status.tracking_paused && (skin_snap.frame_sequence != 0ULL) &&
                                                   (skin_snap.t1_capture_us != 0ULL) &&
                                                   ((skin_snap.frame.tracking_valid_flags & 0x07u) != 0u);
             if (has_avatar_ready && tl_val > 0ULL && (out_due || opts.smoke_frames > 0U)) {
@@ -2912,12 +2926,12 @@ int run_application(const AppLaunchOptions& opts) {
                 out_slot.height = gout.output_height;
                 out_slot.fps = active_out_cfg.fps;
                 out_slot.bgra_image = render_req.encode_output_bgra ? gout.bgra8_image : VK_NULL_HANDLE;
-                out_slot.bgra_straight_image =
-                    (render_req.encode_output_bgra && render_req.need_straight_alpha) ? gout.bgra8_straight_image
-                                                                                      : VK_NULL_HANDLE;
-                out_slot.bottom_up_image =
-                    (render_req.encode_output_bgra && render_req.need_bottom_up) ? gout.bottom_up_bgra8_image
-                                                                                 : VK_NULL_HANDLE;
+                out_slot.bgra_straight_image = (render_req.encode_output_bgra && render_req.need_straight_alpha)
+                                                   ? gout.bgra8_straight_image
+                                                   : VK_NULL_HANDLE;
+                out_slot.bottom_up_image = (render_req.encode_output_bgra && render_req.need_bottom_up)
+                                               ? gout.bottom_up_bgra8_image
+                                               : VK_NULL_HANDLE;
                 out_slot.nv12_y_image = render_req.encode_output_nv12 ? gout.nv12_y_image : VK_NULL_HANDLE;
                 out_slot.nv12_uv_image = render_req.encode_output_nv12 ? gout.nv12_uv_image : VK_NULL_HANDLE;
                 out_slot.has_bottom_up = render_req.encode_output_bgra && render_req.need_bottom_up;
@@ -2986,8 +3000,7 @@ int run_application(const AppLaunchOptions& opts) {
             const uint64_t present_done_us = now_us();
             if (last_present_stamp_us > 0ULL && present_done_us > last_present_stamp_us) {
                 const float inst_fps = 1000000.0f / static_cast<float>(present_done_us - last_present_stamp_us);
-                present_fps_ema =
-                    (present_fps_ema <= 0.1f) ? inst_fps : (present_fps_ema * 0.90f + inst_fps * 0.10f);
+                present_fps_ema = (present_fps_ema <= 0.1f) ? inst_fps : (present_fps_ema * 0.90f + inst_fps * 0.10f);
             }
             last_present_stamp_us = present_done_us;
         }

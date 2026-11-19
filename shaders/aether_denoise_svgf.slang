@@ -92,11 +92,14 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                 int2 gp = clamp(int2((float2(ap) + 0.5) * gb_scale), int2(0, 0), max_gp);
                 float3 sn = oct_decode(aether_load(gb_n_slot, gp).xy);
                 float sd = aether_load(depth_slot, gp).x;
-                uint sm = aether_uload(gb_mat_slot, gp).x & 0x7FFFu;
+                uint raw_m = aether_uload(gb_mat_slot, gp).x;
+                uint sm = raw_m & 0x7FFFu;
+                uint sclass = (raw_m >> 10u) & 0x0Fu;
+                uint cclass = (center_m >> 10u) & 0x0Fu;
 
                 float wn = pow(saturate(dot(center_n, sn)), 16.0);
                 float wz = exp(-abs(center_d - sd) * 280.0);
-                float wm = (center_m == sm) ? 1.0 : 0.08;
+                float wm = (center_m == sm && cclass == sclass) ? 1.0 : 0.02;
                 float wl = exp(-abs(center_l - luminance(a_val.rgb)) / (2.5 * sigma_var));
                 w_edge *= wn * wz * wm * wl;
             }

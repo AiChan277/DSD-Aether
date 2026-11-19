@@ -280,6 +280,9 @@ class FrameGraph {
     RegisteredImage rim_occ_denoised_{};
     RegisteredImage bounce_half_{};
     RegisteredImage bounce_denoised_{};
+    RegisteredImage aov_backscatter_{};
+    RegisteredImage aov_cornea_spec_{};
+    std::array<rhi::RhiBuffer, 2> reservoir_bufs_{};
     RegisteredImage crease_mask_{};
     RegisteredImage hdr_scene_{};
     std::array<RegisteredImage, kBloomMipCount> bloom_mips_{};
@@ -311,6 +314,10 @@ class FrameGraph {
     VkImageLayout orbit_orb_depth_layout_{VK_IMAGE_LAYOUT_UNDEFINED};
     RegisteredImage csm_depth_{};
     RegisteredImage blue_noise_64_{};
+    RegisteredImage ltc_inv_m_{};
+    RegisteredImage ltc_amp_{};
+    RegisteredImage ies_lut_{};
+    std::array<StudioLightGPU, kMaxStudioLights> studio_lights_scratch_{};
 
     // Shared pipeline layouts (`global` for all passes except RT, `rt` includes Set 1 TLAS)
     VkPipelineLayout pipe_layout_global_{VK_NULL_HANDLE};

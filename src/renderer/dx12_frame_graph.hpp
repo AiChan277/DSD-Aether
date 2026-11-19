@@ -84,9 +84,10 @@ class Dx12FrameGraph {
     void record_dxr_build_or_refit(ID3D12GraphicsCommandList4* cmd, bool refit_only) noexcept;
 
     struct FrameUploadSlice {
-        rhi::D3D12Buffer fg_buf{};    // GpuFrameGlobals (UploadCpu / UMA zero-copy)
-        rhi::D3D12Buffer pose_buf{};  // AetherVertex25D[vertex_capacity] (UploadCpu / UMA zero-copy)
-        rhi::D3D12Buffer tlas_inst{}; // 2 x D3D12_RAYTRACING_INSTANCE_DESC
+        rhi::D3D12Buffer fg_buf{};            // GpuFrameGlobals (UploadCpu / UMA zero-copy)
+        rhi::D3D12Buffer pose_buf{};          // AetherVertex25D[vertex_capacity] (UploadCpu / UMA zero-copy)
+        rhi::D3D12Buffer tlas_inst{};         // 2 x D3D12_RAYTRACING_INSTANCE_DESC
+        rhi::D3D12Buffer studio_lights_buf{}; // StudioLightGPU[16] StructuredBuffer
         uint32_t pose_vertex_cap{0};
     };
 
@@ -114,6 +115,9 @@ class Dx12FrameGraph {
     rhi::D3D12Buffer index_buf_{};
     rhi::D3D12Buffer material_buf_{};
     rhi::D3D12Texture fallback_white_tex_{};
+    rhi::D3D12Texture ltc_inv_m_{};
+    rhi::D3D12Texture ltc_amp_{};
+    rhi::D3D12Texture ies_lut_{};
     rhi::D3D12Texture baked_face_sdf_tex_{};
     uint32_t avatar_face_sdf_slot_{rhi::kD3D12InvalidDescIndex};
     std::vector<rhi::D3D12Texture> avatar_textures_{};
@@ -156,6 +160,10 @@ class Dx12FrameGraph {
     rhi::D3D12Texture bounce_half_{};
     rhi::D3D12Texture bounce_denoised_{};
     rhi::D3D12Texture prev_bounce_{};
+    rhi::D3D12Texture aov_backscatter_{};
+    rhi::D3D12Texture aov_cornea_spec_{};
+    std::array<rhi::D3D12Buffer, 2> reservoir_bufs_{};
+    std::array<StudioLightGPU, kMaxStudioLights> studio_lights_scratch_{};
 
     rhi::D3D12Texture hdr_scene_{};
     rhi::D3D12Texture crease_mask_{};

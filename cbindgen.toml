@@ -66,6 +66,7 @@ include = [
     "AetherColliderDesc",
     "AetherExpressionBindingDesc",
     "AetherTextureDesc",
+    "AetherStudioLightGpu",
 ]
 
 [parse]

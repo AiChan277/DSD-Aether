@@ -5,11 +5,11 @@ use core::mem::{align_of, offset_of, size_of};
 use crate::types::{
     AetherArenaSlice, AetherAssetRequirements, AetherAvatarDesc, AetherColliderDesc,
     AetherDspSyncPacket, AetherExpressionBindingDesc, AetherGraphInputs, AetherGraphOutputs,
-    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig, AetherHostEvent,
-    AetherJointDesc,
-    AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc, AetherNprMaterial,
-    AetherRuntimeConfig, AetherSpringJointDesc, AetherSubmeshDesc, AetherTextureDesc,
-    AetherTrackingFrame, AetherVertex25D, AetherVertexSkin, AetherVertexSurface,
+    AetherGraphPlanStats, AetherGraphTelemetryReadout, AetherHostCommand, AetherHostConfig,
+    AetherHostEvent, AetherJointDesc, AetherLoadRequest, AetherMorphDelta, AetherMorphRangeDesc,
+    AetherNprMaterial, AetherRuntimeConfig, AetherSpringJointDesc, AetherStudioLightGpu,
+    AetherSubmeshDesc, AetherTextureDesc, AetherTrackingFrame, AetherVertex25D, AetherVertexSkin,
+    AetherVertexSurface,
 };
 
 // ---- Frozen MTD Structs (§5.2) ----
@@ -329,6 +329,26 @@ const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_values) == 617
 const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_indices) == 12320);
 const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, pin_kinds) == 12704);
 const _: () = assert!(offset_of!(AetherGraphTelemetryReadout, _reserved_tail) == 13088);
+
+const _: () = assert!(size_of::<AetherStudioLightGpu>() == 128);
+const _: () = assert!(align_of::<AetherStudioLightGpu>() == 64);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, position_ws) == 0);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, flags_and_type) == 12);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, direction_ws) == 16);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, intensity_ev100) == 28);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, tangent_u_ws) == 32);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, kelvin_cct) == 44);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, color_rgb_linear) == 48);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, light_channel_mask) == 60);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, size_xy_radius) == 64);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, inner_outer_cos) == 72);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, barn_door_cuts) == 80);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, grid_collimation_cos) == 96);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, diffusion_softness) == 100);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, ies_profile_index) == 104);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, catchlight_weight) == 108);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, shadow_bias_scale) == 112);
+const _: () = assert!(offset_of!(AetherStudioLightGpu, padding) == 116);
 
 #[cfg(test)]
 mod tests {

@@ -222,7 +222,12 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
                                                fg.filter_pro_params.x);
     }
 
-    // Apply sub-pixel AA Iro-Tsuke tinted interior crease ink lines over lit geometry
+    uint mat_slot = fg.gbuffer_ids[0].z;
+    uint raw_mat_center = (mat_slot != 0xFFFFFFFFu) ? aether_uload(mat_slot, p).x : 0u;
+    bool is_center_skin = ((raw_mat_center & 0x3000u) != 0u);
+    bool is_avatar_fg = ((raw_mat_center & 0x3FFu) != 0u) || (hdr.a > 0.02);
+
+    // Apply sub-pixel AA Iro-Tsuke tinted interior crease ink lines over lit geometry (0% across skin-skin!)
     float crease_str = saturate(fg.npr_style_params2.x);
     if (crease_slot != 0xFFFFFFFFu && hdr.a > 0.01 && crease_str > 0.001) {
         float aa_cr = raw_crease;
@@ -230,6 +235,13 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
             float c0 = aether_load(crease_slot, clamp(p + int2(1, 0), int2(0, 0), max_p)).x;
             float c1 = aether_load(crease_slot, clamp(p + int2(0, 1), int2(0, 0), max_p)).x;
             aa_cr = smoothstep(0.18, 0.78, lerp(raw_crease, 0.5 * (c0 + c1), 0.30));
+        }
+        if (is_center_skin && mat_slot != 0xFFFFFFFFu) {
+            uint mr = aether_uload(mat_slot, clamp(p + int2(1, 0), int2(0, 0), max_p)).x;
+            uint md = aether_uload(mat_slot, clamp(p + int2(0, 1), int2(0, 0), max_p)).x;
+            if (((mr & 0x3000u) != 0u) && ((md & 0x3000u) != 0u)) {
+                aa_cr = 0.0;
+            }
         }
         float cr = aa_cr * crease_str;
         float3 base_norm = max(hdr.rgb / max(hdr.a, 0.05), float3(0.01, 0.01, 0.01));
@@ -240,20 +252,65 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
         hdr.rgb *= lerp(float3(1.0, 1.0, 1.0), saturate(ink_mul), saturate(cr * 0.72));
     }
 
+    // Satsuei 1: Masked Bloom (attenuated over sharp ink/cel borders so crisp line art stays clean)
     float3 glow = float3(0.0, 0.0, 0.0);
+    float3 raw_bloom_uv = float3(0.0, 0.0, 0.0);
     uint bloom_slot = fg.gbuffer_ids[1].z;
-    if (bloom_slot != 0xFFFFFFFFu && fg.post_params.y > 0.0001) {
-        glow = aether_sample_level(bloom_slot, kSamplerLinearClamp, uv, 0).rgb * fg.post_params.y;
+    if (bloom_slot != 0xFFFFFFFFu) {
+        raw_bloom_uv = aether_sample_level(bloom_slot, kSamplerLinearClamp, uv, 0).rgb;
+        if (fg.post_params.y > 0.0001) {
+            float ink_protect = 1.0 - saturate(raw_crease * 0.85);
+            glow = raw_bloom_uv * (fg.post_params.y * ink_protect);
+        }
+    }
+
+    // Satsuei 2: Exponential Light Wrap along bright backlight/silhouette rims
+    float wrap_str = max(fg.satsuei_params.x, 0.0);
+    if (wrap_str > 0.001 && hdr.a > 0.02 && hdr.a < 0.995) {
+        float edge_ring = smoothstep(0.05, 0.75, 1.0 - saturate(hdr.a));
+        float3 surround_light = max(raw_bloom_uv, fg.bg_color_premul.rgb * 0.65);
+        glow += surround_light * (edge_ring * wrap_str * 0.35);
+    }
+
+    // Satsuei 3: Subtle Chromatic Halation on extreme highlights / catchlights above threshold
+    float hala_str = max(fg.satsuei_params.y, 0.0);
+    float hala_thresh = max(fg.satsuei_params.z, 0.65);
+    if (hala_str > 0.001 && bloom_slot != 0xFFFFFFFFu) {
+        float2 uv_off = (uv - 0.5) * 0.0045;
+        float3 b_r = aether_sample_level(bloom_slot, kSamplerLinearClamp, clamp(uv + uv_off, 0.0, 1.0), 0).rgb;
+        float3 b_b = aether_sample_level(bloom_slot, kSamplerLinearClamp, clamp(uv - uv_off, 0.0, 1.0), 0).rgb;
+        float hala_gate = smoothstep(hala_thresh, hala_thresh + 0.5, luminance(hdr.rgb));
+        glow += float3(b_r.r * 1.15, 0.45 * raw_bloom_uv.g, b_b.b * 0.35) * (hala_str * (0.25 + 0.75 * hala_gate));
     }
 
     float a0 = saturate(hdr.a);
     float3 premul_hdr = hdr.rgb + glow;
     float a_out = saturate(a0 + (1.0 - a0) * saturate(luminance(glow)));
 
+    // Split-Layer "holo-grading": independent Avatar 2.5D grading vs Background grading + Master pass
+    float master_w = saturate(fg.split_bg_grade.w);
+    float3 bg_graded = fg.bg_color_premul.rgb;
+    if (fg.bg_color_premul.a > 1e-4 && master_w > 0.001) {
+        float3 bg_unpre = bg_graded / fg.bg_color_premul.a;
+        float bg_l = dot(bg_unpre, float3(0.2126, 0.7152, 0.0722));
+        float3 bg_sat = lerp(float3(bg_l, bg_l, bg_l), bg_unpre, fg.split_bg_grade.y);
+        float3 bg_c = max((bg_sat - 0.18) * fg.split_bg_grade.x + 0.18, float3(0.0, 0.0, 0.0)) * fg.split_bg_grade.z;
+        bg_graded = lerp(bg_unpre, bg_c, master_w) * fg.bg_color_premul.a;
+    }
+
     // Tonemap foreground unpremultiplied so AgX preserves Porter-Duff background invariance (Invariant 5)
     float3 mapped_premul = float3(0.0, 0.0, 0.0);
     if (a_out > 1e-4) {
         float3 unpre = premul_hdr / a_out;
+        if (is_avatar_fg && master_w > 0.001) {
+            float3 g_ev = unpre * exp2(clamp(fg.split_avatar_grade.w, -2.0, 2.0));
+            float av_l = dot(g_ev, float3(0.2126, 0.7152, 0.0722));
+            float3 g_sat = lerp(float3(av_l, av_l, av_l), g_ev, fg.split_avatar_grade.y);
+            float3 g_con = max((g_sat - 0.18) * fg.split_avatar_grade.x + 0.18, float3(0.0, 0.0, 0.0));
+            float warm_shift = clamp(fg.split_avatar_grade.z, -0.5, 0.5);
+            g_con *= float3(1.0 + warm_shift * 0.12, 1.0, 1.0 - warm_shift * 0.12);
+            unpre = lerp(unpre, g_con, master_w);
+        }
         float3 mapped = (fg.post_params.z > 0.5) ? agx_tonemap_soft(unpre) : saturate(unpre);
         // Task 6B: Optional subtle 2D anime paper / cel warmth grading curve
         if (filter_pro && ((fg.state_u32.w & 8u) != 0u) && fg.filter_pro_params.z > 0.001) {
@@ -264,7 +321,7 @@ void cs_composite(uint3 tid : SV_DispatchThreadID) {
         mapped_premul = mapped * a_out;
     }
 
-    float3 final_rgb = mapped_premul + (1.0 - a_out) * fg.bg_color_premul.rgb;
+    float3 final_rgb = mapped_premul + (1.0 - a_out) * bg_graded;
     float final_a = saturate(a_out + (1.0 - a_out) * fg.bg_color_premul.a);
     aether_store(g_Pc.param1, tid.xy, float4(final_rgb, final_a));
 }

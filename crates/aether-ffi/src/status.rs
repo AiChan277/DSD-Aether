@@ -294,3 +294,69 @@ pub const AETHER_PIN_VALUE_VISEME: u8 = 8;
 pub const AETHER_PIN_VALUE_AUDIO: u8 = 9;
 /// Compact live pin summary value kind: trigger event counter (`[fired, 0, 0, 0]`).
 pub const AETHER_PIN_VALUE_EVENT: u8 = 10;
+
+/// Maximum active studio lights in the single-pass `StructuredBuffer<StudioLightGPU>`.
+pub const AETHER_MAX_STUDIO_LIGHTS: usize = 16;
+
+/// Studio fixture profile ID (`StudioLightGPU.flags_and_type & 0x0F`): Rectangular Softbox (`0`).
+pub const AETHER_FIXTURE_RECT_SOFTBOX: u32 = 0;
+/// Studio fixture profile ID: Octabox 8-Sided Softbox (`1`).
+pub const AETHER_FIXTURE_OCTABOX: u32 = 1;
+/// Studio fixture profile ID: Vertical Rim Stripbox (`2`).
+pub const AETHER_FIXTURE_STRIPBOX: u32 = 2;
+/// Studio fixture profile ID: Parabolic Softbox / Umbrella (`3`).
+pub const AETHER_FIXTURE_PARABOLIC_UMBRELLA: u32 = 3;
+/// Studio fixture profile ID: Lantern / China Ball (`4`).
+pub const AETHER_FIXTURE_LANTERN_BALL: u32 = 4;
+/// Studio fixture profile ID: ARRI `SkyPanel` S60-C / X (`5`).
+pub const AETHER_FIXTURE_ARRI_SKYPANEL: u32 = 5;
+/// Studio fixture profile ID: ARRI True Blue / Orbiter Fresnel Spot (`6`).
+pub const AETHER_FIXTURE_ARRI_FRESNEL: u32 = 6;
+/// Studio fixture profile ID: Dedolight DLED7 Precision Spot (`7`).
+pub const AETHER_FIXTURE_DEDOLIGHT_SPOT: u32 = 7;
+/// Studio fixture profile ID: Ellipsoidal / Leko Spotlight with Gobo (`8`).
+pub const AETHER_FIXTURE_ELLIPSOIDAL_LEKO: u32 = 8;
+/// Studio fixture profile ID: Broadcast Ring Light / Beauty Dish (`9`).
+pub const AETHER_FIXTURE_BROADCAST_RING: u32 = 9;
+/// Studio fixture profile ID: LED Tube Light / Astera Titan (`10`).
+pub const AETHER_FIXTURE_LED_TUBE: u32 = 10;
+/// Studio fixture profile ID: Natural Sunlight + Hillaire CIE Sky / Window Portal (`11`).
+pub const AETHER_FIXTURE_NATURAL_SUN_SKY: u32 = 11;
+
+/// `StudioLightGPU.flags_and_type` bit 4: Light Enabled.
+pub const AETHER_LIGHT_FLAG_ENABLED: u32 = 1u32 << 4;
+/// `StudioLightGPU.flags_and_type` bit 5: Solo Mode.
+pub const AETHER_LIGHT_FLAG_SOLO: u32 = 1u32 << 5;
+/// `StudioLightGPU.flags_and_type` bit 6: Cast Shadow.
+pub const AETHER_LIGHT_FLAG_CAST_SHADOW: u32 = 1u32 << 6;
+/// `StudioLightGPU.flags_and_type` bit 7: Softbox Optical Attachment Enabled.
+pub const AETHER_LIGHT_FLAG_SOFTBOX_ON: u32 = 1u32 << 7;
+/// `StudioLightGPU.flags_and_type` bit 8: Honeycomb / Egg-Crate Grid Enabled.
+pub const AETHER_LIGHT_FLAG_GRID_ON: u32 = 1u32 << 8;
+/// `StudioLightGPU.flags_and_type` bit 9: 4-Leaf Barn Doors Enabled.
+pub const AETHER_LIGHT_FLAG_BARN_DOORS_ON: u32 = 1u32 << 9;
+/// `StudioLightGPU.flags_and_type` bit 10: Color Gel Filter Enabled.
+pub const AETHER_LIGHT_FLAG_GEL_ON: u32 = 1u32 << 10;
+/// `StudioLightGPU.flags_and_type` bit 11: Aim At Target Lock Enabled.
+pub const AETHER_LIGHT_FLAG_AIM_LOCK: u32 = 1u32 << 11;
+/// `StudioLightGPU.flags_and_type` bit 12: Passive Negative Fill Flag (absorber).
+pub const AETHER_LIGHT_FLAG_NEGATIVE_FILL: u32 = 1u32 << 12;
+/// `StudioLightGPU.flags_and_type` bit 13: Passive Bounce Reflector Card.
+pub const AETHER_LIGHT_FLAG_BOUNCE_CARD: u32 = 1u32 << 13;
+/// `StudioLightGPU.flags_and_type` bit 14: Camera Coaxial Lock (Ring Light / Beauty Dish).
+pub const AETHER_LIGHT_FLAG_COAXIAL_LOCK: u32 = 1u32 << 14;
+/// `StudioLightGPU.flags_and_type` bit 15: Diffusion Cloth Enabled.
+pub const AETHER_LIGHT_FLAG_DIFFUSION_ON: u32 = 1u32 << 15;
+/// `StudioLightGPU.flags_and_type` bit 16: Indoor Window Portal emitter variant.
+pub const AETHER_LIGHT_FLAG_WINDOW_PORTAL: u32 = 1u32 << 16;
+
+/// Light channel mask bit: Affect Face Skin (`0x01`).
+pub const AETHER_LIGHT_CHANNEL_FACE: u32 = 1u32 << 0;
+/// Light channel mask bit: Affect Hair Strands (`0x02`).
+pub const AETHER_LIGHT_CHANNEL_HAIR: u32 = 1u32 << 1;
+/// Light channel mask bit: Affect Body & Clothing (`0x04`).
+pub const AETHER_LIGHT_CHANNEL_BODY: u32 = 1u32 << 2;
+/// Light channel mask bit: Affect Eye Cornea Catchlight (`0x08`).
+pub const AETHER_LIGHT_CHANNEL_CATCHLIGHT: u32 = 1u32 << 3;
+/// Default light channel mask enabling all channels (`0x0F`).
+pub const AETHER_LIGHT_CHANNEL_ALL: u32 = 0x0Fu32;

@@ -71,6 +71,8 @@ add_library(aether_renderer STATIC
     preview_pass.cpp
     sdf_generator.cpp
     sdf_generator.hpp
+    studio_lighting.cpp
+    studio_lighting.hpp
 )
 
 aether_apply_cxx_flags(aether_renderer)

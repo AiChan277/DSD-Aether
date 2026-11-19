@@ -672,3 +672,43 @@ pub struct AetherGraphTelemetryReadout {
     /// Explicit padding to maintain a 64-byte multiple (`13120` bytes total).
     pub _reserved_tail: [u64; 4],
 }
+
+/// Photometric studio luminaire and optical modifier GPU payload — 128 B exact, 64-byte aligned.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct AetherStudioLightGpu {
+    /// World-space light position (metres).
+    pub position_ws: [f32; 3],
+    /// `[0..3]` `FixtureType` (`AETHER_FIXTURE_*`), `[4..16]` `AETHER_LIGHT_FLAG_*`, `[17..20]` Gobo/Pattern ID.
+    pub flags_and_type: u32,
+    /// Normalized world-space forward emission direction.
+    pub direction_ws: [f32; 3],
+    /// Frostbite EV100 calibrated linear radiant intensity scale.
+    pub intensity_ev100: f32,
+    /// Normalized world-space tangent U axis for polygonal LTC / Softbox orientation.
+    pub tangent_u_ws: [f32; 3],
+    /// Planckian correlated color temperature (`1500 K..20000 K`).
+    pub kelvin_cct: f32,
+    /// Effective linear RGB color (`CCT * Gel * Custom RGB`).
+    pub color_rgb_linear: [f32; 3],
+    /// Light channel mask (`AETHER_LIGHT_CHANNEL_*`).
+    pub light_channel_mask: u32,
+    /// Area geometry dimensions: `[0]` Width / `OuterRadius` (m), `[1]` Height / `InnerRadius` (m).
+    pub size_xy_radius: [f32; 2],
+    /// Cosine of inner and outer cone angles for Spot / Fresnel fixtures.
+    pub inner_outer_cos: [f32; 2],
+    /// 4-leaf Barn Doors angular cut limits `[Top, Bottom, Left, Right]` in radians.
+    pub barn_door_cuts: [f32; 4],
+    /// Honeycomb / Egg-Crate Grid collimation cosine threshold.
+    pub grid_collimation_cos: f32,
+    /// Softbox front diffuser cloth density (`0.0` hard open-face .. `1.0` full grid).
+    pub diffusion_softness: f32,
+    /// ANSI/IES LM-63-19 256x64 LUT row index (`< 0.0` disables IES lookup).
+    pub ies_profile_index: f32,
+    /// Eye cornea catchlight intensity scale (`0.0..2.0`).
+    pub catchlight_weight: f32,
+    /// Ray-traced penumbra radius & Shadow Fringe blocker bias multiplier.
+    pub shadow_bias_scale: f32,
+    /// Deterministic padding completing the 128-byte (2 cache lines) stride.
+    pub padding: [f32; 3],
+}

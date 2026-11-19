@@ -107,8 +107,7 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
         char* userprofile = nullptr;
         size_t up_len = 0;
         if (_dupenv_s(&userprofile, &up_len, "USERPROFILE") == 0 && userprofile != nullptr) {
-            std::filesystem::path dl_vrm =
-                std::filesystem::path(userprofile) / "Downloads" / "8590256991748008892.vrm";
+            std::filesystem::path dl_vrm = std::filesystem::path(userprofile) / "Downloads" / "8590256991748008892.vrm";
             if (std::filesystem::is_regular_file(dl_vrm)) {
                 ref_vrm = dl_vrm.string();
             }
@@ -426,10 +425,23 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.circadian_enabled = params_.get_bool(ParamId::RenderCircadianEnabled);
     v.circadian_timezone_idx = params_.get_int(ParamId::RenderCircadianTimezone);
     v.circadian_time_override_min = params_.get_int(ParamId::RenderCircadianTimeMinutes);
+    v.studio_fixture = std::clamp(params_.get_int(ParamId::RenderStudioFixture), 0, 11);
+    v.key_softbox_enabled = params_.get_bool(ParamId::RenderSoftboxEnabled);
+    v.key_grid_enabled = params_.get_bool(ParamId::RenderGridEnabled);
+    v.key_grid_angle_deg = params_.get_float(ParamId::RenderGridAngleDeg);
+    v.key_barn_doors_enabled = params_.get_bool(ParamId::RenderBarnDoorsEnabled);
+    v.key_diffusion_enabled = params_.get_bool(ParamId::RenderDiffusionEnabled);
+    v.key_diffusion_density = params_.get_float(ParamId::RenderDiffusionDensity);
+    v.key_gel_enabled = params_.get_bool(ParamId::RenderGelEnabled);
+    v.key_gel_preset = std::clamp(params_.get_int(ParamId::RenderGelPreset), 0, 11);
+    v.satsuei_light_wrap = params_.get_float(ParamId::RenderSatsueiLightWrap);
+    v.satsuei_halation = params_.get_float(ParamId::RenderSatsueiHalation);
+    v.satsuei_backscatter = params_.get_float(ParamId::RenderSatsueiBackscatter);
+    v.holo_avatar_contrast = params_.get_float(ParamId::RenderHoloAvatarContrast);
+    v.holo_bg_exposure = params_.get_float(ParamId::RenderHoloBgExposure);
     v.npu_bounds_enabled = params_.get_bool(ParamId::TrackingNpuBoundsEnabled);
     v.npu_anti_clip_enabled = params_.get_bool(ParamId::TrackingNpuAntiClipEnabled);
-    v.npu_bounds_half = {params_.get_float(ParamId::TrackingNpuBoundsX),
-                         params_.get_float(ParamId::TrackingNpuBoundsY),
+    v.npu_bounds_half = {params_.get_float(ParamId::TrackingNpuBoundsX), params_.get_float(ParamId::TrackingNpuBoundsY),
                          params_.get_float(ParamId::TrackingNpuBoundsZ)};
     v.npu_soft_elasticity = params_.get_float(ParamId::TrackingNpuSoftElasticity);
     v.npu_max_pitch_deg = params_.get_float(ParamId::TrackingNpuMaxPitchDeg);
@@ -585,9 +597,7 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
             actions.pending_graph_json = json;
             actions.request_apply_graph_json = true;
         };
-        ctx.apply_custom_payload = [&](const std::string& payload) {
-            apply_custom_xform_payload(&params_, payload);
-        };
+        ctx.apply_custom_payload = [&](const std::string& payload) { apply_custom_xform_payload(&params_, payload); };
         if (undo_.undo(ctx)) {
             push_toast(ToastSeverity::Info, "Undo", undo_.redo_label(), now_s);
         }
@@ -601,9 +611,7 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
             actions.pending_graph_json = json;
             actions.request_apply_graph_json = true;
         };
-        ctx.apply_custom_payload = [&](const std::string& payload) {
-            apply_custom_xform_payload(&params_, payload);
-        };
+        ctx.apply_custom_payload = [&](const std::string& payload) { apply_custom_xform_payload(&params_, payload); };
         if (undo_.redo(ctx)) {
             push_toast(ToastSeverity::Info, "Redo", undo_.undo_label(), now_s);
         }
@@ -742,8 +750,8 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatar
                 viewport_panel_.toggle_local_world();
             }
         }
-        if (vp_hovered || (viewport_panel_.is_focused() &&
-                           std::strcmp(last_hovered_zone_window_.data(), kPanelNodeGraph) != 0)) {
+        if (vp_hovered ||
+            (viewport_panel_.is_focused() && std::strcmp(last_hovered_zone_window_.data(), kPanelNodeGraph) != 0)) {
             if (keymap_.is_pressed(ActionId::ViewportGrid)) {
                 viewport_panel_.toggle_grid();
             } else if (keymap_.is_pressed(ActionId::ViewportFrameHead) ||

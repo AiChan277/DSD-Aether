@@ -44,6 +44,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float3 n0 = oct_decode(aether_load(gb_n_slot, p).xy);
     uint raw_m0 = aether_uload(gb_mat_slot, p).x;
     uint m0 = raw_m0 & 0x3FFu;
+    bool skin0 = ((raw_m0 & 0x3000u) != 0u);
     float crease_w = float((raw_m0 >> 16u) & 0xFFu) / 255.0;
     float disguise_keep = 1.0 - crease_w * saturate(fg.eye_catchlight_params.z);
     // Mask crease ink cleanly off flat face planes (`gb_misc.y` = sdf_mask) so cheeks/nose stay 2D clean
@@ -60,6 +61,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float dog_z = 0.0;
     float max_n_ang = 0.0;
     float max_mat_edge = 0.0;
+    bool all_neighbors_skin = skin0;
 
     static const float kSx[9] = {-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0};
     static const float kSy[9] = {-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0};
@@ -70,7 +72,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             float d1 = aether_load(depth_slot, np).x;
             float z1 = (d1 >= 0.99998) ? (z0 + 0.5) : abs(fg.proj.col3.z / max(abs(d1 + fg.proj.col2.z), 1e-5));
             float3 n1 = (d1 >= 0.99998) ? n0 : oct_decode(aether_load(gb_n_slot, np).xy);
-            uint m1 = aether_uload(gb_mat_slot, np).x & 0x3FFu;
+            uint raw_m1 = aether_uload(gb_mat_slot, np).x;
+            uint m1 = raw_m1 & 0x3FFu;
+            bool skin1 = ((raw_m1 & 0x3000u) != 0u);
+            if (!skin1 || d1 >= 0.99998) {
+                all_neighbors_skin = false;
+            }
 
             float kx = kSx[k];
             float ky = kSy[k];
@@ -83,11 +90,16 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             dog_n += (1.0 - saturate(dot(n0, n1)));
 
             if (abs(dx) + abs(dy) == 1 && d1 < 0.99998) {
-                if (dot(n0, n1) < cos_thresh) {
-                    max_n_ang = 1.0;
-                }
-                if (m0 != m1) {
-                    max_mat_edge = 0.55;
+                if (!(skin0 && skin1)) {
+                    if (dot(n0, n1) < cos_thresh) {
+                        max_n_ang = 1.0;
+                    }
+                    if (m0 != m1) {
+                        max_mat_edge = 0.55;
+                    }
+                } else if (m0 != m1) {
+                    // Explicit 0% skin-to-skin Iro-Tsuke ink across jaw-to-neck Face/Body submesh interface
+                    max_mat_edge = 0.0;
                 }
             }
             ++k;
@@ -104,6 +116,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
                    plane_keep * disguise_keep;
     float z_edge = smoothstep(0.055, 0.145, z_sobel + dog_z * 0.04 * dog_boost) * plane_keep * dist_taper;
     float max_edge = max(n_edge * 0.85, max(z_edge, max_mat_edge));
+    if (all_neighbors_skin) {
+        // Zero skin-to-skin ink lines inside head/jaw/neck skin surfaces
+        max_edge = 0.0;
+    }
 
     aether_store(g_Pc.param0, tid.xy, float4(saturate(max_edge), 0.0, 0.0, 1.0));
 }

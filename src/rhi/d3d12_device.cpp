@@ -24,8 +24,7 @@ namespace aether::rhi {
 
 namespace {
 
-template <typename T>
-void safe_release(T*& ptr) noexcept {
+template <typename T> void safe_release(T*& ptr) noexcept {
     if (ptr != nullptr) {
         ptr->Release();
         ptr = nullptr;
@@ -54,7 +53,7 @@ void safe_release(T*& ptr) noexcept {
     if (d.is_software) {
         return 1u;
     }
-    uint32_t score = d.is_discrete ? 1000u : (d.is_uma ? 250u : 100u);
+    uint32_t score = d.is_discrete ? 5000u : (d.is_uma ? 250u : 100u);
     if (d.supports_dxr_1_1) {
         score += 500u;
     }
@@ -123,7 +122,7 @@ void safe_release(T*& ptr) noexcept {
         out_desc.supports_sm_6_6 = (sm.HighestShaderModel >= D3D_SHADER_MODEL_6_6);
     }
     D3D12_FEATURE_DATA_FORMAT_SUPPORT bgra_sup{DXGI_FORMAT_B8G8R8A8_UNORM, D3D12_FORMAT_SUPPORT1_NONE,
-                                             D3D12_FORMAT_SUPPORT2_NONE};
+                                               D3D12_FORMAT_SUPPORT2_NONE};
     if (SUCCEEDED(probe_raw->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &bgra_sup, sizeof(bgra_sup)))) {
         out_desc.supports_bgra8_uav = (bgra_sup.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0;
     }
@@ -133,7 +132,7 @@ void safe_release(T*& ptr) noexcept {
     // Safe tier auto-selection: Intel iGPU / UMA / non-DXR adapters default to Mode 0 (Traditional Lighting).
     out_desc.recommended_lighting_mode =
         (out_desc.is_uma || out_desc.is_intel_igpu || out_desc.is_software || !out_desc.supports_dxr_1_1) ? uint8_t{0}
-                                                                                                         : uint8_t{1};
+                                                                                                          : uint8_t{1};
     out_desc.score = score_d3d12_adapter(out_desc);
 
     probe_raw->Release();
@@ -211,24 +210,47 @@ Expected<std::vector<D3D12AdapterDescriptor>> D3D12Device::enumerate_adapters() 
     }
 
     std::vector<D3D12AdapterDescriptor> out;
-    for (UINT i = 0;; ++i) {
-        IDXGIAdapter1* raw_ad = nullptr;
-        if (factory->EnumAdapters1(i, &raw_ad) == DXGI_ERROR_NOT_FOUND) {
-            break;
-        }
-        IDXGIAdapter4* ad4 = nullptr;
-        if (SUCCEEDED(raw_ad->QueryInterface(IID_PPV_ARGS(&ad4)))) {
-            D3D12AdapterDescriptor d{};
-            if (probe_adapter_descriptor(ad4, i, d)) {
-                out.push_back(std::move(d));
+    IDXGIFactory6* factory6 = nullptr;
+    if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory6))) && factory6 != nullptr) {
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter4* ad4 = nullptr;
+            if (factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&ad4)) ==
+                DXGI_ERROR_NOT_FOUND) {
+                break;
             }
-            ad4->Release();
+            if (ad4 != nullptr) {
+                D3D12AdapterDescriptor d{};
+                if (probe_adapter_descriptor(ad4, i, d)) {
+                    out.push_back(std::move(d));
+                }
+                ad4->Release();
+            }
         }
-        raw_ad->Release();
+        factory6->Release();
+    } else {
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter1* raw_ad = nullptr;
+            if (factory->EnumAdapters1(i, &raw_ad) == DXGI_ERROR_NOT_FOUND) {
+                break;
+            }
+            IDXGIAdapter4* ad4 = nullptr;
+            if (SUCCEEDED(raw_ad->QueryInterface(IID_PPV_ARGS(&ad4)))) {
+                D3D12AdapterDescriptor d{};
+                if (probe_adapter_descriptor(ad4, i, d)) {
+                    out.push_back(std::move(d));
+                }
+                ad4->Release();
+            }
+            raw_ad->Release();
+        }
     }
 
-    std::sort(out.begin(), out.end(),
-              [](const D3D12AdapterDescriptor& a, const D3D12AdapterDescriptor& b) { return a.score > b.score; });
+    std::sort(out.begin(), out.end(), [](const D3D12AdapterDescriptor& a, const D3D12AdapterDescriptor& b) {
+        if (a.is_discrete != b.is_discrete) {
+            return a.is_discrete && !b.is_discrete;
+        }
+        return a.score > b.score;
+    });
 
     factory->Release();
     return out;
@@ -277,37 +299,57 @@ Expected<void> D3D12Device::init_internal(const D3D12DeviceConfig& cfg) {
     D3D12AdapterDescriptor best_desc{};
     uint32_t best_effective_score = 0;
 
-    for (UINT i = 0;; ++i) {
-        IDXGIAdapter1* raw = nullptr;
-        if (factory_->EnumAdapters1(i, &raw) == DXGI_ERROR_NOT_FOUND) {
-            break;
-        }
-        IDXGIAdapter4* ad4 = nullptr;
-        if (SUCCEEDED(raw->QueryInterface(IID_PPV_ARGS(&ad4)))) {
-            D3D12AdapterDescriptor d{};
-            if (probe_adapter_descriptor(ad4, i, d)) {
-                if (d.is_software && !cfg.allow_warp_fallback) {
-                    ad4->Release();
-                    raw->Release();
-                    continue;
-                }
-                uint32_t eff = d.score;
-                if (cfg.use_preferred_luid && d.luid_valid && luid_matches(d.luid, cfg.preferred_luid)) {
-                    eff += 100000u;
-                } else if (cfg.prefer_integrated && d.is_uma && !d.is_software) {
-                    eff += 50000u;
-                }
-                if (best_ad == nullptr || eff > best_effective_score) {
-                    safe_release(best_ad);
-                    best_ad = ad4;
-                    ad4 = nullptr;
-                    best_desc = d;
-                    best_effective_score = eff;
-                }
+    auto consider_adapter = [&](IDXGIAdapter4* ad4, UINT idx) {
+        D3D12AdapterDescriptor d{};
+        if (probe_adapter_descriptor(ad4, idx, d)) {
+            if (d.is_software && !cfg.allow_warp_fallback) {
+                return;
             }
-            safe_release(ad4);
+            uint32_t eff = d.score;
+            if (cfg.use_preferred_luid && d.luid_valid && luid_matches(d.luid, cfg.preferred_luid)) {
+                eff += 100000u;
+            } else if (cfg.prefer_integrated && d.is_uma && !d.is_software) {
+                eff += 50000u;
+            } else if (d.is_discrete && !d.is_software) {
+                eff += 10000u;
+            }
+            if (best_ad == nullptr || eff > best_effective_score) {
+                safe_release(best_ad);
+                best_ad = ad4;
+                best_ad->AddRef();
+                best_desc = d;
+                best_effective_score = eff;
+            }
         }
-        raw->Release();
+    };
+
+    IDXGIFactory6* factory6 = nullptr;
+    if (SUCCEEDED(factory_->QueryInterface(IID_PPV_ARGS(&factory6))) && factory6 != nullptr) {
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter4* ad4 = nullptr;
+            if (factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&ad4)) ==
+                DXGI_ERROR_NOT_FOUND) {
+                break;
+            }
+            if (ad4 != nullptr) {
+                consider_adapter(ad4, i);
+                ad4->Release();
+            }
+        }
+        factory6->Release();
+    } else {
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter1* raw = nullptr;
+            if (factory_->EnumAdapters1(i, &raw) == DXGI_ERROR_NOT_FOUND) {
+                break;
+            }
+            IDXGIAdapter4* ad4 = nullptr;
+            if (SUCCEEDED(raw->QueryInterface(IID_PPV_ARGS(&ad4))) && ad4 != nullptr) {
+                consider_adapter(ad4, i);
+                ad4->Release();
+            }
+            raw->Release();
+        }
     }
 
     if (best_ad == nullptr) {
@@ -351,12 +393,11 @@ Expected<void> D3D12Device::init_internal(const D3D12DeviceConfig& cfg) {
         }
     }
 
-    AETHER_LOG_INFO("rhi",
-                    "D3D12 initialized on '%s' (UMA=%d IntelIGPU=%d DXR1.1=%d FP16=%d SM6.6=%d rec_mode=%u d3d11on12=%d)",
-                    gpu_info_.device_name.c_str(), gpu_info_.is_uma ? 1 : 0, gpu_info_.is_intel_igpu ? 1 : 0,
-                    gpu_info_.supports_dxr_1_1 ? 1 : 0, gpu_info_.supports_fp16 ? 1 : 0,
-                    gpu_info_.supports_sm_6_6 ? 1 : 0, static_cast<unsigned>(gpu_info_.recommended_lighting_mode),
-                    d3d11on12_device_ != nullptr ? 1 : 0);
+    AETHER_LOG_INFO(
+        "rhi", "D3D12 initialized on '%s' (UMA=%d IntelIGPU=%d DXR1.1=%d FP16=%d SM6.6=%d rec_mode=%u d3d11on12=%d)",
+        gpu_info_.device_name.c_str(), gpu_info_.is_uma ? 1 : 0, gpu_info_.is_intel_igpu ? 1 : 0,
+        gpu_info_.supports_dxr_1_1 ? 1 : 0, gpu_info_.supports_fp16 ? 1 : 0, gpu_info_.supports_sm_6_6 ? 1 : 0,
+        static_cast<unsigned>(gpu_info_.recommended_lighting_mode), d3d11on12_device_ != nullptr ? 1 : 0);
     return {};
 #endif
 }
@@ -393,7 +434,8 @@ Expected<void> D3D12Device::create_command_objects() {
     }
 
     for (uint32_t i = 0; i < kD3D12FrameCount; ++i) {
-        if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame_allocators_[i])))) {
+        if (FAILED(
+                device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame_allocators_[i])))) {
             return fail_d3d12(ErrorCode::VulkanError, "CreateCommandAllocator(frame) failed");
         }
     }
@@ -430,11 +472,12 @@ Expected<void> D3D12Device::create_descriptor_heaps_and_samplers() {
         }
         return {};
     };
-    if (auto r = make_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kCbvSrvUavHeapCapacity, true, cbv_srv_uav_heap_); !r) {
+    if (auto r = make_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kCbvSrvUavHeapCapacity, true, cbv_srv_uav_heap_);
+        !r) {
         return r;
     }
-    if (auto r = make_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kCbvSrvUavHeapCapacity, false,
-                           cbv_srv_uav_cpu_staging_);
+    if (auto r =
+            make_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kCbvSrvUavHeapCapacity, false, cbv_srv_uav_cpu_staging_);
         !r) {
         return r;
     }
@@ -531,9 +574,8 @@ Expected<void> D3D12Device::create_root_signatures() {
     params[1].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    const D3D12_ROOT_SIGNATURE_FLAGS flags =
-        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
-        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+    const D3D12_ROOT_SIGNATURE_FLAGS flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                                             D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
 
     auto compile_rs = [&](UINT num_params, ID3D12RootSignature*& out_rs) -> Expected<void> {
         D3D12_VERSIONED_ROOT_SIGNATURE_DESC rsd{};
@@ -777,9 +819,9 @@ Expected<D3D12Buffer> D3D12Device::create_buffer(uint64_t size, D3D12BufferUsage
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-    const bool req_uav = (heap == D3D12BufferHeap::DefaultGpu) &&
-                         (has_flag(usage, D3D12BufferUsage::UnorderedAccess) ||
-                          has_flag(usage, D3D12BufferUsage::AccelStructStorage));
+    const bool req_uav =
+        (heap == D3D12BufferHeap::DefaultGpu) &&
+        (has_flag(usage, D3D12BufferUsage::UnorderedAccess) || has_flag(usage, D3D12BufferUsage::AccelStructStorage));
     if (req_uav) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
@@ -937,8 +979,7 @@ Expected<D3D12Texture> D3D12Device::create_texture_2d(uint32_t width, uint32_t h
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     const D3D12_HEAP_FLAGS hflags = shared_nt ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE;
-    const D3D12_RESOURCE_STATES init_state =
-        allow_dsv ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COMMON;
+    const D3D12_RESOURCE_STATES init_state = allow_dsv ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_COMMON;
 
     D3D12Texture out{};
     out.width = width;
@@ -1418,7 +1459,8 @@ void D3D12Device::cmd_transition_buffer(ID3D12GraphicsCommandList4* cmd, D3D12Bu
 #endif
 }
 
-void D3D12Device::cmd_transition_texture(ID3D12GraphicsCommandList4* cmd, D3D12Texture& tex, int target_state) noexcept {
+void D3D12Device::cmd_transition_texture(ID3D12GraphicsCommandList4* cmd, D3D12Texture& tex,
+                                         int target_state) noexcept {
 #if defined(_WIN32)
     if (cmd == nullptr || tex.resource == nullptr || tex.current_state == target_state) {
         return;
@@ -1559,7 +1601,8 @@ uint64_t D3D12Device::poll_debug_errors() noexcept {
                         (msg->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
                          msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)) {
                         validation_errors_.fetch_add(1u, std::memory_order_acq_rel);
-                        AETHER_LOG_ERROR("dx12-val", "%s", msg->pDescription != nullptr ? msg->pDescription : "D3D12 error");
+                        AETHER_LOG_ERROR("dx12-val", "%s",
+                                         msg->pDescription != nullptr ? msg->pDescription : "D3D12 error");
                     }
                 }
             }

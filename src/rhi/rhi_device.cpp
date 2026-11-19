@@ -482,7 +482,7 @@ uint32_t RhiDevice::score_adapter_for_vendor(uint32_t vendor_id, VkPhysicalDevic
     uint32_t score = 0;
     switch (type) {
     case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-        score += 1000u;
+        score += 5000u;
         break;
     case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
         score += 200u;
@@ -538,8 +538,14 @@ Expected<std::vector<GpuAdapterDescriptor>> RhiDevice::enumerate_vulkan_devices(
             out.push_back(eval.desc);
         }
     }
-    std::sort(out.begin(), out.end(),
-              [](const GpuAdapterDescriptor& a, const GpuAdapterDescriptor& b) { return a.score > b.score; });
+    std::sort(out.begin(), out.end(), [](const GpuAdapterDescriptor& a, const GpuAdapterDescriptor& b) {
+        const bool a_disc = (a.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+        const bool b_disc = (b.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+        if (a_disc != b_disc) {
+            return a_disc && !b_disc;
+        }
+        return a.score > b.score;
+    });
 
     vkDestroyInstance(inst, nullptr);
     return out;
@@ -620,7 +626,13 @@ Expected<RhiDevice*> RhiDevice::create(const RhiDeviceConfig& cfg) {
     }
     if (chosen == nullptr) {
         for (const auto& c : candidates) {
-            if (chosen == nullptr || c.desc.score > chosen->desc.score) {
+            if (chosen == nullptr) {
+                chosen = &c;
+                continue;
+            }
+            const bool c_disc = (c.desc.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+            const bool ch_disc = (chosen->desc.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+            if ((c_disc && !ch_disc) || (c_disc == ch_disc && c.desc.score > chosen->desc.score)) {
                 chosen = &c;
             }
         }

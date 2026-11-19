@@ -83,7 +83,7 @@ struct ScopedUiRig {
 TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 97U); // 90 + photometric/catchlight (4) + [TESTING] crease disguise (2) + neck seam blend (1)
+    REQUIRE(kParamCount == 111U); // 97 + Phase 1 Studio Fixture & Optical Modifiers/Satsuei/Holo-Grading (14)
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);
@@ -901,7 +901,8 @@ TEST_CASE("Quick expressions F1-F8 never drive ARKit eye-look slots and F8 is a 
     }
 }
 
-TEST_CASE("Task 3-4: Expressions tab Live2D parameter monitor and 68-pt HUD overlay execute with zero steady-state allocations",
+TEST_CASE("Task 3-4: Expressions tab Live2D parameter monitor and 68-pt HUD overlay execute with zero steady-state "
+          "allocations",
           "[ui][live2d][perf]") {
     aether::rhi::RhiDeviceConfig rhi_cfg{};
     rhi_cfg.enable_validation = false;
@@ -1209,6 +1210,8 @@ TEST_CASE("Viewport HUD collapse/close, Light Orb collision shift, Camera Preset
     const CameraFramingPreset left_corner = compute_builtin_framing_preset(5, 0.85f, 1.20f, 1.46f);
     CHECK(right_corner.target_x < 0.0f); // Shifts camera target left -> avatar sits in bottom-right third
     CHECK(left_corner.target_x > 0.0f);  // Shifts camera target right -> avatar sits in bottom-left third
+    const CameraFramingPreset face_closeup = compute_builtin_framing_preset(1, 0.85f, 1.20f, 1.46f);
+    CHECK(std::fabs(face_closeup.pitch_rad) < 1e-4f);
 
     actions.reset_per_frame();
     io.AddKeyEvent(ImGuiMod_Ctrl, true);

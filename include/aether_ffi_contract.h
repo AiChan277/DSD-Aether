@@ -628,6 +628,161 @@
 #define AETHER_PIN_VALUE_EVENT 10
 
 /*
+ Maximum active studio lights in the single-pass `StructuredBuffer<StudioLightGPU>`.
+ */
+#define AETHER_MAX_STUDIO_LIGHTS 16
+
+/*
+ Studio fixture profile ID (`StudioLightGPU.flags_and_type & 0x0F`): Rectangular Softbox (`0`).
+ */
+#define AETHER_FIXTURE_RECT_SOFTBOX 0
+
+/*
+ Studio fixture profile ID: Octabox 8-Sided Softbox (`1`).
+ */
+#define AETHER_FIXTURE_OCTABOX 1
+
+/*
+ Studio fixture profile ID: Vertical Rim Stripbox (`2`).
+ */
+#define AETHER_FIXTURE_STRIPBOX 2
+
+/*
+ Studio fixture profile ID: Parabolic Softbox / Umbrella (`3`).
+ */
+#define AETHER_FIXTURE_PARABOLIC_UMBRELLA 3
+
+/*
+ Studio fixture profile ID: Lantern / China Ball (`4`).
+ */
+#define AETHER_FIXTURE_LANTERN_BALL 4
+
+/*
+ Studio fixture profile ID: ARRI `SkyPanel` S60-C / X (`5`).
+ */
+#define AETHER_FIXTURE_ARRI_SKYPANEL 5
+
+/*
+ Studio fixture profile ID: ARRI True Blue / Orbiter Fresnel Spot (`6`).
+ */
+#define AETHER_FIXTURE_ARRI_FRESNEL 6
+
+/*
+ Studio fixture profile ID: Dedolight DLED7 Precision Spot (`7`).
+ */
+#define AETHER_FIXTURE_DEDOLIGHT_SPOT 7
+
+/*
+ Studio fixture profile ID: Ellipsoidal / Leko Spotlight with Gobo (`8`).
+ */
+#define AETHER_FIXTURE_ELLIPSOIDAL_LEKO 8
+
+/*
+ Studio fixture profile ID: Broadcast Ring Light / Beauty Dish (`9`).
+ */
+#define AETHER_FIXTURE_BROADCAST_RING 9
+
+/*
+ Studio fixture profile ID: LED Tube Light / Astera Titan (`10`).
+ */
+#define AETHER_FIXTURE_LED_TUBE 10
+
+/*
+ Studio fixture profile ID: Natural Sunlight + Hillaire CIE Sky / Window Portal (`11`).
+ */
+#define AETHER_FIXTURE_NATURAL_SUN_SKY 11
+
+/*
+ `StudioLightGPU.flags_and_type` bit 4: Light Enabled.
+ */
+#define AETHER_LIGHT_FLAG_ENABLED (1u << 4)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 5: Solo Mode.
+ */
+#define AETHER_LIGHT_FLAG_SOLO (1u << 5)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 6: Cast Shadow.
+ */
+#define AETHER_LIGHT_FLAG_CAST_SHADOW (1u << 6)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 7: Softbox Optical Attachment Enabled.
+ */
+#define AETHER_LIGHT_FLAG_SOFTBOX_ON (1u << 7)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 8: Honeycomb / Egg-Crate Grid Enabled.
+ */
+#define AETHER_LIGHT_FLAG_GRID_ON (1u << 8)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 9: 4-Leaf Barn Doors Enabled.
+ */
+#define AETHER_LIGHT_FLAG_BARN_DOORS_ON (1u << 9)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 10: Color Gel Filter Enabled.
+ */
+#define AETHER_LIGHT_FLAG_GEL_ON (1u << 10)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 11: Aim At Target Lock Enabled.
+ */
+#define AETHER_LIGHT_FLAG_AIM_LOCK (1u << 11)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 12: Passive Negative Fill Flag (absorber).
+ */
+#define AETHER_LIGHT_FLAG_NEGATIVE_FILL (1u << 12)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 13: Passive Bounce Reflector Card.
+ */
+#define AETHER_LIGHT_FLAG_BOUNCE_CARD (1u << 13)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 14: Camera Coaxial Lock (Ring Light / Beauty Dish).
+ */
+#define AETHER_LIGHT_FLAG_COAXIAL_LOCK (1u << 14)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 15: Diffusion Cloth Enabled.
+ */
+#define AETHER_LIGHT_FLAG_DIFFUSION_ON (1u << 15)
+
+/*
+ `StudioLightGPU.flags_and_type` bit 16: Indoor Window Portal emitter variant.
+ */
+#define AETHER_LIGHT_FLAG_WINDOW_PORTAL (1u << 16)
+
+/*
+ Light channel mask bit: Affect Face Skin (`0x01`).
+ */
+#define AETHER_LIGHT_CHANNEL_FACE (1u << 0)
+
+/*
+ Light channel mask bit: Affect Hair Strands (`0x02`).
+ */
+#define AETHER_LIGHT_CHANNEL_HAIR (1u << 1)
+
+/*
+ Light channel mask bit: Affect Body & Clothing (`0x04`).
+ */
+#define AETHER_LIGHT_CHANNEL_BODY (1u << 2)
+
+/*
+ Light channel mask bit: Affect Eye Cornea Catchlight (`0x08`).
+ */
+#define AETHER_LIGHT_CHANNEL_CATCHLIGHT (1u << 3)
+
+/*
+ Default light channel mask enabling all channels (`0x0F`).
+ */
+#define AETHER_LIGHT_CHANNEL_ALL 15u
+
+/*
  FFI status code (`0` = success, `< 0` = typed error).
  */
 typedef int32_t AetherStatus;
@@ -1795,6 +1950,80 @@ typedef struct AETHER_ALIGNED(8) AetherTextureDesc {
      */
     uint64_t content_hash_lo;
 } AetherTextureDesc;
+
+/*
+ Photometric studio luminaire and optical modifier GPU payload — 128 B exact, 64-byte aligned.
+ */
+typedef struct AETHER_ALIGNED(64) AetherStudioLightGpu {
+    /*
+     World-space light position (metres).
+     */
+    float position_ws[3];
+    /*
+     `[0..3]` `FixtureType` (`AETHER_FIXTURE_*`), `[4..16]` `AETHER_LIGHT_FLAG_*`, `[17..20]` Gobo/Pattern ID.
+     */
+    uint32_t flags_and_type;
+    /*
+     Normalized world-space forward emission direction.
+     */
+    float direction_ws[3];
+    /*
+     Frostbite EV100 calibrated linear radiant intensity scale.
+     */
+    float intensity_ev100;
+    /*
+     Normalized world-space tangent U axis for polygonal LTC / Softbox orientation.
+     */
+    float tangent_u_ws[3];
+    /*
+     Planckian correlated color temperature (`1500 K..20000 K`).
+     */
+    float kelvin_cct;
+    /*
+     Effective linear RGB color (`CCT * Gel * Custom RGB`).
+     */
+    float color_rgb_linear[3];
+    /*
+     Light channel mask (`AETHER_LIGHT_CHANNEL_*`).
+     */
+    uint32_t light_channel_mask;
+    /*
+     Area geometry dimensions: `[0]` Width / `OuterRadius` (m), `[1]` Height / `InnerRadius` (m).
+     */
+    float size_xy_radius[2];
+    /*
+     Cosine of inner and outer cone angles for Spot / Fresnel fixtures.
+     */
+    float inner_outer_cos[2];
+    /*
+     4-leaf Barn Doors angular cut limits `[Top, Bottom, Left, Right]` in radians.
+     */
+    float barn_door_cuts[4];
+    /*
+     Honeycomb / Egg-Crate Grid collimation cosine threshold.
+     */
+    float grid_collimation_cos;
+    /*
+     Softbox front diffuser cloth density (`0.0` hard open-face .. `1.0` full grid).
+     */
+    float diffusion_softness;
+    /*
+     ANSI/IES LM-63-19 256x64 LUT row index (`< 0.0` disables IES lookup).
+     */
+    float ies_profile_index;
+    /*
+     Eye cornea catchlight intensity scale (`0.0..2.0`).
+     */
+    float catchlight_weight;
+    /*
+     Ray-traced penumbra radius & Shadow Fringe blocker bias multiplier.
+     */
+    float shadow_bias_scale;
+    /*
+     Deterministic padding completing the 128-byte (2 cache lines) stride.
+     */
+    float padding[3];
+} AetherStudioLightGpu;
 
 /*
  Operation succeeded.

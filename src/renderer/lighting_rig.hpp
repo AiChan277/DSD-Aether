@@ -1,5 +1,7 @@
 #pragma once
 
+#include "renderer/studio_lighting.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -7,12 +9,12 @@
 namespace aether::renderer {
 
 enum class LightingFixturePreset : uint8_t {
-    ArriSkyPanelS60C = 0,     // 64.5cm x 30.0cm soft diffusion area panel, rectangular eye catchlight
-    ArriFresnelT2Orbiter = 1, // 12-55 deg focusable Fresnel cone + 4-leaf barn-doors, circular catchlight
-    DedolightDled7 = 2,       // Tight 8-25 deg precision rim/hair/accent spot, pinpoint catchlight
-    BroadcastRingLight = 3,   // Camera-coaxial annular emitter, soft front fill, ring eye catchlight
-    NaturalSunlightCieSky = 4,// 0.53 deg parallel solar beam + analytical CIE sky & ground bounce
-    NaturalWindowPortal = 5,  // Lateral 1.2m x 1.8m window area portal, tall soft window catchlight
+    ArriSkyPanelS60C = 0,      // 64.5cm x 30.0cm soft diffusion area panel, rectangular eye catchlight
+    ArriFresnelT2Orbiter = 1,  // 12-55 deg focusable Fresnel cone + 4-leaf barn-doors, circular catchlight
+    DedolightDled7 = 2,        // Tight 8-25 deg precision rim/hair/accent spot, pinpoint catchlight
+    BroadcastRingLight = 3,    // Camera-coaxial annular emitter, soft front fill, ring eye catchlight
+    NaturalSunlightCieSky = 4, // 0.53 deg parallel solar beam + analytical CIE sky & ground bounce
+    NaturalWindowPortal = 5,   // Lateral 1.2m x 1.8m window area portal, tall soft window catchlight
 };
 
 enum class LightRole : uint8_t {
@@ -93,6 +95,26 @@ struct LightingRig {
     int32_t circadian_timezone{0};
     int32_t circadian_time_minutes{-1}; // -1 = Live Clock, 0..1439 = Manual preview scrub
 
+    // Modular Studio Optical Modifiers (Key Light & Quick Controls)
+    bool key_softbox_enabled{true};
+    bool key_grid_enabled{false};
+    float key_grid_angle_deg{40.0f}; // 30 / 40 / 60 deg
+    bool key_barn_doors_enabled{false};
+    std::array<float, 4> key_barn_door_cuts_deg{38.0f, 38.0f, 42.0f, 42.0f};
+    bool key_diffusion_enabled{true};
+    float key_diffusion_density{0.65f};
+    bool key_gel_enabled{false};
+    StudioGelPreset key_gel{StudioGelPreset::None};
+    StudioGoboPattern key_gobo{StudioGoboPattern::None};
+
+    // Extended 16-light Studio Array + Split Holo-Grading + Satsuei Composite
+    std::array<StudioLightSpec, kMaxStudioLights> studio_lights{};
+    uint32_t studio_light_count{0};
+    bool use_studio_lights{false};
+    int8_t key_studio_profile_override{-1};
+    SplitLayerGradingParams split_grading{};
+    SatsueiCompositeParams satsuei{};
+
     [[nodiscard]] static LightingRig default_three_point() noexcept {
         LightingRig rig{};
         rig.active_count = 4;
@@ -161,6 +183,7 @@ struct LightingRig {
 inline void apply_lighting_fixture_preset(LightingRig& rig, LightingFixturePreset preset,
                                           float custom_beam_deg = -1.0f) noexcept {
     rig.fixture_preset = preset;
+    rig.key_studio_profile_override = -1;
     if (custom_beam_deg > 1.0f) {
         rig.photometric_beam_angle_deg = std::clamp(custom_beam_deg, 8.0f, 55.0f);
     }

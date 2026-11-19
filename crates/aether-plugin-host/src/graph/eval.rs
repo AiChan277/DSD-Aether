@@ -1003,7 +1003,11 @@ fn eval_op(
                     }
                     None => true,
                 };
-                let w = if finite && moved { p[3].clamp(0.0, 1.0) } else { 0.0 };
+                let w = if finite && moved {
+                    p[3].clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 if w > 0.0 {
                     outputs.ik_targets[slot] = [p[0], p[1], p[2], 0.0, 0.0, 0.0, 1.0, w];
                 }
@@ -1153,7 +1157,8 @@ impl CompiledGraphPlan {
                 }
             }
         }
-        self.last_total_eval_ns = u64::try_from(plan_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.last_total_eval_ns =
+            u64::try_from(plan_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
         for (i, pin_meta) in self.output_pins.iter().enumerate() {
             let (kind, values) = summarize_slot(arena, pin_meta.slot);
             self.pin_kinds[i] = kind;
@@ -1163,7 +1168,10 @@ impl CompiledGraphPlan {
     }
 }
 
-fn summarize_slot(arena: &ValuesArena, slot: Option<crate::graph::compiler::SlotRef>) -> (u8, [f32; 4]) {
+fn summarize_slot(
+    arena: &ValuesArena,
+    slot: Option<crate::graph::compiler::SlotRef>,
+) -> (u8, [f32; 4]) {
     use crate::graph::compiler::SlotRef;
     let Some(slot_ref) = slot else {
         return (aether_ffi::AETHER_PIN_VALUE_INVALID, [0.0; 4]);
@@ -1188,7 +1196,10 @@ fn summarize_slot(arena: &ValuesArena, slot: Option<crate::graph::compiler::Slot
         SlotRef::Quat(i) => (aether_ffi::AETHER_PIN_VALUE_QUAT, arena.quats[i]),
         SlotRef::Transform(i) => {
             let t = arena.transforms[i];
-            (aether_ffi::AETHER_PIN_VALUE_TRANSFORM, [t[0], t[1], t[2], t[7]])
+            (
+                aether_ffi::AETHER_PIN_VALUE_TRANSFORM,
+                [t[0], t[1], t[2], t[7]],
+            )
         }
         SlotRef::Pose(i) => {
             let p = &arena.poses[i];

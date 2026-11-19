@@ -625,12 +625,18 @@ fn cpp_default_6_node_graph_json_parses_and_compiles_cleanly()
     host.evaluate_active(&track_inp, &mut out)?;
     for (b, q) in out.bone_rotation_offsets.iter().enumerate() {
         assert!(
-            q[0].abs() < 1e-5 && q[1].abs() < 1e-5 && q[2].abs() < 1e-5 && (q[3] - 1.0).abs() < 1e-5,
+            q[0].abs() < 1e-5
+                && q[1].abs() < 1e-5
+                && q[2].abs() < 1e-5
+                && (q[3] - 1.0).abs() < 1e-5,
             "bone {b} offset must be identity for a tracking pass-through, got {q:?}"
         );
     }
     for (slot, t) in out.ik_targets.iter().take(6).enumerate() {
-        assert!(t[7].abs() < 1e-6, "IK slot {slot} must stay inactive for a pass-through, got {t:?}");
+        assert!(
+            t[7].abs() < 1e-6,
+            "IK slot {slot} must stay inactive for a pass-through, got {t:?}"
+        );
     }
     Ok(())
 }
@@ -1287,26 +1293,53 @@ impl PlanStatsZeroExt for AetherGraphPlanStats {
 }
 
 #[test]
-fn audio_frame_and_viseme_types_distinct_with_legacy_json_compat() -> Result<(), Box<dyn std::error::Error>> {
+fn audio_frame_and_viseme_types_distinct_with_legacy_json_compat()
+-> Result<(), Box<dyn std::error::Error>> {
     use aether_plugin_host::graph::model::ValueType;
-    use aether_plugin_host::graph::{compile_graph_document, GraphDocument, GraphEdge, GraphNode};
+    use aether_plugin_host::graph::{GraphDocument, GraphEdge, GraphNode, compile_graph_document};
 
     // 1. Type system: AudioFrame (AudioSpectrum) is strictly distinct from VisemeSet / ExprSet.
-    assert!(ValueType::can_connect(ValueType::AudioFrame, ValueType::AudioFrame));
-    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::VisemeSet));
-    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::ExprSet));
-    assert!(!ValueType::can_connect(ValueType::AudioFrame, ValueType::Pose));
-    assert!(ValueType::can_connect(ValueType::VisemeSet, ValueType::VisemeSet));
-    assert!(ValueType::can_connect(ValueType::VisemeSet, ValueType::ExprSet));
+    assert!(ValueType::can_connect(
+        ValueType::AudioFrame,
+        ValueType::AudioFrame
+    ));
+    assert!(!ValueType::can_connect(
+        ValueType::AudioFrame,
+        ValueType::VisemeSet
+    ));
+    assert!(!ValueType::can_connect(
+        ValueType::AudioFrame,
+        ValueType::ExprSet
+    ));
+    assert!(!ValueType::can_connect(
+        ValueType::AudioFrame,
+        ValueType::Pose
+    ));
+    assert!(ValueType::can_connect(
+        ValueType::VisemeSet,
+        ValueType::VisemeSet
+    ));
+    assert!(ValueType::can_connect(
+        ValueType::VisemeSet,
+        ValueType::ExprSet
+    ));
     let alias_ty: ValueType = serde_json::from_str("\"AudioSpectrum\"")?;
     assert_eq!(alias_ty, ValueType::AudioFrame);
 
     // 2. Default project graph carries DspAudio(audio: AudioFrame) -> FormantLipSync(visemes: VisemeSet) -> OutputExpressions.
     let default_doc = GraphDocument::default_project_graph();
-    let e45 = default_doc.edges.iter().find(|e| e.from_node == 4 && e.to_node == 5).ok_or("missing 4->5")?;
+    let e45 = default_doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == 4 && e.to_node == 5)
+        .ok_or("missing 4->5")?;
     assert_eq!(e45.from_port, "audio");
     assert_eq!(e45.to_port, "audio");
-    let e56 = default_doc.edges.iter().find(|e| e.from_node == 5 && e.to_node == 6).ok_or("missing 5->6")?;
+    let e56 = default_doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == 5 && e.to_node == 6)
+        .ok_or("missing 5->6")?;
     assert_eq!(e56.from_port, "visemes");
     assert_eq!(e56.to_port, "expressions");
 
@@ -1324,7 +1357,9 @@ fn audio_frame_and_viseme_types_distinct_with_legacy_json_compat() -> Result<(),
     let mut ro = AetherGraphTelemetryReadout::default_zero();
     host.get_telemetry_readout(&mut ro)?;
     assert_eq!(ro.valid, 1);
-    let n_pins = usize::try_from(ro.pin_readout_count).unwrap_or(0).min(ro.pin_kinds.len());
+    let n_pins = usize::try_from(ro.pin_readout_count)
+        .unwrap_or(0)
+        .min(ro.pin_kinds.len());
     let audio_idx = (0..n_pins)
         .find(|&i| ro.pin_node_ids[i] == 4 && ro.pin_indices[i] == 0)
         .ok_or("missing DspAudio pin 0 readout")?;

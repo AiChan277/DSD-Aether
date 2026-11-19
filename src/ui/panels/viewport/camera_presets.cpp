@@ -49,9 +49,9 @@ const char* builtin_framing_preset_shortcut(int32_t index) noexcept {
     }
 }
 
-CameraFramingPreset compute_builtin_framing_preset(
-    int32_t index, float hips_y, float chest_y, float head_y, const std::array<float, 3>& avatar_pos,
-    float avatar_scale, float viewport_aspect) noexcept {
+CameraFramingPreset compute_builtin_framing_preset(int32_t index, float hips_y, float chest_y, float head_y,
+                                                   const std::array<float, 3>& avatar_pos, float avatar_scale,
+                                                   float viewport_aspect) noexcept {
     const int32_t idx = std::clamp(index, 0, static_cast<int32_t>(kBuiltinFramingPresetCount) - 1);
     const float sc = std::clamp(avatar_scale, 0.25f, 4.0f);
     const float base_hips = std::clamp(hips_y, 0.25f, 2.5f);
@@ -86,12 +86,12 @@ CameraFramingPreset compute_builtin_framing_preset(
         p.pitch_rad = 0.04f;
         break;
     }
-    case 1: { // 2: Face Close-Up
+    case 1: { // 2: Face Close-Up (horizontal eye-level framing without upward tilt)
         const float vh = std::max(0.28f * sc, chest_head_h * 1.48f);
         p.distance = std::clamp((vh * 0.5f) / half_tan, 0.50f, 10.0f);
-        p.target_y = heady + chest_head_h * 0.08f;
+        p.target_y = heady + chest_head_h * 0.14f;
         p.yaw_rad = 0.05f;
-        p.pitch_rad = 0.02f;
+        p.pitch_rad = 0.0f;
         break;
     }
     case 2: { // 3: Waist-Up / Half Body

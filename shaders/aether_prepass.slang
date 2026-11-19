@@ -53,12 +53,15 @@ PrepassVsOut vs_main(uint vid : SV_VertexID) {
     float3 shade_n_ws = is_face_mat
                             ? proxy_n_ws
                             : normalize_safe(lerp(true_n_ws, proxy_n_ws, crease_eff), true_n_ws);
-    if (is_body_skin_atlas) {
+    if (is_face_mat) {
+        float3 unified_n = compute_unified_skin_normal(v.pos_zflat.xyz, true_n_ws, fg);
+        float chin_y = (fg.chin_pos_ws.w > 0.5) ? fg.chin_pos_ws.y : (fg.neck_seam_head_str.y - 0.045);
+        float jaw_w = 1.0 - smoothstep(chin_y - 0.01, chin_y + 0.045, v.pos_zflat.y);
+        shade_n_ws = normalize_safe(lerp(shade_n_ws, unified_n, max(0.35, jaw_w)), shade_n_ws);
+    } else if (is_body_skin_atlas) {
         float neck_w = compute_neck_seam_blend(v.pos_zflat.xyz, fg);
-        if (neck_w > 0.001) {
-            float3 neck_proxy = compute_neck_proxy_normal(true_n_ws, fg);
-            shade_n_ws = normalize_safe(lerp(shade_n_ws, neck_proxy, neck_w), shade_n_ws);
-        }
+        float3 unified_n = compute_unified_skin_normal(v.pos_zflat.xyz, true_n_ws, fg);
+        shade_n_ws = normalize_safe(lerp(shade_n_ws, unified_n, max(neck_w, 0.25)), shade_n_ws);
     }
 
     o.view_normal = normalize_safe(mul_col3(fg.view, shade_n_ws), float3(0.0, 0.0, 1.0));
@@ -88,7 +91,8 @@ PrepassPsOut ps_main(PrepassVsOut i, bool is_front_face : SV_IsFrontFace) {
         if ((g_Pc.param1 & 32u) != 0u && mat.toon_params.w > 0.001) {
             float tex_a = aether_sample(mat.tex_slots.x, kSamplerLinearClamp, i.uv).a;
             float alpha = tex_a * mat.lit_color.a;
-            if (alpha < mat.toon_params.w) {
+            float aa_alpha = saturate((alpha - mat.toon_params.w) / max(fwidth(alpha), 1e-4) + 0.5);
+            if (aa_alpha < 0.05) {
                 discard;
             }
         }

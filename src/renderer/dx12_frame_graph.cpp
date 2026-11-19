@@ -110,8 +110,8 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
 
     // 1x1 white fallback texture + 2048^2 CSM depth target
     const std::array<uint8_t, 4> white_px{255u, 255u, 255u, 255u};
-    auto fw_res = device_->create_texture_2d_from_data(1u, 1u, static_cast<int>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),
-                                                       white_px, 4u);
+    auto fw_res =
+        device_->create_texture_2d_from_data(1u, 1u, static_cast<int>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB), white_px, 4u);
     if (!fw_res) {
         destroy();
         return make_unexpected(fw_res.error());
@@ -124,6 +124,45 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
         return make_unexpected(csm_res.error());
     }
     csm_depth_ = csm_res.value();
+
+    // Heitz (2016) 64x64 LTC LUTs & 256x64 ANSI/IES LM-63-19 LUT (uploaded once at init)
+    {
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> inv_m{};
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> amp{};
+        generate_heitz_ltc_luts(inv_m, amp);
+        const auto* inv_u8 = reinterpret_cast<const uint8_t*>(inv_m.data());
+        const auto* amp_u8 = reinterpret_cast<const uint8_t*>(amp.data());
+        auto inv_r = device_->create_texture_2d_from_data(
+            kLtcLutSize, kLtcLutSize, static_cast<int>(DXGI_FORMAT_R32G32B32A32_FLOAT),
+            std::span<const uint8_t>(inv_u8, inv_m.size() * sizeof(float)), kLtcLutSize * 16u);
+        if (!inv_r) {
+            destroy();
+            return make_unexpected(inv_r.error());
+        }
+        ltc_inv_m_ = inv_r.value();
+
+        auto amp_r = device_->create_texture_2d_from_data(
+            kLtcLutSize, kLtcLutSize, static_cast<int>(DXGI_FORMAT_R32G32B32A32_FLOAT),
+            std::span<const uint8_t>(amp_u8, amp.size() * sizeof(float)), kLtcLutSize * 16u);
+        if (!amp_r) {
+            destroy();
+            return make_unexpected(amp_r.error());
+        }
+        ltc_amp_ = amp_r.value();
+    }
+    {
+        std::array<float, kIesLutWidth * kIesLutRows> ies{};
+        generate_ies_lm63_lut(ies);
+        const auto* ies_u8 = reinterpret_cast<const uint8_t*>(ies.data());
+        auto ies_r = device_->create_texture_2d_from_data(
+            kIesLutWidth, kIesLutRows, static_cast<int>(DXGI_FORMAT_R32_FLOAT),
+            std::span<const uint8_t>(ies_u8, ies.size() * sizeof(float)), kIesLutWidth * 4u);
+        if (!ies_r) {
+            destroy();
+            return make_unexpected(ies_r.error());
+        }
+        ies_lut_ = ies_r.value();
+    }
 
     if (auto rc = create_size_dependent_targets(width, height); !rc) {
         destroy();
@@ -150,11 +189,15 @@ void Dx12FrameGraph::destroy() noexcept {
         destroy_avatar_resources();
         destroy_size_dependent_targets();
         device_->destroy_texture(csm_depth_);
+        device_->destroy_texture(ies_lut_);
+        device_->destroy_texture(ltc_amp_);
+        device_->destroy_texture(ltc_inv_m_);
         device_->destroy_texture(fallback_white_tex_);
         for (auto& sl : upload_slices_) {
             device_->destroy_buffer(sl.fg_buf);
             device_->destroy_buffer(sl.pose_buf);
             device_->destroy_buffer(sl.tlas_inst);
+            device_->destroy_buffer(sl.studio_lights_buf);
             sl.pose_vertex_cap = 0;
         }
         destroy_pipelines();
@@ -184,20 +227,29 @@ Expected<void> Dx12FrameGraph::ensure_upload_capacity(uint32_t vertex_count) {
     }
     for (auto& sl : upload_slices_) {
         if (sl.fg_buf.resource == nullptr) {
-            auto r = device_->create_buffer(4096u, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
-                                            true, false);
+            auto r = device_->create_buffer(4096u, rhi::D3D12BufferUsage::ShaderResource,
+                                            rhi::D3D12BufferHeap::UploadCpu, true, false);
             if (!r) {
                 return make_unexpected(r.error());
             }
             sl.fg_buf = r.value();
         }
         if (sl.tlas_inst.resource == nullptr) {
-            auto r = device_->create_buffer(512u, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
-                                            false, false);
+            auto r = device_->create_buffer(512u, rhi::D3D12BufferUsage::ShaderResource,
+                                            rhi::D3D12BufferHeap::UploadCpu, false, false);
             if (!r) {
                 return make_unexpected(r.error());
             }
             sl.tlas_inst = r.value();
+        }
+        if (sl.studio_lights_buf.resource == nullptr) {
+            auto r = device_->create_buffer(static_cast<uint64_t>(kMaxStudioLights) * sizeof(StudioLightGPU),
+                                            rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
+                                            true, false);
+            if (!r) {
+                return make_unexpected(r.error());
+            }
+            sl.studio_lights_buf = r.value();
         }
         if (sl.pose_buf.resource == nullptr || sl.pose_vertex_cap < need) {
             device_->destroy_buffer(sl.pose_buf);
@@ -229,16 +281,26 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         return {};
     };
 
-    if (auto r = build_cs(SId::SkinMorph, false, pso_skin_morph_); !r) return r;
-    if (auto r = build_cs(SId::CsmFallbackCs, false, pso_csm_fallback_); !r) return r;
-    if (auto r = build_cs(SId::DenoiseSvgf, false, pso_denoise_svgf_); !r) return r;
-    if (auto r = build_cs(SId::DenoiseSigma, false, pso_denoise_sigma_); !r) return r;
-    if (auto r = build_cs(SId::DenoiseFfx, false, pso_denoise_ffx_); !r) return r;
-    if (auto r = build_cs(SId::CreaseLines, false, pso_crease_lines_); !r) return r;
-    if (auto r = build_cs(SId::BloomDown, false, pso_bloom_down_); !r) return r;
-    if (auto r = build_cs(SId::BloomUp, false, pso_bloom_up_); !r) return r;
-    if (auto r = build_cs(SId::ToneComposite, false, pso_tone_composite_); !r) return r;
-    if (auto r = build_cs(SId::EncodeBgra, false, pso_encode_bgra_); !r) return r;
+    if (auto r = build_cs(SId::SkinMorph, false, pso_skin_morph_); !r)
+        return r;
+    if (auto r = build_cs(SId::CsmFallbackCs, false, pso_csm_fallback_); !r)
+        return r;
+    if (auto r = build_cs(SId::DenoiseSvgf, false, pso_denoise_svgf_); !r)
+        return r;
+    if (auto r = build_cs(SId::DenoiseSigma, false, pso_denoise_sigma_); !r)
+        return r;
+    if (auto r = build_cs(SId::DenoiseFfx, false, pso_denoise_ffx_); !r)
+        return r;
+    if (auto r = build_cs(SId::CreaseLines, false, pso_crease_lines_); !r)
+        return r;
+    if (auto r = build_cs(SId::BloomDown, false, pso_bloom_down_); !r)
+        return r;
+    if (auto r = build_cs(SId::BloomUp, false, pso_bloom_up_); !r)
+        return r;
+    if (auto r = build_cs(SId::ToneComposite, false, pso_tone_composite_); !r)
+        return r;
+    if (auto r = build_cs(SId::EncodeBgra, false, pso_encode_bgra_); !r)
+        return r;
 
     if (device_->dxr_supported()) {
         if (auto r = build_cs(SId::RayEffects, true, pso_ray_effects_); !r) {
@@ -266,12 +328,14 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         d.front_counter_clockwise = true;
         d.cull_mode = D3D12_CULL_MODE_BACK;
         auto r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_prepass_cull_ = r.value();
 
         d.cull_mode = D3D12_CULL_MODE_NONE;
         r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_prepass_nocull_ = r.value();
     }
 
@@ -288,7 +352,8 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         d.front_counter_clockwise = true;
         d.cull_mode = D3D12_CULL_MODE_NONE;
         auto r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_csm_shadow_ = r.value();
     }
 
@@ -307,17 +372,20 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
 
         d.cull_mode = D3D12_CULL_MODE_BACK;
         auto r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_npr_opaque_cull_ = r.value();
 
         d.cull_mode = D3D12_CULL_MODE_NONE;
         r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_npr_opaque_nocull_ = r.value();
 
         d.wireframe = true;
         r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_npr_wire_ = r.value();
         d.wireframe = false;
 
@@ -325,12 +393,14 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         d.premultiplied_alpha = true;
         d.cull_mode = D3D12_CULL_MODE_BACK;
         r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_npr_blend_cull_ = r.value();
 
         d.cull_mode = D3D12_CULL_MODE_NONE;
         r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_npr_blend_nocull_ = r.value();
     }
 
@@ -348,7 +418,8 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         d.front_counter_clockwise = true;
         d.cull_mode = D3D12_CULL_MODE_FRONT;
         auto r = device_->create_graphics_pso(d);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         pso_outline_hull_ = r.value();
     }
 
@@ -397,50 +468,86 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
     const float clear_norm[4] = {0.5f, 0.5f, 0.0f, 1.0f};
 
     auto ds_res = device_->create_depth_stencil_s8(w, h);
-    if (!ds_res) return make_unexpected(ds_res.error());
+    if (!ds_res)
+        return make_unexpected(ds_res.error());
     depth_stencil_ = ds_res.value();
 
     auto mk = [&](rhi::D3D12Texture& dst, uint32_t tw, uint32_t th, DXGI_FORMAT fmt, bool rtv, bool uav, bool shared,
                   bool d3d11, const float* cv) -> Expected<void> {
         auto r = device_->create_texture_2d(tw, th, static_cast<int>(fmt), rtv, false, uav, shared, d3d11, cv);
-        if (!r) return make_unexpected(r.error());
+        if (!r)
+            return make_unexpected(r.error());
         dst = r.value();
         return {};
     };
 
-    if (auto r = mk(gb_n_, w, h, kNormalFmt, true, false, false, false, clear_norm); !r) return r;
-    if (auto r = mk(gb_mv_, w, h, kMvFmt, true, false, false, false, clear_zero); !r) return r;
-    if (auto r = mk(gb_mat_, w, h, kMatFmt, true, false, false, false, clear_zero); !r) return r;
-    if (auto r = mk(gb_misc_, w, h, kMiscFmt, true, false, false, false, clear_zero); !r) return r;
-    if (auto r = mk(prev_normal_, w, h, kNormalFmt, false, false, false, false, nullptr); !r) return r;
+    if (auto r = mk(gb_n_, w, h, kNormalFmt, true, false, false, false, clear_norm); !r)
+        return r;
+    if (auto r = mk(gb_mv_, w, h, kMvFmt, true, false, false, false, clear_zero); !r)
+        return r;
+    if (auto r = mk(gb_mat_, w, h, kMatFmt, true, false, false, false, clear_zero); !r)
+        return r;
+    if (auto r = mk(gb_misc_, w, h, kMiscFmt, true, false, false, false, clear_zero); !r)
+        return r;
+    if (auto r = mk(prev_normal_, w, h, kNormalFmt, false, false, false, false, nullptr); !r)
+        return r;
 
-    if (auto r = mk(rt_shadow_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(rt_shadow_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(prev_rt_shadow_, w, h, kRtFmt, false, false, false, false, nullptr); !r) return r;
+    if (auto r = mk(rt_shadow_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(rt_shadow_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(prev_rt_shadow_, w, h, kRtFmt, false, false, false, false, nullptr); !r)
+        return r;
 
-    if (auto r = mk(rim_occ_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(rim_occ_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(prev_rim_occ_, w, h, kRtFmt, false, false, false, false, nullptr); !r) return r;
+    if (auto r = mk(rim_occ_raw_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(rim_occ_denoised_, w, h, kRtFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(prev_rim_occ_, w, h, kRtFmt, false, false, false, false, nullptr); !r)
+        return r;
 
     const uint32_t hw = std::max(1u, (w + 1u) / 2u);
     const uint32_t hh = std::max(1u, (h + 1u) / 2u);
-    if (auto r = mk(bounce_half_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(bounce_denoised_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r) return r;
-    if (auto r = mk(prev_bounce_, hw, hh, kHdrFmt, false, false, false, false, nullptr); !r) return r;
+    if (auto r = mk(bounce_half_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(bounce_denoised_, hw, hh, kHdrFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(prev_bounce_, hw, hh, kHdrFmt, false, false, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(aov_backscatter_, w, h, kHdrFmt, false, true, false, false, nullptr); !r)
+        return r;
+    if (auto r = mk(aov_cornea_spec_, w, h, kHdrFmt, false, true, false, false, nullptr); !r)
+        return r;
+    {
+        const uint64_t res_bytes = static_cast<uint64_t>(hw) * static_cast<uint64_t>(hh) * sizeof(GpuReSTIRReservoir);
+        for (auto& rb : reservoir_bufs_) {
+            auto br = device_->create_buffer(
+                res_bytes, rhi::D3D12BufferUsage::UnorderedAccess | rhi::D3D12BufferUsage::ShaderResource,
+                rhi::D3D12BufferHeap::DefaultGpu, true, true);
+            if (!br)
+                return make_unexpected(br.error());
+            rb = br.value();
+        }
+    }
 
-    if (auto r = mk(hdr_scene_, w, h, kHdrFmt, true, false, false, false, clear_zero); !r) return r;
-    if (auto r = mk(crease_mask_, w, h, kCreaseFmt, false, true, false, false, nullptr); !r) return r;
+    if (auto r = mk(hdr_scene_, w, h, kHdrFmt, true, false, false, false, clear_zero); !r)
+        return r;
+    if (auto r = mk(crease_mask_, w, h, kCreaseFmt, false, true, false, false, nullptr); !r)
+        return r;
 
     uint32_t mw = std::max(1u, w >> 1u);
     uint32_t mh = std::max(1u, h >> 1u);
     for (uint32_t m = 0; m < kBloomMipCount; ++m) {
-        if (auto r = mk(bloom_mips_[m], mw, mh, kHdrFmt, false, true, false, false, nullptr); !r) return r;
+        if (auto r = mk(bloom_mips_[m], mw, mh, kHdrFmt, false, true, false, false, nullptr); !r)
+            return r;
         mw = std::max(1u, mw >> 1u);
         mh = std::max(1u, mh >> 1u);
     }
 
-    if (auto r = mk(out_rgba16f_, w, h, kHdrFmt, false, true, enable_shared_output_, false, nullptr); !r) return r;
-    if (auto r = mk(out_rgba8_, w, h, kRgba8Fmt, false, true, enable_shared_output_, false, nullptr); !r) return r;
+    if (auto r = mk(out_rgba16f_, w, h, kHdrFmt, false, true, enable_shared_output_, false, nullptr); !r)
+        return r;
+    if (auto r = mk(out_rgba8_, w, h, kRgba8Fmt, false, true, enable_shared_output_, false, nullptr); !r)
+        return r;
 
     const bool bgra_uav = device_->gpu_info().supports_bgra8_uav;
     if (auto r = mk(out_bgra8_, w, h, kBgra8Fmt, !bgra_uav, bgra_uav, enable_shared_output_,
@@ -452,14 +559,16 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
     readback_row_pitch_ =
         (w * 4u + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1u);
     const uint64_t rb_bytes = static_cast<uint64_t>(readback_row_pitch_) * h;
-    auto rb1 = device_->create_buffer(rb_bytes, rhi::D3D12BufferUsage::CopyDst, rhi::D3D12BufferHeap::ReadbackCpu, false,
-                                      false);
-    if (!rb1) return make_unexpected(rb1.error());
+    auto rb1 = device_->create_buffer(rb_bytes, rhi::D3D12BufferUsage::CopyDst, rhi::D3D12BufferHeap::ReadbackCpu,
+                                      false, false);
+    if (!rb1)
+        return make_unexpected(rb1.error());
     readback_rgba8_buf_ = rb1.value();
 
-    auto rb2 = device_->create_buffer(rb_bytes, rhi::D3D12BufferUsage::CopyDst, rhi::D3D12BufferHeap::ReadbackCpu, false,
-                                      false);
-    if (!rb2) return make_unexpected(rb2.error());
+    auto rb2 = device_->create_buffer(rb_bytes, rhi::D3D12BufferUsage::CopyDst, rhi::D3D12BufferHeap::ReadbackCpu,
+                                      false, false);
+    if (!rb2)
+        return make_unexpected(rb2.error());
     readback_bgra8_buf_ = rb2.value();
     return {};
 #endif
@@ -479,6 +588,11 @@ void Dx12FrameGraph::destroy_size_dependent_targets() noexcept {
     }
     device_->destroy_texture(crease_mask_);
     device_->destroy_texture(hdr_scene_);
+    for (auto& rb : reservoir_bufs_) {
+        device_->destroy_buffer(rb);
+    }
+    device_->destroy_texture(aov_cornea_spec_);
+    device_->destroy_texture(aov_backscatter_);
     device_->destroy_texture(prev_bounce_);
     device_->destroy_texture(bounce_denoised_);
     device_->destroy_texture(bounce_half_);
@@ -564,11 +678,11 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     }
 
     avatar_vertex_count_ = vtx_count;
-    auto sv_res = device_->create_buffer(
-        static_cast<uint64_t>(vtx_count) * sizeof(GpuSkinnedVertex),
-        rhi::D3D12BufferUsage::UnorderedAccess | rhi::D3D12BufferUsage::ShaderResource,
-        rhi::D3D12BufferHeap::DefaultGpu, true, true);
-    if (!sv_res) return make_unexpected(sv_res.error());
+    auto sv_res = device_->create_buffer(static_cast<uint64_t>(vtx_count) * sizeof(GpuSkinnedVertex),
+                                         rhi::D3D12BufferUsage::UnorderedAccess | rhi::D3D12BufferUsage::ShaderResource,
+                                         rhi::D3D12BufferHeap::DefaultGpu, true, true);
+    if (!sv_res)
+        return make_unexpected(sv_res.error());
     skinned_vertices_buf_ = sv_res.value();
 
     // Surface buffer (optional)
@@ -576,7 +690,8 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
         const uint64_t sbytes = static_cast<uint64_t>(avatar->rest_surfaces.size()) * sizeof(AetherVertexSurface);
         auto sr = device_->create_buffer(sbytes, rhi::D3D12BufferUsage::ShaderResource, rhi::D3D12BufferHeap::UploadCpu,
                                          true, false);
-        if (!sr) return make_unexpected(sr.error());
+        if (!sr)
+            return make_unexpected(sr.error());
         surface_buf_ = sr.value();
         std::memcpy(surface_buf_.mapped_ptr, avatar->rest_surfaces.data(), static_cast<size_t>(sbytes));
     }
@@ -585,12 +700,14 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     const uint64_t idx_bytes = static_cast<uint64_t>(avatar->rest_indices.size()) * sizeof(uint32_t);
     auto ib_res = device_->create_buffer(idx_bytes, rhi::D3D12BufferUsage::IndexBuffer | rhi::D3D12BufferUsage::CopyDst,
                                          rhi::D3D12BufferHeap::DefaultGpu, false, false);
-    if (!ib_res) return make_unexpected(ib_res.error());
+    if (!ib_res)
+        return make_unexpected(ib_res.error());
     index_buf_ = ib_res.value();
 
-    auto ib_stg =
-        device_->create_buffer(idx_bytes, rhi::D3D12BufferUsage::CopySrc, rhi::D3D12BufferHeap::UploadCpu, false, false);
-    if (!ib_stg) return make_unexpected(ib_stg.error());
+    auto ib_stg = device_->create_buffer(idx_bytes, rhi::D3D12BufferUsage::CopySrc, rhi::D3D12BufferHeap::UploadCpu,
+                                         false, false);
+    if (!ib_stg)
+        return make_unexpected(ib_stg.error());
     std::memcpy(ib_stg.value().mapped_ptr, avatar->rest_indices.data(), static_cast<size_t>(idx_bytes));
 
     auto copy_rc = device_->execute_immediate([&](ID3D12GraphicsCommandList4* cmd) {
@@ -600,7 +717,8 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
             cmd, index_buf_, D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     });
     device_->destroy_buffer(ib_stg.value());
-    if (!copy_rc) return copy_rc;
+    if (!copy_rc)
+        return copy_rc;
 
     // Upload all avatar textures from retained CPU pixel buffer
     avatar_tex_slots_.assign(avatar->texture_descs.size(), fallback_white_tex_.srv_index);
@@ -645,7 +763,8 @@ Expected<void> Dx12FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     const uint64_t mat_bytes = static_cast<uint64_t>(cached_materials_.size()) * sizeof(GpuMaterial);
     auto mat_res = device_->create_buffer(mat_bytes, rhi::D3D12BufferUsage::ShaderResource,
                                           rhi::D3D12BufferHeap::UploadCpu, true, false);
-    if (!mat_res) return make_unexpected(mat_res.error());
+    if (!mat_res)
+        return make_unexpected(mat_res.error());
     material_buf_ = mat_res.value();
     std::memcpy(material_buf_.mapped_ptr, cached_materials_.data(), static_cast<size_t>(mat_bytes));
 
@@ -670,9 +789,10 @@ Expected<void> Dx12FrameGraph::apply_face_sdf(const SdfBakeOutput& baked) {
         return make_unexpected(Error::make(ErrorCode::InvalidArg, "Dx12FrameGraph::apply_face_sdf invalid args"));
     }
     device_->wait_idle();
-    auto tex_res = device_->create_texture_2d_from_data(baked.width, baked.height, static_cast<int>(DXGI_FORMAT_R8_UNORM),
-                                                        baked.r8_pixels, baked.width);
-    if (!tex_res) return make_unexpected(tex_res.error());
+    auto tex_res = device_->create_texture_2d_from_data(
+        baked.width, baked.height, static_cast<int>(DXGI_FORMAT_R8_UNORM), baked.r8_pixels, baked.width);
+    if (!tex_res)
+        return make_unexpected(tex_res.error());
     device_->destroy_texture(baked_face_sdf_tex_);
     baked_face_sdf_tex_ = tex_res.value();
     avatar_face_sdf_slot_ = baked_face_sdf_tex_.srv_index;
@@ -739,12 +859,14 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
         auto ib_res =
             device_->create_buffer(rt_idx_bytes, rhi::D3D12BufferUsage::IndexBuffer | rhi::D3D12BufferUsage::CopyDst,
                                    rhi::D3D12BufferHeap::DefaultGpu, false, false);
-        if (!ib_res) return make_unexpected(ib_res.error());
+        if (!ib_res)
+            return make_unexpected(ib_res.error());
         rt_index_buf_ = ib_res.value();
 
-        auto stg = device_->create_buffer(rt_idx_bytes, rhi::D3D12BufferUsage::CopySrc,
-                                          rhi::D3D12BufferHeap::UploadCpu, false, false);
-        if (!stg) return make_unexpected(stg.error());
+        auto stg = device_->create_buffer(rt_idx_bytes, rhi::D3D12BufferUsage::CopySrc, rhi::D3D12BufferHeap::UploadCpu,
+                                          false, false);
+        if (!stg)
+            return make_unexpected(stg.error());
         std::memcpy(stg.value().mapped_ptr, part.sorted_indices.data(), static_cast<size_t>(rt_idx_bytes));
         auto copy_rc = device_->execute_immediate([&](ID3D12GraphicsCommandList4* cmd) {
             device_->cmd_transition_buffer(cmd, rt_index_buf_, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -752,13 +874,15 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
             device_->cmd_transition_buffer(cmd, rt_index_buf_, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         });
         device_->destroy_buffer(stg.value());
-        if (!copy_rc) return copy_rc;
+        if (!copy_rc)
+            return copy_rc;
 
         if (!part.tri_meta.empty()) {
             const uint64_t tm_bytes = static_cast<uint64_t>(part.tri_meta.size()) * sizeof(RtTriMeta);
             auto tm_res = device_->create_buffer(tm_bytes, rhi::D3D12BufferUsage::ShaderResource,
                                                  rhi::D3D12BufferHeap::UploadCpu, true, false);
-            if (!tm_res) return make_unexpected(tm_res.error());
+            if (!tm_res)
+                return make_unexpected(tm_res.error());
             rt_tri_meta_buf_ = tm_res.value();
             std::memcpy(rt_tri_meta_buf_.mapped_ptr, part.tri_meta.data(), static_cast<size_t>(tm_bytes));
         }
@@ -818,7 +942,8 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
         const uint64_t bytes = align_up_u64(info.ResultDataMaxSizeInBytes, 256u);
         auto res = device_->create_buffer(bytes, rhi::D3D12BufferUsage::AccelStructStorage,
                                           rhi::D3D12BufferHeap::DefaultGpu, false, false);
-        if (!res) return make_unexpected(res.error());
+        if (!res)
+            return make_unexpected(res.error());
         bk.buf = res.value();
         scratch_max = std::max({scratch_max, info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes});
     }
@@ -834,13 +959,15 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
     auto tb = device_->create_buffer(align_up_u64(tlas_info.ResultDataMaxSizeInBytes, 256u),
                                      rhi::D3D12BufferUsage::AccelStructStorage, rhi::D3D12BufferHeap::DefaultGpu, false,
                                      false);
-    if (!tb) return make_unexpected(tb.error());
+    if (!tb)
+        return make_unexpected(tb.error());
     tlas_buf_ = tb.value();
     scratch_max = std::max({scratch_max, tlas_info.ScratchDataSizeInBytes, tlas_info.UpdateScratchDataSizeInBytes});
 
     auto sb = device_->create_buffer(align_up_u64(scratch_max, 256u), rhi::D3D12BufferUsage::UnorderedAccess,
                                      rhi::D3D12BufferHeap::DefaultGpu, false, false);
-    if (!sb) return make_unexpected(sb.error());
+    if (!sb)
+        return make_unexpected(sb.error());
     dxr_scratch_buf_ = sb.value();
     dxr_ready_ = true;
     dxr_has_built_once_ = false;
@@ -877,7 +1004,8 @@ void Dx12FrameGraph::record_dxr_build_or_refit(ID3D12GraphicsCommandList4* cmd, 
         device_->cmd_uav_barrier(cmd, bk.buf.resource);
     }
 
-    // Write TLAS instances into current upload slice (`0x01` FaceSkin, `0x02` Hair, `0x04` HandsProps, `0x08` BodyCloth)
+    // Write TLAS instances into current upload slice (`0x01` FaceSkin, `0x02` Hair, `0x04` HandsProps, `0x08`
+    // BodyCloth)
     const uint32_t fslot = static_cast<uint32_t>(rendered_frames_ % rhi::kD3D12FrameCount);
     FrameUploadSlice& sl = upload_slices_[fslot];
     auto* insts = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(sl.tlas_inst.mapped_ptr);
@@ -977,9 +1105,41 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.history_ids[3] = depth_stencil_.srv_index;
 
     fg.output_storage_ids[0] = out_rgba16f_.uav_index;
-    fg.output_storage_ids[1] = (out_bgra8_.uav_index != rhi::kD3D12InvalidDescIndex) ? out_bgra8_.uav_index : out_rgba8_.uav_index;
+    fg.output_storage_ids[1] =
+        (out_bgra8_.uav_index != rhi::kD3D12InvalidDescIndex) ? out_bgra8_.uav_index : out_rgba8_.uav_index;
     fg.output_storage_ids[2] = UINT32_MAX;
     fg.output_storage_ids[3] = UINT32_MAX;
+
+    {
+        const LightingRig fallback_rig = LightingRig::default_three_point();
+        const LightingRig& active_rig = (req.rig != nullptr) ? *req.rig : fallback_rig;
+        const std::array<float, 3> head_target_ws = {fg.neck_seam_head_str[0], fg.neck_seam_head_str[1],
+                                                     fg.neck_seam_head_str[2]};
+        const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1],
+                                                 fg.camera_pos_world[2]};
+        const uint32_t sl_count =
+            pack_studio_lights_gpu(active_rig, head_target_ws, eye_pos_ws, studio_lights_scratch_);
+        if (sl.studio_lights_buf.mapped_ptr != nullptr) {
+            std::memcpy(sl.studio_lights_buf.mapped_ptr, studio_lights_scratch_.data(),
+                        sizeof(StudioLightGPU) * kMaxStudioLights);
+        }
+        fg.studio_lights_bda = sl.studio_lights_buf.srv_handle();
+        fg.studio_slots0[0] = ltc_inv_m_.srv_index;
+        fg.studio_slots0[1] = ltc_amp_.srv_index;
+        fg.studio_slots0[2] = ies_lut_.srv_index;
+        fg.studio_slots0[3] = sl_count;
+    }
+    fg.studio_slots1[0] = rt_shadow_denoised_.srv_index;
+    fg.studio_slots1[1] = bounce_denoised_.srv_index;
+    fg.studio_slots1[2] = aov_backscatter_.srv_index;
+    fg.studio_slots1[3] = aov_cornea_spec_.srv_index;
+    fg.studio_uav_slots[0] = rt_shadow_raw_.uav_index;
+    fg.studio_uav_slots[1] = bounce_half_.uav_index;
+    fg.studio_uav_slots[2] = aov_backscatter_.uav_index;
+    fg.studio_uav_slots[3] = aov_cornea_spec_.uav_index;
+    const uint32_t cur_res = static_cast<uint32_t>(req.frame_index & 1ULL);
+    fg.reservoir_curr_bda = reservoir_bufs_[cur_res].uav_handle();
+    fg.reservoir_prev_bda = reservoir_bufs_[1u - cur_res].srv_handle();
 
     std::memcpy(sl.fg_buf.mapped_ptr, &fg, sizeof(fg));
     const uint64_t fg_handle = sl.fg_buf.srv_handle();
@@ -1092,13 +1252,19 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, gb_mv_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, gb_mat_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, gb_misc_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        device_->cmd_transition_texture(
-            cmd, depth_stencil_, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        device_->cmd_transition_texture(cmd, depth_stencil_,
+                                        D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 4: RayEffects (DXR Tier 1.1) OR CSM Fallback (Mode 0 Traditional)
         device_->cmd_transition_texture(cmd, rt_shadow_raw_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, rim_occ_raw_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, bounce_half_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        device_->cmd_transition_texture(cmd, aov_backscatter_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        device_->cmd_transition_texture(cmd, aov_cornea_spec_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const uint32_t cur_res_pass = static_cast<uint32_t>(req.frame_index & 1ULL);
+        device_->cmd_transition_buffer(cmd, reservoir_bufs_[cur_res_pass], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        device_->cmd_transition_buffer(cmd, reservoir_bufs_[1u - cur_res_pass],
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (use_rt) {
             device_->cmd_bind_bindless_compute(cmd, true, tlas_buf_.gpu_va);
@@ -1122,8 +1288,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                 cmd->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0u, 0, nullptr);
                 cmd->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
 
-                const D3D12_VIEWPORT svp{0.0f, 0.0f, static_cast<float>(kCsmSize), static_cast<float>(kCsmSize), 0.0f,
-                                         1.0f};
+                const D3D12_VIEWPORT svp{0.0f, 0.0f, static_cast<float>(kCsmSize), static_cast<float>(kCsmSize),
+                                         0.0f, 1.0f};
                 const D3D12_RECT ssc{0, 0, static_cast<LONG>(kCsmSize), static_cast<LONG>(kCsmSize)};
                 device_->cmd_bind_bindless_graphics(cmd);
                 cmd->RSSetViewports(1, &svp);
@@ -1156,6 +1322,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, rt_shadow_raw_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, rim_occ_raw_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, bounce_half_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        device_->cmd_transition_texture(cmd, aov_backscatter_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        device_->cmd_transition_texture(cmd, aov_cornea_spec_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 5: SVGF Spatio-Temporal Denoise
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1166,8 +1334,9 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         {
             GpuPushConstants p{};
             p.frame_globals_bda = fg_handle;
-            p.param0 = (rt_shadow_raw_.srv_index & 0xFFFFu) |
-                       (((have_prev_view_proj_ ? prev_rt_shadow_.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
+            p.param0 =
+                (rt_shadow_raw_.srv_index & 0xFFFFu) |
+                (((have_prev_view_proj_ ? prev_rt_shadow_.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
             p.param1 = (rt_shadow_denoised_.uav_index & 0xFFFFu) | ((have_prev_view_proj_ ? 1u : 0u) << 16u);
             p.param2 = w;
             p.param3 = h;

@@ -7,12 +7,15 @@ use aether_asset_loader::vrm_gltf::parse_vrm_or_gltf;
 
 fn user_vrm() -> Option<PathBuf> {
     let profile = std::env::var_os("USERPROFILE")?;
-    let p = PathBuf::from(profile).join("Downloads").join("8590256991748008892.vrm");
+    let p = PathBuf::from(profile)
+        .join("Downloads")
+        .join("8590256991748008892.vrm");
     p.is_file().then_some(p)
 }
 
 #[test]
-fn vroid_eye_and_mouth_presets_reach_every_face_primitive() -> Result<(), Box<dyn std::error::Error>> {
+fn vroid_eye_and_mouth_presets_reach_every_face_primitive() -> Result<(), Box<dyn std::error::Error>>
+{
     let Some(path) = user_vrm() else {
         eprintln!("8590256991748008892.vrm not found in Downloads; skipping");
         return Ok(());
@@ -34,7 +37,10 @@ fn vroid_eye_and_mouth_presets_reach_every_face_primitive() -> Result<(), Box<dy
     let mut checked = 0;
     for preset in &avatar.expr_presets {
         let lower = preset.name.to_ascii_lowercase();
-        if !matches!(lower.as_str(), "blink" | "blink_l" | "blink_r" | "a" | "i" | "u" | "e" | "o") {
+        if !matches!(
+            lower.as_str(),
+            "blink" | "blink_l" | "blink_r" | "a" | "i" | "u" | "e" | "o"
+        ) {
             continue;
         }
         let mut prims = HashSet::new();
@@ -67,8 +73,17 @@ fn vroid_eye_and_mouth_presets_reach_every_face_primitive() -> Result<(), Box<dy
         );
         checked += 1;
     }
-    assert!(checked >= 8, "expected Blink/Blink_L/Blink_R/A/I/U/E/O presets, found {checked}");
-    eprintln!("[VRM-EXPR] morph targets after per-mesh merge: {}", avatar.morphs.len());
-    assert!(avatar.morphs.len() <= 64, "per-primitive morph duplicates were not merged");
+    assert!(
+        checked >= 8,
+        "expected Blink/Blink_L/Blink_R/A/I/U/E/O presets, found {checked}"
+    );
+    eprintln!(
+        "[VRM-EXPR] morph targets after per-mesh merge: {}",
+        avatar.morphs.len()
+    );
+    assert!(
+        avatar.morphs.len() <= 64,
+        "per-primitive morph duplicates were not merged"
+    );
     Ok(())
 }

@@ -175,7 +175,10 @@ fn t2_host_evaluate_active_has_zero_allocs_even_across_plan_hotswap()
     let tel_st = unsafe { aether_host_get_telemetry_readout(host, &mut readout) };
     let ui_allocs = aether_test_thread_alloc_calls();
     assert_eq!(tel_st, AETHER_OK);
-    assert_eq!(ui_allocs, 0, "UI telemetry readout must perform 0 allocations");
+    assert_eq!(
+        ui_allocs, 0,
+        "UI telemetry readout must perform 0 allocations"
+    );
     assert_eq!(readout.valid, 1);
     assert_eq!(readout.active_node_count, 64);
     let idx63 = readout

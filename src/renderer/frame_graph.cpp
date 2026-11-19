@@ -379,6 +379,100 @@ Expected<void> FrameGraph::create_static_targets() {
         }
         csm_depth_.sampled_slot = s.value();
     }
+
+    // Heitz (2016) 64x64 LTC LUTs & 256x64 ANSI/IES LM-63-19 LUT (uploaded once at init)
+    auto upload_static_tex = [&](RegisteredImage& dst, uint32_t tw, uint32_t th, VkFormat fmt, const void* src_bytes,
+                                 size_t byte_len) -> Expected<void> {
+        if (dst.img.handle != VK_NULL_HANDLE) {
+            return {};
+        }
+        auto ir = device_->create_image_2d(tw, th, fmt, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                           VK_IMAGE_ASPECT_COLOR_BIT);
+        if (!ir) {
+            return Unexpected<Error>{ir.error()};
+        }
+        dst.img = ir.value();
+
+        auto stg_res = device_->create_buffer(byte_len, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_AUTO,
+                                              VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                                  VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        if (!stg_res) {
+            return Unexpected<Error>{stg_res.error()};
+        }
+        rhi::RhiBuffer stg = stg_res.value();
+        std::memcpy(stg.info.pMappedData, src_bytes, byte_len);
+        vmaFlushAllocation(device_->allocator(), stg.allocation, 0, byte_len);
+
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        cpci.queueFamilyIndex = device_->graphics_family();
+        cpci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        vkCreateCommandPool(device_->device(), &cpci, nullptr, &pool);
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbai.commandPool = pool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(device_->device(), &cbai, &cmd);
+
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &bi);
+        cmd_image_copy_barrier(cmd, dst.img.handle, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        VkBufferImageCopy reg{};
+        reg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        reg.imageExtent = {tw, th, 1};
+        vkCmdCopyBufferToImage(cmd, stg.handle, dst.img.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &reg);
+        cmd_image_copy_barrier(cmd, dst.img.handle, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        vkEndCommandBuffer(cmd);
+
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        vkQueueSubmit(device_->graphics_queue(), 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(device_->graphics_queue());
+        vkDestroyCommandPool(device_->device(), pool, nullptr);
+        device_->destroy_buffer(stg);
+
+        dst.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        auto s = bindless_.register_sampled_image(dst.img.view);
+        if (!s) {
+            return Unexpected<Error>{s.error()};
+        }
+        dst.sampled_slot = s.value();
+        return {};
+    };
+
+    if (ltc_inv_m_.img.handle == VK_NULL_HANDLE || ltc_amp_.img.handle == VK_NULL_HANDLE) {
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> inv_m{};
+        std::array<float, kLtcLutSize * kLtcLutSize * 4> amp{};
+        generate_heitz_ltc_luts(inv_m, amp);
+        if (auto r = upload_static_tex(ltc_inv_m_, kLtcLutSize, kLtcLutSize, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                       inv_m.data(), inv_m.size() * sizeof(float));
+            !r) {
+            return r;
+        }
+        if (auto r = upload_static_tex(ltc_amp_, kLtcLutSize, kLtcLutSize, VK_FORMAT_R32G32B32A32_SFLOAT, amp.data(),
+                                       amp.size() * sizeof(float));
+            !r) {
+            return r;
+        }
+    }
+    if (ies_lut_.img.handle == VK_NULL_HANDLE) {
+        std::array<float, kIesLutWidth * kIesLutRows> ies{};
+        generate_ies_lm63_lut(ies);
+        if (auto r = upload_static_tex(ies_lut_, kIesLutWidth, kIesLutRows, VK_FORMAT_R32_SFLOAT, ies.data(),
+                                       ies.size() * sizeof(float));
+            !r) {
+            return r;
+        }
+    }
     return {};
 }
 
@@ -407,6 +501,9 @@ void FrameGraph::destroy_static_targets() noexcept {
     orbit_orb_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     drop(csm_depth_);
     drop(blue_noise_64_);
+    drop(ltc_inv_m_);
+    drop(ltc_amp_);
+    drop(ies_lut_);
 }
 
 Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h) {
@@ -450,8 +547,8 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
     const uint32_t hh = std::max(h / 2u, 1u);
     const VkImageUsageFlags att_sampled =
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    const VkImageUsageFlags stor_sampled =
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const VkImageUsageFlags stor_sampled = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
     if (auto r = make_reg(gb_n_, w, h, VK_FORMAT_R16G16_UNORM, att_sampled, true, false, false); !r)
         return r;
@@ -514,9 +611,25 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
         return r;
     if (auto r = make_reg(bounce_half_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
         return r;
-    if (auto r = make_reg(bounce_denoised_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false);
-        !r)
+    if (auto r = make_reg(bounce_denoised_, hw, hh, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
         return r;
+    if (auto r = make_reg(aov_backscatter_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
+        return r;
+    if (auto r = make_reg(aov_cornea_spec_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
+        return r;
+    {
+        const VkDeviceSize res_bytes =
+            static_cast<VkDeviceSize>(hw) * static_cast<VkDeviceSize>(hh) * sizeof(GpuReSTIRReservoir);
+        for (auto& rb : reservoir_bufs_) {
+            auto bres = device_->create_buffer(
+                res_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+            if (!bres) {
+                return Unexpected<Error>{bres.error()};
+            }
+            rb = bres.value();
+        }
+    }
     if (auto r = make_reg(crease_mask_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, stor_sampled, true, true, false); !r)
         return r;
     if (auto r = make_reg(hdr_scene_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att_sampled, true, false, false); !r)
@@ -665,6 +778,11 @@ void FrameGraph::destroy_size_dependent_targets() noexcept {
     drop(rim_occ_denoised_);
     drop(bounce_half_);
     drop(bounce_denoised_);
+    drop(aov_backscatter_);
+    drop(aov_cornea_spec_);
+    for (auto& rb : reservoir_bufs_) {
+        device_->destroy_buffer(rb);
+    }
     drop(crease_mask_);
     drop(hdr_scene_);
     for (auto& m : bloom_mips_) {
@@ -857,11 +975,10 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
 
         std::array<VkPipelineColorBlendAttachmentState, 4> blend_atts{};
         for (uint32_t i = 0; i < gd.color_count; ++i) {
-            blend_atts[i].colorWriteMask =
-                gd.color_write_disable
-                    ? VkColorComponentFlags{0}
-                    : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-                       VK_COLOR_COMPONENT_A_BIT);
+            blend_atts[i].colorWriteMask = gd.color_write_disable
+                                               ? VkColorComponentFlags{0}
+                                               : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
             if (gd.premul_blend) {
                 blend_atts[i].blendEnable = VK_TRUE;
                 blend_atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -1314,8 +1431,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     const auto& fg_alloc = fg_alloc_res.value();
     GpuFrameGlobals fg{};
     GpuMat4 next_prev_vp{};
-    const bool rt_hardware_ready =
-        device_->rt_supported() && accel_.is_ready() && pso_ray_effects_ != VK_NULL_HANDLE;
+    const bool rt_hardware_ready = device_->rt_supported() && accel_.is_ready() && pso_ray_effects_ != VK_NULL_HANDLE;
     const uint8_t eff_mode = detail::populate_shared_frame_globals(
         req, w, h, has_avatar, rt_hardware_ready, have_prev_view_proj_, prev_view_proj_, fg, next_prev_vp);
     if (has_avatar) {
@@ -1350,6 +1466,36 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     fg.output_storage_ids[1] = bgra8_supports_storage_ ? os.bgra8.storage_slot : out_rgba8_scratch_.storage_slot;
     fg.output_storage_ids[2] = os.nv12_y.storage_slot;
     fg.output_storage_ids[3] = os.nv12_uv.storage_slot;
+
+    auto sl_alloc_res = rebar_.allocate(sizeof(StudioLightGPU) * kMaxStudioLights, 64);
+    if (sl_alloc_res) {
+        const auto& sl_alloc = sl_alloc_res.value();
+        const LightingRig fallback_rig = LightingRig::default_three_point();
+        const LightingRig& active_rig = (req.rig != nullptr) ? *req.rig : fallback_rig;
+        const std::array<float, 3> head_target_ws = {fg.neck_seam_head_str[0], fg.neck_seam_head_str[1],
+                                                     fg.neck_seam_head_str[2]};
+        const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1],
+                                                 fg.camera_pos_world[2]};
+        const uint32_t sl_count =
+            pack_studio_lights_gpu(active_rig, head_target_ws, eye_pos_ws, studio_lights_scratch_);
+        std::memcpy(sl_alloc.mapped, studio_lights_scratch_.data(), sizeof(StudioLightGPU) * kMaxStudioLights);
+        fg.studio_lights_bda = sl_alloc.device_address;
+        fg.studio_slots0[0] = ltc_inv_m_.sampled_slot;
+        fg.studio_slots0[1] = ltc_amp_.sampled_slot;
+        fg.studio_slots0[2] = ies_lut_.sampled_slot;
+        fg.studio_slots0[3] = sl_count;
+    }
+    fg.studio_slots1[0] = rt_shadow_denoised_.sampled_slot;
+    fg.studio_slots1[1] = bounce_denoised_.sampled_slot;
+    fg.studio_slots1[2] = aov_backscatter_.sampled_slot;
+    fg.studio_slots1[3] = aov_cornea_spec_.sampled_slot;
+    fg.studio_uav_slots[0] = rt_shadow_raw_.storage_slot;
+    fg.studio_uav_slots[1] = bounce_half_.storage_slot;
+    fg.studio_uav_slots[2] = aov_backscatter_.storage_slot;
+    fg.studio_uav_slots[3] = aov_cornea_spec_.storage_slot;
+    const uint32_t cur_res = static_cast<uint32_t>(req.frame_index & 1ULL);
+    fg.reservoir_curr_bda = reservoir_bufs_[cur_res].device_address;
+    fg.reservoir_prev_bda = reservoir_bufs_[1u - cur_res].device_address;
 
     std::memcpy(fg_alloc.mapped, &fg, sizeof(fg));
 
@@ -1487,7 +1633,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 }
                 const bool must_build =
                     (!accel_.is_ready() || req.avatar != last_rt_avatar_ || last_rt_as_update_us_ == 0ULL);
-                // Always refit immediately whenever pose or morph target hash changed so rasterizer & BLAS have 0.0-px drift.
+                // Always refit immediately whenever pose or morph target hash changed so rasterizer & BLAS have 0.0-px
+                // drift.
                 run_as_update = must_build || (pose_hash != last_rt_pose_hash_);
                 if (run_as_update) {
                     last_rt_avatar_ = req.avatar;
@@ -1609,6 +1756,20 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
         trans(bounce_half_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+        trans(aov_backscatter_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        trans(aov_cornea_spec_, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        if (!use_rt) {
+            constexpr VkClearColorValue kZeroClear{{0.0f, 0.0f, 0.0f, 0.0f}};
+            constexpr VkImageSubresourceRange kColorRange{VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+            vkCmdClearColorImage(cmd, aov_backscatter_.img.handle, VK_IMAGE_LAYOUT_GENERAL, &kZeroClear, 1u,
+                                 &kColorRange);
+            vkCmdClearColorImage(cmd, aov_cornea_spec_.img.handle, VK_IMAGE_LAYOUT_GENERAL, &kZeroClear, 1u,
+                                 &kColorRange);
+        }
 
         if (use_rt) {
             timing_.begin_scope(cmd, fslot, rhi::GpuPassId::RayTrace);
@@ -1690,6 +1851,16 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
               VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
         trans(bounce_half_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
               VK_ACCESS_2_SHADER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_ACCESS_2_SHADER_READ_BIT);
+        trans(aov_backscatter_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_ACCESS_2_SHADER_READ_BIT);
+        trans(aov_cornea_spec_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+              VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
               VK_ACCESS_2_SHADER_READ_BIT);
 
@@ -1785,12 +1956,11 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 VkPipeline cur = VK_NULL_HANDLE;
                 for (const uint32_t idx : list) {
                     const auto& d = cached_submeshes_[idx];
-                    VkPipeline want =
-                        transparent_bucket
-                            ? (use_wire ? pso_live2d_blend_wire_ : pso_live2d_blend_)
-                            : ((d.cull_mode != 0u)
-                                   ? (use_wire ? pso_live2d_double_sided_wire_ : pso_live2d_double_sided_)
-                                   : (use_wire ? pso_live2d_opaque_wire_ : pso_live2d_opaque_));
+                    VkPipeline want = transparent_bucket
+                                          ? (use_wire ? pso_live2d_blend_wire_ : pso_live2d_blend_)
+                                          : ((d.cull_mode != 0u)
+                                                 ? (use_wire ? pso_live2d_double_sided_wire_ : pso_live2d_double_sided_)
+                                                 : (use_wire ? pso_live2d_opaque_wire_ : pso_live2d_opaque_));
                     if (want != cur) {
                         bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want,
                                               transparent_bucket ? "live2d_blend" : "live2d_opaque_or_ds");
@@ -2322,8 +2492,8 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                         } else {
                             // Procedural 3-axis wireframe capsule (3 equatorial rings + 4 rails + 4 hemisphere arcs)
                             const Mat4Vec3 axis = {d.x / dlen, d.y / dlen, d.z / dlen};
-                            const Mat4Vec3 ref = (std::abs(axis.y) < 0.9f) ? Mat4Vec3{0.0f, 1.0f, 0.0f}
-                                                                            : Mat4Vec3{1.0f, 0.0f, 0.0f};
+                            const Mat4Vec3 ref =
+                                (std::abs(axis.y) < 0.9f) ? Mat4Vec3{0.0f, 1.0f, 0.0f} : Mat4Vec3{1.0f, 0.0f, 0.0f};
                             const Mat4Vec3 u = normalize3(cross3(axis, ref));
                             const Mat4Vec3 v = cross3(axis, u);
                             const std::array<float, 3> pmid{0.5f * (p0[0] + p1[0]), 0.5f * (p0[1] + p1[1]),
@@ -2333,8 +2503,7 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                             push_ring(p1, u, v, r, 12, kTwoPiF, cat, c);
                             for (const Mat4Vec3& rad : {u, Mat4Vec3{-u.x, -u.y, -u.z}, v, Mat4Vec3{-v.x, -v.y, -v.z}}) {
                                 push_seg({p0[0] + r * rad.x, p0[1] + r * rad.y, p0[2] + r * rad.z},
-                                         {p1[0] + r * rad.x, p1[1] + r * rad.y, p1[2] + r * rad.z}, 2.0f, cat, 1.0f,
-                                         c);
+                                         {p1[0] + r * rad.x, p1[1] + r * rad.y, p1[2] + r * rad.z}, 2.0f, cat, 1.0f, c);
                             }
                             const Mat4Vec3 neg_axis{-axis.x, -axis.y, -axis.z};
                             push_ring(p0, u, neg_axis, r, 6, 3.14159265f, cat, c);
@@ -2352,17 +2521,22 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                                 static_cast<size_t>(bone_cnt) * sizeof(GpuHeatmapBone));
                     const uint32_t max_x0 = w > 0u ? w - 1u : 0u;
                     const uint32_t max_y0 = h > 0u ? h - 1u : 0u;
-                    const int32_t hx0 =
-                        std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_x0)), 0, static_cast<int32_t>(max_x0));
-                    const int32_t hy0 =
-                        std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_y0)), 0, static_cast<int32_t>(max_y0));
+                    const int32_t hx0 = std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_x0)), 0,
+                                                   static_cast<int32_t>(max_x0));
+                    const int32_t hy0 = std::clamp(static_cast<int32_t>(std::floor(aspect_layout.frame_y0)), 0,
+                                                   static_cast<int32_t>(max_y0));
                     const uint32_t hw = static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_width())));
                     const uint32_t hh = static_cast<uint32_t>(std::max(1.0f, std::round(aspect_layout.frame_height())));
-                    const VkViewport hvp{aspect_layout.frame_x0, aspect_layout.frame_y0,
-                                         aspect_layout.frame_width(), aspect_layout.frame_height(), 0.0f, 1.0f};
-                    const VkRect2D hsc{{hx0, hy0},
-                                       {std::min(hw, w > static_cast<uint32_t>(hx0) ? w - static_cast<uint32_t>(hx0) : 1u),
-                                        std::min(hh, h > static_cast<uint32_t>(hy0) ? h - static_cast<uint32_t>(hy0) : 1u)}};
+                    const VkViewport hvp{aspect_layout.frame_x0,
+                                         aspect_layout.frame_y0,
+                                         aspect_layout.frame_width(),
+                                         aspect_layout.frame_height(),
+                                         0.0f,
+                                         1.0f};
+                    const VkRect2D hsc{
+                        {hx0, hy0},
+                        {std::min(hw, w > static_cast<uint32_t>(hx0) ? w - static_cast<uint32_t>(hx0) : 1u),
+                         std::min(hh, h > static_cast<uint32_t>(hy0) ? h - static_cast<uint32_t>(hy0) : 1u)}};
                     vkCmdSetViewport(cmd, 0, 1, &hvp);
                     vkCmdSetScissor(cmd, 0, 1, &hsc);
                     bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_heatmap_, "heatmap");

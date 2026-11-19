@@ -235,8 +235,8 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             ImGui::TextColored(t.text_secondary, "%s", tr("Active GPU"));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(std::max(120.0f, ImGui::GetContentRegionAvail().x));
-            GraphicsSettingsModal::draw_gpu_selector_combo("##InspGpuCombo", on_air, rhi, render_view, settings, actions,
-                                                           settings_dirty, &params);
+            GraphicsSettingsModal::draw_gpu_selector_combo("##InspGpuCombo", on_air, rhi, render_view, settings,
+                                                           actions, settings_dirty, &params);
             if (ImGui::Button(tr("Graphics Settings..."), ImVec2(full_w, 0.0f))) {
                 actions.request_open_graphics_settings = true;
             }
@@ -274,15 +274,16 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 if (draw_property_row(ParamId::RenderLightingFixture, params, undo, fonts, row_actions)) {
                     const int fix_idx = std::clamp(params.get_int(ParamId::RenderLightingFixture), 0, 5);
                     renderer::LightingRig tmp = renderer::LightingRig::default_three_point();
-                    renderer::apply_lighting_fixture_preset(
-                        tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
-                        fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
+                    renderer::apply_lighting_fixture_preset(tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
+                                                            fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
                     (void)params.set(ParamId::RenderKeyAzimuthDeg, tmp.lights[0].orbit_azimuth_deg);
                     (void)params.set(ParamId::RenderKeyElevationDeg, tmp.lights[0].orbit_elevation_deg);
                     (void)params.set(ParamId::RenderKeyIntensity, tmp.lights[0].intensity);
                     (void)params.set(ParamId::RenderFillIntensity, tmp.lights[1].intensity);
                     (void)params.set(ParamId::RenderRimIntensity, tmp.lights[2].intensity);
                     (void)params.set(ParamId::RenderPhotometricBeamAngleDeg, tmp.photometric_beam_angle_deg);
+                    static constexpr int kLegacyToStudio[6] = {5, 6, 7, 9, 11, 11};
+                    (void)params.set(ParamId::RenderStudioFixture, static_cast<double>(kLegacyToStudio[fix_idx]));
                     actions.viewport.lighting_dirty = true;
                     settings_dirty = true;
                 }
@@ -298,9 +299,15 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     ParamId::RenderEyeCatchlightSize,
                     ParamId::RenderCreaseDisguiseEnabled,
                     ParamId::RenderCreaseDisguiseStrength,
-                    ParamId::RenderFlatness,        ParamId::RenderLightScale,   ParamId::RenderKeyAzimuthDeg,
-                    ParamId::RenderKeyElevationDeg, ParamId::RenderKeyIntensity, ParamId::RenderFillIntensity,
-                    ParamId::RenderRimIntensity,    ParamId::RenderOutlineScale, ParamId::RenderBloomIntensity,
+                    ParamId::RenderFlatness,
+                    ParamId::RenderLightScale,
+                    ParamId::RenderKeyAzimuthDeg,
+                    ParamId::RenderKeyElevationDeg,
+                    ParamId::RenderKeyIntensity,
+                    ParamId::RenderFillIntensity,
+                    ParamId::RenderRimIntensity,
+                    ParamId::RenderOutlineScale,
+                    ParamId::RenderBloomIntensity,
                 };
                 for (const ParamId pid : kLightingRows) {
                     if (draw_property_row(pid, params, undo, fonts, row_actions)) {
@@ -346,6 +353,20 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                         ParamId::RenderFilterDogInkBoost,
                         ParamId::RenderFilterPaperWarmth,
                         ParamId::RenderFilterPaperWarmthStrength,
+                        ParamId::RenderStudioFixture,
+                        ParamId::RenderSoftboxEnabled,
+                        ParamId::RenderGridEnabled,
+                        ParamId::RenderGridAngleDeg,
+                        ParamId::RenderBarnDoorsEnabled,
+                        ParamId::RenderDiffusionEnabled,
+                        ParamId::RenderDiffusionDensity,
+                        ParamId::RenderGelEnabled,
+                        ParamId::RenderGelPreset,
+                        ParamId::RenderSatsueiLightWrap,
+                        ParamId::RenderSatsueiHalation,
+                        ParamId::RenderSatsueiBackscatter,
+                        ParamId::RenderHoloAvatarContrast,
+                        ParamId::RenderHoloBgExposure,
                     };
                     bool style_changed = false;
                     for (const ParamId pid : kLive2dExtraRows) {
@@ -362,12 +383,11 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
             if (params.get_bool(ParamId::RenderCircadianEnabled)) {
                 const int ov_min = params.get_int(ParamId::RenderCircadianTimeMinutes);
                 const float hr = (ov_min >= 0) ? (static_cast<float>(ov_min) / 60.0f) : render_view.circadian_hour_24;
-                const uint8_t ph =
-                    (ov_min >= 0) ? ((hr >= 5.0f && hr < 7.0f)     ? 1u
-                                     : (hr >= 7.0f && hr < 15.5f)  ? 2u
-                                     : (hr >= 15.5f && hr < 18.0f) ? 3u
-                                                                   : 0u)
-                                  : render_view.circadian_phase;
+                const uint8_t ph = (ov_min >= 0) ? ((hr >= 5.0f && hr < 7.0f)     ? 1u
+                                                    : (hr >= 7.0f && hr < 15.5f)  ? 2u
+                                                    : (hr >= 15.5f && hr < 18.0f) ? 3u
+                                                                                  : 0u)
+                                                 : render_view.circadian_phase;
                 static constexpr const char* kPhaseNames[4] = {
                     "Night Studio",
                     "Dawn",
@@ -386,8 +406,8 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                               render_view.denoiser_fallback_triggered ? t.status_warn : t.text_primary);
             if (render_view.render_backend == 1U || render_view.render_backend == 2U) {
                 char dx_buf[192]{};
-                const float ms = (render_view.render_backend == 2U) ? render_view.dx12_render_ms
-                                                                    : render_view.dx11_render_ms;
+                const float ms =
+                    (render_view.render_backend == 2U) ? render_view.dx12_render_ms : render_view.dx11_render_ms;
                 std::snprintf(dx_buf, sizeof(dx_buf), "%s · %.2f ms", render_view.backend_detail,
                               static_cast<double>(ms));
                 draw_status_badge(fonts, tr(render_view.render_backend == 2U ? "DirectX 12" : "DirectX 11"), dx_buf,
@@ -427,10 +447,10 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     settings_dirty = true;
                 }
                 static constexpr ParamId kNpuBoundRows[] = {
-                    ParamId::TrackingNpuBoundsEnabled,   ParamId::TrackingNpuAntiClipEnabled,
-                    ParamId::TrackingNpuSafeBoxPreview,  ParamId::TrackingNpuBoundsX,
-                    ParamId::TrackingNpuBoundsY,         ParamId::TrackingNpuBoundsZ,
-                    ParamId::TrackingNpuSoftElasticity,  ParamId::TrackingNpuMaxPitchDeg,
+                    ParamId::TrackingNpuBoundsEnabled,  ParamId::TrackingNpuAntiClipEnabled,
+                    ParamId::TrackingNpuSafeBoxPreview, ParamId::TrackingNpuBoundsX,
+                    ParamId::TrackingNpuBoundsY,        ParamId::TrackingNpuBoundsZ,
+                    ParamId::TrackingNpuSoftElasticity, ParamId::TrackingNpuMaxPitchDeg,
                     ParamId::TrackingNpuAntiClipMargin,
                 };
                 bool bounds_changed = false;
@@ -479,13 +499,14 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                 actions.viewport.target_camera_active = !tracking.camera_active;
             }
             const int active_mic = active_audio_device_index(hw, tracking, settings);
-            const char* mic_preview = settings.preferred_mic_id.empty()
-                                          ? (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
-                                                 ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
-                                                 : tr("System Default"))
-                                          : (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
-                                                 ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
-                                                 : tracking.audio_device_label);
+            const char* mic_preview =
+                settings.preferred_mic_id.empty()
+                    ? (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
+                           ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
+                           : tr("System Default"))
+                    : (active_mic >= 0 && active_mic < static_cast<int>(hw.audio_inputs.size())
+                           ? hw.audio_inputs[static_cast<size_t>(active_mic)].friendly_name.c_str()
+                           : tracking.audio_device_label);
             ImGui::SetNextItemWidth(full_w * 0.65f);
             if (ImGui::BeginCombo("##InspMicCombo", mic_preview)) {
                 const bool def_sel = settings.preferred_mic_id.empty();
