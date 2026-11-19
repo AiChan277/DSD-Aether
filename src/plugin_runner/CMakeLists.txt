@@ -3,6 +3,14 @@ add_executable(aether-plugin-runner
     native_plugin_abi.h
 )
 aether_apply_cxx_flags(aether-plugin-runner)
+if(WIN32)
+    set(AETHER_RELEASE_TAG "a${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}B")
+    configure_file(aether_plugin_runner.rc.in "${CMAKE_CURRENT_BINARY_DIR}/aether_plugin_runner.rc" @ONLY)
+    target_sources(aether-plugin-runner PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/aether_plugin_runner.rc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/aether_plugin_runner.manifest"
+    )
+endif()
 set_target_properties(aether-plugin-runner PROPERTIES
     OUTPUT_NAME "aether-plugin-runner"
 )

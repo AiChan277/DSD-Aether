@@ -271,7 +271,7 @@ float frostbite_ev100_exposure_scale(float ev100_offset, float luminance_scale) 
 }
 
 StudioLightWorldPose resolve_studio_light_world_pose(const StudioLightSpec& spec, const std::array<float, 3>& pivot_ws,
-                                                       const std::array<float, 3>& eye_pos_ws) noexcept {
+                                                     const std::array<float, 3>& eye_pos_ws) noexcept {
     StudioLightWorldPose pose{};
     pose.target_ws = spec.aim_lock ? pivot_ws : spec.target_ws;
 
@@ -881,11 +881,11 @@ void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id, const std::
         rig.split_grading = SplitLayerGradingParams{};
         rig.satsuei = SatsueiCompositeParams{};
         init_slot(0, "Key SkyPanel", StudioFixtureProfile::ArriSkyPanel, 32.0f, 26.0f, 2.15f, 1.00f, 5600.0f, true);
-        auto& fill = init_slot(1, "Soft Fill Ball", StudioFixtureProfile::LanternChinaBall, -52.0f, 12.0f, 2.10f,
-                               0.26f, 6200.0f, false);
+        auto& fill = init_slot(1, "Soft Fill Ball", StudioFixtureProfile::LanternChinaBall, -52.0f, 12.0f, 2.10f, 0.26f,
+                               6200.0f, false);
         fill.catchlight_weight = 0.25f;
-        auto& rim = init_slot(2, "Edge Rim Strip", StudioFixtureProfile::Stripbox, 148.0f, 22.0f, 2.05f, 0.34f,
-                              6500.0f, false);
+        auto& rim =
+            init_slot(2, "Edge Rim Strip", StudioFixtureProfile::Stripbox, 148.0f, 22.0f, 2.05f, 0.34f, 6500.0f, false);
         rim.catchlight_weight = 0.40f;
         auto& hair = init_slot(3, "Hair Angel Strip", StudioFixtureProfile::Stripbox, 10.0f, 52.0f, 1.95f, 0.85f,
                                5800.0f, false);
@@ -905,8 +905,8 @@ void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id, const std::
         key.grid_angle_deg = 30.0f;
         key.barn_doors_enabled = true;
         key.barn_door_cuts_deg = {28.0f, 28.0f, 32.0f, 32.0f};
-        auto& nfill = init_slot(1, "Negative Fill Black", StudioFixtureProfile::RectSoftbox, -78.0f, 10.0f, 1.40f,
-                                0.0f, 5600.0f, false);
+        auto& nfill = init_slot(1, "Negative Fill Black", StudioFixtureProfile::RectSoftbox, -78.0f, 10.0f, 1.40f, 0.0f,
+                                5600.0f, false);
         nfill.passive_flag = PassiveFlagMode::NegativeFillBlack;
         nfill.width_or_outer_m = 0.90f;
         nfill.height_or_inner_m = 1.40f;
@@ -953,8 +953,8 @@ void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id, const std::
                                5600.0f, false);
         ring.coaxial_lock = true;
         ring.catchlight_weight = 1.20f;
-        auto& octa = init_slot(1, "Overhead Octabox", StudioFixtureProfile::Octabox, 12.0f, 42.0f, 2.05f, 0.86f,
-                               5600.0f, true);
+        auto& octa =
+            init_slot(1, "Overhead Octabox", StudioFixtureProfile::Octabox, 12.0f, 42.0f, 2.05f, 0.86f, 5600.0f, true);
         octa.diffusion_enabled = true;
         octa.diffusion_density = 1.0f;
         auto& bounce = init_slot(2, "White Chin Bounce", StudioFixtureProfile::RectSoftbox, 0.0f, -22.0f, 1.25f, 0.0f,
@@ -998,10 +998,8 @@ void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id, const std::
 void builtin_studio_rig_presets(std::array<StudioRigPresetRecord, 5>& out_presets,
                                 const std::array<float, 3>& pivot_ws) noexcept {
     constexpr std::array<StudioRigPresetId, 5> kIds{
-        StudioRigPresetId::ThreePointBroadcast,
-        StudioRigPresetId::DramaticRimSplit,
-        StudioRigPresetId::ShinkaiGoldenHour,
-        StudioRigPresetId::HighKeySoftBeauty,
+        StudioRigPresetId::ThreePointBroadcast,    StudioRigPresetId::DramaticRimSplit,
+        StudioRigPresetId::ShinkaiGoldenHour,      StudioRigPresetId::HighKeySoftBeauty,
         StudioRigPresetId::NeonCyberpunkDualColor,
     };
     for (size_t i = 0; i < kIds.size(); ++i) {
@@ -1123,7 +1121,8 @@ void deserialize_studio_light(const nlohmann::json& j, StudioLightSpec& s) {
 
 } // namespace
 
-bool load_lighting_rigs_json(const std::filesystem::path& path, std::vector<StudioRigPresetRecord>& out_presets) noexcept {
+bool load_lighting_rigs_json(const std::filesystem::path& path,
+                             std::vector<StudioRigPresetRecord>& out_presets) noexcept {
     try {
         std::ifstream ifs(path);
         if (!ifs.is_open()) {
@@ -1187,7 +1186,8 @@ bool load_lighting_rigs_json(const std::filesystem::path& path, std::vector<Stud
     }
 }
 
-bool save_lighting_rigs_json(const std::filesystem::path& path, std::span<const StudioRigPresetRecord> presets) noexcept {
+bool save_lighting_rigs_json(const std::filesystem::path& path,
+                             std::span<const StudioRigPresetRecord> presets) noexcept {
     try {
         if (path.has_parent_path()) {
             std::filesystem::create_directories(path.parent_path());
@@ -1223,6 +1223,10 @@ bool save_lighting_rigs_json(const std::filesystem::path& path, std::span<const 
                   {"backscatter_strength", copy.satsuei.backscatter_strength}}},
                 {"lights", lights},
             });
+        }
+        std::error_code ec;
+        if (path.has_parent_path()) {
+            std::filesystem::create_directories(path.parent_path(), ec);
         }
         const nlohmann::json root{{"version", 1}, {"presets", arr}};
         std::ofstream ofs(path);
@@ -1432,8 +1436,8 @@ float stage_gizmo_world_scale(const PreviewCamera& cam, const std::array<float, 
 uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchematicBuildParams& params,
                                        std::span<GpuStageOverlayElem> out_elems) noexcept {
     uint32_t count = 0u;
-    auto push_line = [&](const std::array<float, 3>& a, const std::array<float, 3>& b,
-                         const std::array<float, 3>& col, float width_px, float dash_freq = 0.0f) noexcept {
+    auto push_line = [&](const std::array<float, 3>& a, const std::array<float, 3>& b, const std::array<float, 3>& col,
+                         float width_px, float dash_freq = 0.0f) noexcept {
         if (count >= out_elems.size()) {
             return;
         }
@@ -1569,7 +1573,8 @@ uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchema
         const float hh = std::clamp(s.height_or_inner_m * 0.5f, 0.08f, 1.25f);
 
         auto pt = [&](float u, float v, float d) {
-            return add3(pose.position_ws, add3(mul3(pose.right_ws, u), add3(mul3(pose.up_ws, v), mul3(pose.forward_ws, d))));
+            return add3(pose.position_ws,
+                        add3(mul3(pose.right_ws, u), add3(mul3(pose.up_ws, v), mul3(pose.forward_ws, d))));
         };
 
         auto draw_poly_ring = [&](uint32_t segs, float rad_x, float rad_y, float depth_z, bool fill_disc) {
@@ -1604,7 +1609,8 @@ uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchema
         }
 
         // Draw light stand floor drop + dashed Aim Line + target reticle
-        push_line(pose.position_ws, {pose.position_ws[0], 0.0f, pose.position_ws[2]}, {0.30f, 0.32f, 0.36f}, 1.0f, 5.0f);
+        push_line(pose.position_ws, {pose.position_ws[0], 0.0f, pose.position_ws[2]}, {0.30f, 0.32f, 0.36f}, 1.0f,
+                  5.0f);
         if (is_active) {
             push_line(pose.position_ws, pose.target_ws, wire_col, is_selected ? 1.5f : 1.0f, 8.0f);
             if (is_selected) {
@@ -1664,7 +1670,8 @@ uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchema
             }
             // Projected light cone frustum preview
             const float cone_len = 0.70f;
-            const float cone_r = lens_r + cone_len * std::tan(std::clamp(s.spot_outer_deg, 6.0f, 80.0f) * 0.5f * kDegToRad);
+            const float cone_r =
+                lens_r + cone_len * std::tan(std::clamp(s.spot_outer_deg, 6.0f, 80.0f) * 0.5f * kDegToRad);
             draw_poly_ring(12u, cone_r, cone_r, cone_len, false);
             for (uint32_t k = 0; k < 4u; ++k) {
                 const float a = 0.5f * kPi * static_cast<float>(k);

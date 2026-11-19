@@ -10,6 +10,24 @@ add_executable(aether_studio
 
 aether_apply_cxx_flags(aether_studio)
 
+# Icon + VERSIONINFO (shown in Explorer, Task Manager, Apps & Features and read by AV reputation services).
+if(WIN32)
+    set(AETHER_APP_ICON "${CMAKE_SOURCE_DIR}/installer/assets/aether.ico")
+    set(AETHER_RELEASE_TAG "a${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}B")
+    configure_file(aether_studio.rc.in "${CMAKE_CURRENT_BINARY_DIR}/aether_studio.rc" @ONLY)
+    target_sources(aether_studio PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/aether_studio.rc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/aether_app.manifest"
+    )
+endif()
+
+if(MSVC)
+    target_link_options(aether_studio PRIVATE
+        $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>
+        $<$<CONFIG:Release>:/ENTRY:mainCRTStartup>
+    )
+endif()
+
 target_compile_definitions(aether_studio PRIVATE
     AETHER_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )

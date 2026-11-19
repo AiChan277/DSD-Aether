@@ -40,8 +40,8 @@ std::array<float, 3> compute_pivot_ws(const DevShellAvatarView& avatar) noexcept
     return {0.0f, 1.32f, 0.0f};
 }
 
-ImVec2 project_world_to_canvas(const std::array<float, 16>& vp, const std::array<float, 3>& p, ImVec2 c0,
-                               ImVec2 csz, bool& out_ok) noexcept {
+ImVec2 project_world_to_canvas(const std::array<float, 16>& vp, const std::array<float, 3>& p, ImVec2 c0, ImVec2 csz,
+                               bool& out_ok) noexcept {
     const float cx = vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12];
     const float cy = vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13];
     const float cw = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
@@ -163,17 +163,10 @@ const char* channel_short_label(uint32_t mask) noexcept {
 
 std::filesystem::path LightingStagePanels::rigs_json_path() const noexcept {
     if (!config_dir_.empty()) {
-        // Resolve <repo>/config/lighting_rigs.json or user config dir cleanly
-        const auto parent_cfg = config_dir_ / "lighting_rigs.json";
-        if (std::filesystem::exists(parent_cfg)) {
-            return parent_cfg;
-        }
-    }
-    if (std::filesystem::exists("config/lighting_rigs.json")) {
-        return std::filesystem::path("config/lighting_rigs.json");
-    }
-    if (!config_dir_.empty()) {
         return config_dir_ / "lighting_rigs.json";
+    }
+    if (!shipped_config_dir_.empty()) {
+        return shipped_config_dir_ / "lighting_rigs.json";
     }
     return std::filesystem::path("config/lighting_rigs.json");
 }
@@ -183,12 +176,24 @@ void LightingStagePanels::ensure_rigs_loaded() noexcept {
         return;
     }
     rigs_loaded_ = true;
-    const auto p = rigs_json_path();
-    if (!renderer::load_lighting_rigs_json(p, saved_rigs_)) {
-        std::array<renderer::StudioRigPresetRecord, 5> builtins{};
-        renderer::builtin_studio_rig_presets(builtins);
-        saved_rigs_.assign(builtins.begin(), builtins.end());
+    std::error_code ec;
+    const auto user_path = rigs_json_path();
+    if (std::filesystem::is_regular_file(user_path, ec) && renderer::load_lighting_rigs_json(user_path, saved_rigs_)) {
+        return;
     }
+    if (!shipped_config_dir_.empty()) {
+        const auto shipped = shipped_config_dir_ / "lighting_rigs.json";
+        if (std::filesystem::is_regular_file(shipped, ec) && renderer::load_lighting_rigs_json(shipped, saved_rigs_)) {
+            return;
+        }
+    }
+    if (std::filesystem::is_regular_file("config/lighting_rigs.json", ec) &&
+        renderer::load_lighting_rigs_json("config/lighting_rigs.json", saved_rigs_)) {
+        return;
+    }
+    std::array<renderer::StudioRigPresetRecord, 5> builtins{};
+    renderer::builtin_studio_rig_presets(builtins);
+    saved_rigs_.assign(builtins.begin(), builtins.end());
 }
 
 renderer::LightingRig& LightingStagePanels::active_rig(DevShellViewportActions& vp_actions) noexcept {
@@ -228,7 +233,8 @@ void LightingStagePanels::sync_key_fill_rim_mirror(const renderer::LightingRig& 
     vp_actions.lighting_dirty = true;
 }
 
-void LightingStagePanels::set_stage_view(renderer::StageCameraView view, const std::array<float, 3>& pivot_ws) noexcept {
+void LightingStagePanels::set_stage_view(renderer::StageCameraView view,
+                                         const std::array<float, 3>& pivot_ws) noexcept {
     // `pivot_ws` is the camera target. The panel passes kStageFramingTarget (body centre) so the whole avatar, the
     // floor grid and the rig fit; the light-aim pivot (head) would crop the feet and the grid.
     stage_view_ = view;
@@ -290,8 +296,7 @@ void LightingStagePanels::export_stage_actions(const DevShellAvatarView& avatar,
             l.orbit_distance_m = std::clamp(stage_camera_.distance, 0.25f, 16.0f);
             l.target_ws = {stage_camera_.target_x, stage_camera_.target_y, stage_camera_.target_z};
             l.aim_lock = (std::fabs(l.target_ws[0] - pivot[0]) < 0.02f &&
-                          std::fabs(l.target_ws[1] - pivot[1]) < 0.02f &&
-                          std::fabs(l.target_ws[2] - pivot[2]) < 0.02f);
+                          std::fabs(l.target_ws[1] - pivot[1]) < 0.02f && std::fabs(l.target_ws[2] - pivot[2]) < 0.02f);
             sync_key_fill_rim_mirror(rig, vp_actions);
         }
     }
@@ -324,7 +329,8 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
     const std::array<float, 3> pivot = compute_pivot_ws(avatar);
 
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##LightSearch", tr("Search lights / fixtures..."), search_buf_.data(), search_buf_.size());
+    ImGui::InputTextWithHint("##LightSearch", tr("Search lights / fixtures..."), search_buf_.data(),
+                             search_buf_.size());
     ImGui::Spacing();
 
     if (ImGui::Button(tr("+ Add Light"), ImVec2(ImGui::GetContentRegionAvail().x * 0.52f, 0.0f))) {
@@ -399,8 +405,7 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
         const char* fix_lbl = (light.passive_flag != renderer::PassiveFlagMode::None)
                                   ? renderer::passive_flag_name(light.passive_flag)
                                   : renderer::studio_fixture_name(light.fixture);
-        if (!contains_icase(light.name.data(), search_buf_.data()) &&
-            !contains_icase(fix_lbl, search_buf_.data())) {
+        if (!contains_icase(light.name.data(), search_buf_.data()) && !contains_icase(fix_lbl, search_buf_.data())) {
             continue;
         }
         ImGui::PushID(static_cast<int>(i));
@@ -426,7 +431,8 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
 
         char row_lbl[96]{};
         std::snprintf(row_lbl, sizeof(row_lbl), "%s##lrow", light.name.data());
-        if (ImGui::Selectable(row_lbl, is_sel, ImGuiSelectableFlags_None, ImVec2(std::max(80.0f, row_w - 86.0f), 0.0f))) {
+        if (ImGui::Selectable(row_lbl, is_sel, ImGuiSelectableFlags_None,
+                              ImVec2(std::max(80.0f, row_w - 86.0f), 0.0f))) {
             selected_light_idx_ = static_cast<int>(i);
             outliner_selected_cam_ = false;
             selection.kind = SelectionKind::StudioLight;
@@ -485,7 +491,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         static constexpr const char* kDiagLabels[3]{"Lit", "Clay 18%", "EL-Zone"};
 
         const float view_combo_w = ImGui::CalcTextSize("Bottom").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2.0f;
-        const float diag_combo_w = ImGui::CalcTextSize("Clay 18%").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2.0f;
+        const float diag_combo_w =
+            ImGui::CalcTextSize("Clay 18%").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2.0f;
         const float core_w = view_combo_w + btn_w("Quad") + diag_combo_w + btn_w("Schem") + btn_w("Grid") +
                              btn_w("PiP") + btn_w("Q") + btn_w("W") + btn_w("E") + btn_w("R") + gap * 12.0f;
         const float extra_w = btn_w("2.5D") + btn_w("Pilot") + btn_w("Aim") + gap * 3.0f;
@@ -669,8 +676,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
     if (!quad_view_ && pip_monitor_open_) {
         // Keep the PiP clear of the ViewCube: max height = canvas below the cube minus margins and title strip.
         const float max_pip_w = std::max(80.0f, canvas_sz.x * 0.36f);
-        const float max_pip_h =
-            std::max(45.0f, (canvas_p1.y - vc_rect.w) - pip_title_h - 28.0f * scale);
+        const float max_pip_h = std::max(45.0f, (canvas_p1.y - vc_rect.w) - pip_title_h - 28.0f * scale);
         pip_box_w = std::min(300.0f * scale, max_pip_w);
         pip_box_h = pip_box_w * (9.0f / 16.0f);
         if (pip_box_h > max_pip_h) {
@@ -688,8 +694,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         mouse_over_overlay_ = in_rect(vc_rect) || (pip_visible && in_rect(pip_rect));
     }
     last_viewcube_rect_ = {vc_rect.x, vc_rect.y, vc_rect.z, vc_rect.w};
-    last_pip_outer_rect_ = pip_visible ? std::array<float, 4>{pip_rect.x, pip_rect.y, pip_rect.z, pip_rect.w}
-                                       : std::array<float, 4>{};
+    last_pip_outer_rect_ =
+        pip_visible ? std::array<float, 4>{pip_rect.x, pip_rect.y, pip_rect.z, pip_rect.w} : std::array<float, 4>{};
 
     auto draw_stage_tex = [&](VkDescriptorSet tex, ImVec2 p0, ImVec2 sz, uint32_t ren_w, uint32_t ren_h, uint32_t rt_w,
                               uint32_t rt_h) {
@@ -772,8 +778,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
 
         // Draw constant screen-pixel 3D Transform Gizmo on selected light + handle click/drag
         if (allow_gizmo_pick && !outliner_selected_cam_ && selected_light_idx_ >= 0 &&
-            static_cast<uint32_t>(selected_light_idx_) < rig.studio_light_count &&
-            gizmo_tool_ != GizmoTool::Select) {
+            static_cast<uint32_t>(selected_light_idx_) < rig.studio_light_count && gizmo_tool_ != GizmoTool::Select) {
             auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
             const auto pose = renderer::resolve_studio_light_world_pose(sl, pivot, avatar.camera_eye);
             const float axis_len = renderer::stage_gizmo_world_scale(cam, pose.position_ws, 68.0f * scale, sz.y);
@@ -842,9 +847,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                             sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] +=
                                 std::clamp(t_axis * axis_len, -0.5f, 0.5f);
                         } else {
-                            const float fallback_m = cam.is_orthographic
-                                                         ? (cam.ortho_height / std::max(sz.y, 1.0f))
-                                                         : (pose.distance_m * 0.0028f);
+                            const float fallback_m = cam.is_orthographic ? (cam.ortho_height / std::max(sz.y, 1.0f))
+                                                                         : (pose.distance_m * 0.0028f);
                             sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] += io.MouseDelta.x * fallback_m;
                         }
                         sync_key_fill_rim_mirror(rig, actions.viewport);
@@ -874,8 +878,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             const ImVec2 mp = ImGui::GetIO().MousePos;
             const float u_01 = std::clamp((mp.x - p0.x) / std::max(sz.x, 1.0f), 0.0f, 1.0f);
             const float v_01 = std::clamp((mp.y - p0.y) / std::max(sz.y, 1.0f), 0.0f, 1.0f);
-            const int hit_idx = renderer::pick_stage_studio_light(rig, pivot, avatar.camera_eye, cam, u_01, v_01,
-                                                                  aspect, nullptr);
+            const int hit_idx =
+                renderer::pick_stage_studio_light(rig, pivot, avatar.camera_eye, cam, u_01, v_01, aspect, nullptr);
             if (hit_idx >= 0) {
                 selected_light_idx_ = hit_idx;
                 outliner_selected_cam_ = false;
@@ -926,8 +930,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             {ImVec2(canvas_p0.x, canvas_p0.y + split_y + 2.0f), ImVec2(left_w, bot_h), avatar.stage_viewport_texture,
              avatar.stage_viewport_w, avatar.stage_viewport_h, avatar.stage_viewport_rt_w, avatar.stage_viewport_rt_h,
              "STAGE 3D (SCHEMATIC)", "##QStage", &stage_camera_, true},
-            {ImVec2(canvas_p0.x + split_x + 2.0f, canvas_p0.y + split_y + 2.0f), ImVec2(right_w, bot_h),
-             VK_NULL_HANDLE, 0u, 0u, 0u, 0u, "LIVE BROADCAST MONITOR (16:9)", "##QBroadcast", &stage_camera_, false},
+            {ImVec2(canvas_p0.x + split_x + 2.0f, canvas_p0.y + split_y + 2.0f), ImVec2(right_w, bot_h), VK_NULL_HANDLE,
+             0u, 0u, 0u, 0u, "LIVE BROADCAST MONITOR (16:9)", "##QBroadcast", &stage_camera_, false},
         };
         for (int idx = 0; idx < 4; ++idx) {
             const auto& c = cells[idx];
@@ -945,8 +949,8 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
             dl->AddRectFilled(ImVec2(c.p0.x + 6.0f, c.p0.y + 6.0f),
                               ImVec2(c.p0.x + 6.0f + std::max(40.0f, tag_w), c.p0.y + 24.0f * scale),
                               t.col32_stage_badge_bg, 4.0f);
-            dl->AddText(ImVec2(c.p0.x + 10.0f, c.p0.y + 8.0f),
-                        (idx == 3) ? t.col32_stage_cyan : t.col32_text_primary, c.tag);
+            dl->AddText(ImVec2(c.p0.x + 10.0f, c.p0.y + 8.0f), (idx == 3) ? t.col32_stage_cyan : t.col32_text_primary,
+                        c.tag);
             if (idx < 3) {
                 draw_stage_interaction(c.p0, c.sz, c.btn_id, *c.cam, c.allow_pick);
             }
@@ -1242,7 +1246,8 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
         float longest = 0.0f;
         for (int p = 0; p < 5; ++p) {
             longest = std::max(
-                longest, ImGui::CalcTextSize(renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(p))).x);
+                longest,
+                ImGui::CalcTextSize(renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(p))).x);
         }
         const float combo_w = longest + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2.0f;
         ImGui::SetNextItemWidth(std::min(combo_w, std::max(fs * 8.0f, ImGui::GetContentRegionAvail().x * 0.45f)));
@@ -1264,8 +1269,9 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
     ImGui::SameLine();
     const float save_w = ImGui::CalcTextSize(tr("Save Rig")).x + ImGui::CalcTextSize(tr("Load...")).x +
                          ImGui::GetStyle().FramePadding.x * 4.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
-    const float name_w = std::min(ImGui::CalcTextSize("Custom Studio Rig").x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f,
-                                  ImGui::GetContentRegionAvail().x - save_w);
+    const float name_w =
+        std::min(ImGui::CalcTextSize("Custom Studio Rig").x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f,
+                 ImGui::GetContentRegionAvail().x - save_w);
     if (name_w < fs * 5.0f) {
         ImGui::NewLine();
     }
@@ -1273,7 +1279,13 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
     ImGui::InputTextWithHint("##PresetName", "Preset name", save_name_buf_.data(), save_name_buf_.size());
     ImGui::SameLine();
     if (ImGui::SmallButton(tr("Save Rig"))) {
-        if (renderer::save_or_update_lighting_rig_preset(rigs_json_path(), save_name_buf_.data(), rig)) {
+        ensure_rigs_loaded();
+        const auto dst = rigs_json_path();
+        std::error_code ec;
+        if (!std::filesystem::exists(dst, ec) && !saved_rigs_.empty()) {
+            (void)renderer::save_lighting_rigs_json(dst, saved_rigs_);
+        }
+        if (renderer::save_or_update_lighting_rig_preset(dst, save_name_buf_.data(), rig)) {
             rigs_loaded_ = false;
             ensure_rigs_loaded();
         }
@@ -1383,7 +1395,8 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
             ImGui::PopID();
         }
         if (remove_req >= 0 && renderer::remove_studio_light(rig, static_cast<uint32_t>(remove_req))) {
-            selected_light_idx_ = std::clamp(selected_light_idx_, 0, std::max(0, static_cast<int>(rig.studio_light_count) - 1));
+            selected_light_idx_ =
+                std::clamp(selected_light_idx_, 0, std::max(0, static_cast<int>(rig.studio_light_count) - 1));
             dirty = true;
         }
         if (dirty) {

@@ -834,6 +834,8 @@ int run_application(const AppLaunchOptions& opts) {
     wc.style = CS_OWNDC;
     wc.lpfnWndProc = &aether_wndproc;
     wc.hInstance = hinst;
+    wc.hIcon = ::LoadIconW(hinst, MAKEINTRESOURCEW(101));
+    wc.hIconSm = wc.hIcon;
     wc.hCursor = ::LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW wide resource ID
     wc.lpszClassName = L"AetherStudioMainWindow";
     if (::RegisterClassExW(&wc) == 0) {
@@ -1224,8 +1226,8 @@ int run_application(const AppLaunchOptions& opts) {
                                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
                 if (out.stage_broadcast_pip_view != VK_NULL_HANDLE) {
-                    stage_broadcast_pip_tex_set = ImGui_ImplVulkan_AddTexture(
-                        vp_sampler, out.stage_broadcast_pip_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    stage_broadcast_pip_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.stage_broadcast_pip_view,
+                                                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 }
                 if (out.orbit_orb_view != VK_NULL_HANDLE) {
                     orb_tex_set = ImGui_ImplVulkan_AddTexture(vp_sampler, out.orbit_orb_view,

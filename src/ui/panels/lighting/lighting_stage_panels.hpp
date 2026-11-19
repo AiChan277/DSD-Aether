@@ -29,6 +29,7 @@ class LightingStagePanels {
     LightingStagePanels() noexcept = default;
 
     void set_config_dir(std::filesystem::path dir) noexcept { config_dir_ = std::move(dir); }
+    void set_shipped_config_dir(std::filesystem::path dir) noexcept { shipped_config_dir_ = std::move(dir); }
     void ensure_initialized(DevShellViewportActions& vp_actions) noexcept;
 
     void set_stage_view(renderer::StageCameraView view, const std::array<float, 3>& pivot_ws) noexcept;
@@ -85,6 +86,7 @@ class LightingStagePanels {
     void sync_key_fill_rim_mirror(const renderer::LightingRig& rig, DevShellViewportActions& vp_actions) noexcept;
 
     std::filesystem::path config_dir_{};
+    std::filesystem::path shipped_config_dir_{};
     renderer::LightingRig fallback_rig_{renderer::LightingRig::default_three_point()};
     std::vector<renderer::StudioRigPresetRecord> saved_rigs_{};
     bool rigs_loaded_{false};

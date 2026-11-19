@@ -134,7 +134,11 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
         (void)keymap_.load_toml(config_dir_ / "keymap.toml");
         viewport_panel_.set_persist_presets(true);
         viewport_panel_.preset_bank().set_storage_path(resolve_camera_presets_json_path(paths_));
-        (void)viewport_panel_.preset_bank().load_default();
+        if (!viewport_panel_.preset_bank().load_default() && !paths_.assets_dir.empty()) {
+            const auto shipped_cam =
+                std::filesystem::path(paths_.assets_dir).parent_path() / "config" / "camera_presets.json";
+            (void)viewport_panel_.preset_bank().load_from_file(shipped_cam.string());
+        }
 
         // Open Hardware Optimizer Wizard cleanly on first launch or new hardware fingerprint
         const uint64_t inv_hash = HardwareOptimizerWizard::compute_inventory_hash(hw_);
@@ -168,6 +172,9 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
 
     command_palette_.rebuild_entries(keymap_, settings_.recent_projects);
     lighting_stage_.set_config_dir(config_dir_);
+    if (!paths_.assets_dir.empty()) {
+        lighting_stage_.set_shipped_config_dir(std::filesystem::path(paths_.assets_dir).parent_path() / "config");
+    }
     synced_param_epoch_ = 0; // force initial ParamStore -> actions sync
     dock_layout_dirty_ = true;
 }
@@ -1011,11 +1018,11 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         const ImGuiDockNode* n_vp = node_of(kPanelViewport);
         const bool out_small = n_out != nullptr && n_out->Size.x > 0.0f && n_out->Size.x < 200.0f * 0.75f;
         const bool ins_small = n_ins != nullptr && n_ins->Size.x > 0.0f && n_ins->Size.x < 260.0f * 0.75f;
-        const bool vp_small = n_vp != nullptr && n_vp->Size.x > 0.0f &&
-                              (n_vp->Size.x < 320.0f || n_vp->Size.y < 200.0f);
+        const bool vp_small =
+            n_vp != nullptr && n_vp->Size.x > 0.0f && (n_vp->Size.x < 320.0f || n_vp->Size.y < 200.0f);
         // One rebuild per host size: never loop if the default layout itself cannot satisfy the minimums.
-        const bool already_tried = std::fabs(min_guard_rebuild_w_ - dock_sz.x) < 1.0f &&
-                                   std::fabs(min_guard_rebuild_h_ - dock_sz.y) < 1.0f;
+        const bool already_tried =
+            std::fabs(min_guard_rebuild_w_ - dock_sz.x) < 1.0f && std::fabs(min_guard_rebuild_h_ - dock_sz.y) < 1.0f;
         if ((out_small || ins_small || vp_small) && !already_tried) {
             min_guard_rebuild_w_ = dock_sz.x;
             min_guard_rebuild_h_ = dock_sz.y;
@@ -1045,8 +1052,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         }
         ImGui::End();
     } else {
-        outliner_panel_.draw(mode_, host_status_.on_air, avatar, output_view, bones_, materials_, expressions_, plugins_,
-                             params_, undo_, fonts_, selection_, actions);
+        outliner_panel_.draw(mode_, host_status_.on_air, avatar, output_view, bones_, materials_, expressions_,
+                             plugins_, params_, undo_, fonts_, selection_, actions);
         if (outliner_panel_.consume_inspect_outputs_request()) {
             inspector_panel_.request_focus_output_section();
         }
@@ -1076,8 +1083,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         ImGui::End();
     } else {
         inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
-                              output_view, host_status_, plugins_, selection_, params_, undo_, settings_, settings_dirty_,
-                              fonts_, row_actions, actions, &viewport_panel_);
+                              output_view, host_status_, plugins_, selection_, params_, undo_, settings_,
+                              settings_dirty_, fonts_, row_actions, actions, &viewport_panel_);
     }
     if (const ImGuiWindow* hov = GImGui != nullptr ? GImGui->HoveredWindow : nullptr;
         hov != nullptr && hov->RootWindow != nullptr) {

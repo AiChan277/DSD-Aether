@@ -1,134 +1,191 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<!--
+  AETHER-2.5D Studio MSI (WiX v5). Built by installer/Build-Installer.ps1, which stages the payload into
+  dist/stage and passes the paths below as preprocessor variables.
+
+  Design notes (keeping the package conventional and AV-friendly):
+    - Plain Windows Installer package, no bootstrapper, no packer, no self-extracting stub, no scripts.
+    - The only custom actions are regsvr32 calls for the DirectShow virtual camera (deferred, elevated,
+      paired with an unregister on uninstall). Everything else is declarative MSI tables.
+    - Visual C++ runtime DLLs ship app-local (Microsoft's VC143.CRT redistributable files), so no extra
+      redistributable installer is launched.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
       Name="AETHER-2.5D Studio"
-      Manufacturer="AETHER-2.5D Contributors"
-      Version="0.1.0.0"
+      Manufacturer="AiChan277"
+      Version="$(var.ProductVersion)"
       UpgradeCode="94B2E5C1-3A48-4C7A-9E6D-1F2A84B70E91"
       Scope="perMachine"
-      InstallerVersion="500">
+      Language="1033"
+      InstallerVersion="500"
+      Compressed="yes">
+
+    <SummaryInformation Description="AETHER-2.5D Studio $(var.ReleaseTag) installer" Manufacturer="AiChan277" />
 
     <MajorUpgrade
         DowngradeErrorMessage="A newer version of [ProductName] is already installed."
         AllowSameVersionUpgrades="yes" />
 
-    <MediaTemplate EmbedCab="yes" CompressionLevel="mszip" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Windows 10 1809 (build 17763) or later, 64-bit only -->
+    <Launch Condition="VersionNT64" Message="AETHER-2.5D Studio requires 64-bit Windows 10 or Windows 11." />
+    <Property Id="WINBUILD">
+      <RegistrySearch Id="WinBuildSearch" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" />
+    </Property>
+    <Launch Condition="Installed OR (WINBUILD &gt;= 17763)"
+            Message="AETHER-2.5D Studio requires Windows 10 version 1809 or later." />
+
+    <!-- Apps & Features entry -->
+    <Icon Id="AetherIcon" SourceFile="$(var.AssetsDir)\aether.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AetherIcon" />
+    <Property Id="ARPCOMMENTS" Value="Real-time 2.5D VTuber studio with NPU tracking, Vulkan/DX12/DX11 rendering, and DirectShow Virtual Camera." />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/AiChan277/DSD-Aether" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/AiChan277/DSD-Aether/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/AiChan277/DSD-Aether/releases" />
+    <Property Id="ARPCONTACT" Value="AiChan277" />
+
+    <!-- Wizard: Welcome -> License -> Install folder -> Ready -> Progress -> Finish (with "Launch") -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetsDir)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetsDir)\dialog.bmp" />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch AETHER-2.5D Studio" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#AetherStudioMainExe]" />
+    <CustomAction Id="LaunchApplication" DllEntry="WixShellExec" Impersonate="yes" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="AETHER-2.5D Studio">
-        <Directory Id="VCAMFOLDER" Name="vcam" />
-        <Directory Id="MODELSFOLDER" Name="models" />
+        <Directory Id="VCAMFOLDER" Name="vcam">
+          <Directory Id="VCAMX64FOLDER" Name="x64" />
+        </Directory>
       </Directory>
     </StandardDirectory>
-
+    <!-- 32-bit virtual camera for 32-bit host apps lives under Program Files (x86) -->
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER86" Name="AETHER-2.5D Studio">
+        <Directory Id="VCAMX86FOLDER" Name="vcam" />
+      </Directory>
+    </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="AETHER-2.5D Studio" />
     </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
 
-    <ComponentGroup Id="CoreAppComponents" Directory="INSTALLFOLDER">
+    <!-- Application: exe, plugin runner, runtime DLLs, models/, assets/fonts/, config/, docs (staged tree) -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component Id="AetherStudioExe" Guid="E129B7B2-6F08-4F6F-B2A7-42B646D8A401" Bitness="always64">
-        <File
-            Id="AetherStudioMainExe"
-            Source="$(var.StageDir)\aether_studio.exe"
-            KeyPath="yes" />
+        <File Id="AetherStudioMainExe" Source="$(var.StageDir)\aether_studio.exe" KeyPath="yes" />
       </Component>
+      <Files Include="$(var.StageDir)\**">
+        <Exclude Files="$(var.StageDir)\aether_studio.exe" />
+      </Files>
     </ComponentGroup>
 
-    <ComponentGroup Id="RuntimeFiles" Directory="INSTALLFOLDER">
-      <Files Include="$(var.StageDir)\*.dll" />
-    </ComponentGroup>
-
-    <!-- Dual x64 & x86 DirectShow Virtual Camera filter registration (CLSID_AetherVirtualCam) -->
-    <ComponentGroup Id="VirtualCamComponents" Directory="VCAMFOLDER">
+    <!-- DirectShow virtual camera, x64 and x86, each folder carrying its own VC++ runtime -->
+    <ComponentGroup Id="VirtualCamX64" Directory="VCAMX64FOLDER">
       <Component Id="VcamX64Component" Guid="C8C5726D-0F66-46B7-8CE8-55B34E10F902" Bitness="always64">
-        <File
-            Id="VcamX64Dll"
-            Name="aether_vcam_ds_x64.dll"
-            Source="$(var.VcamX64Dll)"
-            KeyPath="yes" />
+        <File Id="VcamX64Dll" Name="aether_vcam_ds_x64.dll" Source="$(var.VcamX64Dir)\aether_vcam_ds_x64.dll"
+              KeyPath="yes" />
         <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{7A5E14B2-4F8C-4D31-9E2A-61B38F0C42D5}">
-          <RegistryValue Type="string" Value="Aether 2.5D Virtual Cam (Alpha)" />
+          <RegistryValue Type="string" Value="Aether 2.5D Virtual Cam" />
           <RegistryKey Key="InprocServer32">
             <RegistryValue Type="string" Value="[#VcamX64Dll]" />
             <RegistryValue Name="ThreadingModel" Type="string" Value="Both" />
           </RegistryKey>
         </RegistryKey>
       </Component>
+      <Files Include="$(var.VcamX64Dir)\*.dll">
+        <Exclude Files="$(var.VcamX64Dir)\aether_vcam_ds_x64.dll" />
+      </Files>
+    </ComponentGroup>
 
+    <ComponentGroup Id="VirtualCamX86" Directory="VCAMX86FOLDER">
       <Component Id="VcamX86Component" Guid="D91B41E3-552C-4E19-A2F1-8F0010D9E903" Bitness="always32">
-        <File
-            Id="VcamX86Dll"
-            Name="aether_vcam_ds_x86.dll"
-            Source="$(var.VcamX86Dll)"
-            KeyPath="yes" />
-        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\WOW6432Node\CLSID\{7A5E14B2-4F8C-4D31-9E2A-61B38F0C42D5}">
-          <RegistryValue Type="string" Value="Aether 2.5D Virtual Cam (Alpha)" />
+        <File Id="VcamX86Dll" Name="aether_vcam_ds_x86.dll" Source="$(var.VcamX86Dir)\aether_vcam_ds_x86.dll"
+              KeyPath="yes" />
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\CLSID\{7A5E14B2-4F8C-4D31-9E2A-61B38F0C42D5}">
+          <RegistryValue Type="string" Value="Aether 2.5D Virtual Cam" />
           <RegistryKey Key="InprocServer32">
             <RegistryValue Type="string" Value="[#VcamX86Dll]" />
             <RegistryValue Name="ThreadingModel" Type="string" Value="Both" />
           </RegistryKey>
         </RegistryKey>
       </Component>
+      <Files Include="$(var.VcamX86Dir)\*.dll">
+        <Exclude Files="$(var.VcamX86Dir)\aether_vcam_ds_x86.dll" />
+      </Files>
     </ComponentGroup>
 
-    <!-- Elevated regsvr32 calls for IFilterMapper2 Video Capture Source Category registration -->
-    <CustomAction
-        Id="RegisterVcamX64"
-        Directory="VCAMFOLDER"
+    <!-- regsvr32 adds the filter to the Video Capture Sources category (IFilterMapper2) -->
+    <CustomAction Id="RegisterVcamX64" Directory="VCAMX64FOLDER"
         ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s &quot;[#VcamX64Dll]&quot;"
-        Execute="deferred"
-        Impersonate="no"
-        Return="check" />
-
-    <CustomAction
-        Id="UnregisterVcamX64"
-        Directory="VCAMFOLDER"
+        Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="UnregisterVcamX64" Directory="VCAMX64FOLDER"
         ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /u /s &quot;[#VcamX64Dll]&quot;"
-        Execute="deferred"
-        Impersonate="no"
-        Return="ignore" />
-
-    <CustomAction
-        Id="RegisterVcamX86"
-        Directory="VCAMFOLDER"
+        Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="RegisterVcamX86" Directory="VCAMX86FOLDER"
         ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /s &quot;[#VcamX86Dll]&quot;"
-        Execute="deferred"
-        Impersonate="no"
-        Return="check" />
-
-    <CustomAction
-        Id="UnregisterVcamX86"
-        Directory="VCAMFOLDER"
+        Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="UnregisterVcamX86" Directory="VCAMX86FOLDER"
         ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /u /s &quot;[#VcamX86Dll]&quot;"
-        Execute="deferred"
-        Impersonate="no"
-        Return="ignore" />
+        Execute="deferred" Impersonate="no" Return="ignore" />
 
-    <ComponentGroup Id="ShortcutComponents" Directory="ApplicationProgramsFolder">
-      <Component Id="StartMenuShortcut" Guid="A45E12E8-E821-4B08-A961-99D05A3DF904" Bitness="always64">
-        <Shortcut
-            Id="AetherStartShortcut"
-            Name="AETHER-2.5D Studio"
-            Description="Real-time 2.5D NPR VTuber Studio Engine"
-            Target="[#AetherStudioMainExe]"
-            WorkingDirectory="INSTALLFOLDER" />
+    <InstallExecuteSequence>
+      <Custom Action="RegisterVcamX64" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="RegisterVcamX86" After="RegisterVcamX64" Condition="NOT REMOVE" />
+      <Custom Action="UnregisterVcamX86" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="UnregisterVcamX64" After="UnregisterVcamX86" Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <ComponentGroup Id="Shortcuts">
+      <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder"
+                 Guid="A45E12E8-E821-4B08-A961-99D05A3DF904" Bitness="always64">
+        <Shortcut Id="AetherStartShortcut" Name="AETHER-2.5D Studio"
+                  Description="Real-time 2.5D VTuber studio" Target="[#AetherStudioMainExe]"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AetherIcon" />
         <RemoveFolder Id="CleanAppProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
-        <RegistryValue Root="HKCU" Key="Software\AETHER25D\Studio" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\AETHER25D\Studio" Name="StartMenuShortcut" Type="integer"
+                       Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="InstallInfo" Directory="INSTALLFOLDER" Guid="5B0E8E54-2C41-4C59-9A0C-7E3D6B1F2A10"
+                 Bitness="always64">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\AETHER25D\Studio" Name="InstallDir" Type="string"
+                       Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\AETHER25D\Studio" Name="Version" Type="string"
+                       Value="$(var.ReleaseTag)" />
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\aether_studio.exe">
+          <RegistryValue Type="string" Value="[#AetherStudioMainExe]" />
+          <RegistryValue Name="Path" Type="string" Value="[INSTALLFOLDER]" />
+        </RegistryKey>
       </Component>
     </ComponentGroup>
 
-    <InstallExecuteSequence>
-      <Custom Action="RegisterVcamX64" After="InstallFiles" Condition="NOT Installed" />
-      <Custom Action="RegisterVcamX86" After="RegisterVcamX64" Condition="NOT Installed" />
-      <Custom Action="UnregisterVcamX64" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
-      <Custom Action="UnregisterVcamX86" Before="UnregisterVcamX64" Condition="REMOVE=&quot;ALL&quot;" />
-    </InstallExecuteSequence>
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="0F6A8D21-7B3C-4E2A-B5D9-3C1E8A7F4B62"
+               Bitness="always64">
+      <Shortcut Id="AetherDesktopShortcut" Name="AETHER-2.5D Studio"
+                Description="Real-time 2.5D VTuber studio" Target="[#AetherStudioMainExe]"
+                WorkingDirectory="INSTALLFOLDER" Icon="AetherIcon" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\AETHER25D\Studio" Name="DesktopShortcut" Type="integer"
+                     Value="1" KeyPath="yes" />
+    </Component>
 
-    <Feature Id="ProductFeature" Title="AETHER-2.5D Studio" Level="1">
-      <ComponentGroupRef Id="CoreAppComponents" />
-      <ComponentGroupRef Id="RuntimeFiles" />
-      <ComponentGroupRef Id="VirtualCamComponents" />
-      <ComponentGroupRef Id="ShortcutComponents" />
+    <Feature Id="ProductFeature" Title="AETHER-2.5D Studio" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="VirtualCamX64" />
+      <ComponentGroupRef Id="VirtualCamX86" />
+      <ComponentGroupRef Id="Shortcuts" />
+      <ComponentRef Id="DesktopShortcut" />
     </Feature>
   </Package>
 </Wix>

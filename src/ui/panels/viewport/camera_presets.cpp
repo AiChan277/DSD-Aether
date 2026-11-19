@@ -279,11 +279,16 @@ bool CameraPresetBank::remove_at(size_t index, bool persist) {
 
 std::string resolve_camera_presets_json_path(const RuntimePaths& paths) {
     std::error_code ec;
-    const std::filesystem::path cwd_cfg = std::filesystem::path("config") / "camera_presets.json";
-    if (std::filesystem::exists("config", ec) || paths.exe_dir.empty()) {
-        return cwd_cfg.string();
+    if (!paths.app_data_dir.empty()) {
+        return (std::filesystem::path(paths.app_data_dir) / "camera_presets.json").string();
     }
-    return (std::filesystem::path(paths.exe_dir) / "config" / "camera_presets.json").string();
+    if (!paths.exe_dir.empty()) {
+        const std::filesystem::path exe_cfg = std::filesystem::path(paths.exe_dir) / "config" / "camera_presets.json";
+        if (std::filesystem::exists(exe_cfg, ec)) {
+            return exe_cfg.string();
+        }
+    }
+    return (std::filesystem::path("config") / "camera_presets.json").string();
 }
 
 } // namespace aether::ui

@@ -69,6 +69,8 @@ def main():
               ["(a) Traditional", "(b) Hybrid RT", "(c) Path Tracing"], out / "fig_modes.png")
 
     load_on_white(snap / "studio_live_100.png").save(out / "fig_studio.png", optimize=True)
+    if (snap / "lighting_tab.png").exists():
+        load_on_white(snap / "lighting_tab.png").save(out / "fig_lighting.png", optimize=True)
     face = load_on_white(snap / "after_8590256991748008892_face_neutral.png")
     face.resize((face.width // 2, face.height // 2), Image.LANCZOS).save(out / "fig_face.png", optimize=True)
 

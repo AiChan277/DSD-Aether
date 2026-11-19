@@ -19,10 +19,35 @@ namespace aether::app {
 
 namespace {
 
+std::filesystem::path executable_directory_for_models() {
+#if defined(_WIN32)
+    std::wstring buf(32768, L'\0');
+    const DWORD len = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (len > 0U && len < buf.size()) {
+        buf.resize(len);
+        return std::filesystem::path(buf).parent_path();
+    }
+#endif
+    return {};
+}
+
 std::filesystem::path resolve_manifest_path(const std::filesystem::path& configured) {
     std::error_code ec;
     if (!configured.empty() && std::filesystem::is_regular_file(configured, ec)) {
         return configured;
+    }
+    const std::filesystem::path exe_dir = executable_directory_for_models();
+    if (!exe_dir.empty()) {
+        const std::filesystem::path exe_candidates[3] = {
+            exe_dir / "models" / "manifest.toml",
+            exe_dir / ".." / "models" / "manifest.toml",
+            exe_dir / ".." / ".." / "models" / "manifest.toml",
+        };
+        for (const auto& p : exe_candidates) {
+            if (std::filesystem::is_regular_file(p, ec)) {
+                return std::filesystem::weakly_canonical(p, ec);
+            }
+        }
     }
     const char* candidates[4] = {
         "models/manifest.toml",
@@ -55,8 +80,8 @@ std::filesystem::path resolve_ov_cache_dir(const std::filesystem::path& configur
 }
 
 std::unique_ptr<tracking::ICameraSource> open_camera_source_with_fallback(bool camera_active, bool want_synthetic,
-                                                                     const std::string& preferred_link, uint32_t fps,
-                                                                     bool& out_is_synthetic) {
+                                                                          const std::string& preferred_link,
+                                                                          uint32_t fps, bool& out_is_synthetic) {
     if (!camera_active) {
         out_is_synthetic = want_synthetic;
         return nullptr;
@@ -465,8 +490,8 @@ void PipelineSkeleton::t1_entry() {
             } else if (cmd.kind == TrackingCmdKind::ToggleCameraSource && engine_ready) {
                 const bool target_syn = !use_synthetic;
                 bool actual_syn = target_syn;
-                auto new_cam = open_camera_source_with_fallback(true, target_syn, preferred_camera_link, camera_fps,
-                                                                 actual_syn);
+                auto new_cam =
+                    open_camera_source_with_fallback(true, target_syn, preferred_camera_link, camera_fps, actual_syn);
                 use_synthetic = actual_syn;
                 camera_active = (new_cam != nullptr && new_cam->is_open());
                 (void)engine->switch_camera_source(std::move(new_cam));
@@ -475,7 +500,7 @@ void PipelineSkeleton::t1_entry() {
                 const bool want_active = (cmd.int_arg != 0);
                 bool actual_syn = use_synthetic;
                 auto new_cam = open_camera_source_with_fallback(want_active, use_synthetic, preferred_camera_link,
-                                                                 camera_fps, actual_syn);
+                                                                camera_fps, actual_syn);
                 use_synthetic = actual_syn;
                 camera_active = (new_cam != nullptr && new_cam->is_open());
                 if (new_cam && !new_cam->device_symlink().empty()) {
@@ -485,10 +510,11 @@ void PipelineSkeleton::t1_entry() {
                 publish_hud(engine.get(), engine_ready, nullptr);
             } else if (cmd.kind == TrackingCmdKind::SetSyntheticCamera && engine_ready) {
                 const bool want_syn = (cmd.int_arg != 0);
-                if (want_syn != use_synthetic || (camera_active && want_syn != engine->snapshot_stats().camera_active)) {
+                if (want_syn != use_synthetic ||
+                    (camera_active && want_syn != engine->snapshot_stats().camera_active)) {
                     bool actual_syn = want_syn;
                     auto new_cam = open_camera_source_with_fallback(camera_active, want_syn, preferred_camera_link,
-                                                                     camera_fps, actual_syn);
+                                                                    camera_fps, actual_syn);
                     use_synthetic = actual_syn;
                     camera_active = (new_cam != nullptr && new_cam->is_open());
                     if (new_cam && !new_cam->device_symlink().empty()) {

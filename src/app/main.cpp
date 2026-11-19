@@ -7,6 +7,7 @@
 #include <Windows.h>
 #endif
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -30,6 +31,15 @@ int main(int argc, char** argv) {
                 opts.smoke_reload_avatar_at = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
             }
         }
+#if defined(_WIN32)
+        if (opts.smoke_frames > 0U && ::GetStdHandle(STD_OUTPUT_HANDLE) == nullptr) {
+            if (::AttachConsole(ATTACH_PARENT_PROCESS) != FALSE) {
+                FILE* fp = nullptr;
+                (void)freopen_s(&fp, "CONOUT$", "w", stdout);
+                (void)freopen_s(&fp, "CONOUT$", "w", stderr);
+            }
+        }
+#endif
         return aether::app::run_application(opts);
     } catch (...) {
         return 1;
