@@ -285,10 +285,10 @@ TEST_CASE("Optical Invariant 2: 0-360 deg SDF face shadow sweep is smooth and sy
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto mean_center_luma = [&](float azimuth_deg) -> double {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = azimuth_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
-        rig.lights[0].intensity = 1.6f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = azimuth_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_lights[0].intensity_ev100 = 1.6f;
         rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
         rig.bg_rgba[3] = 1.0f;
         const auto px = render_synthetic_once(*rhi, spec, 128, 128, cam, rig, false, false, false);
@@ -353,9 +353,9 @@ TEST_CASE("Optical Invariant 3: Read-only D32_S8 stencil hair drop shadow shifts
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto render_azimuth = [&](float az_deg) {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = az_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = az_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
         rig.hair_shadow_offset_px = 14.0f;
         rig.hair_shadow_strength = 0.70f;
         return render_synthetic_once(*rhi, spec, 256, 256, cam, rig, false, false, false);
@@ -649,10 +649,10 @@ TEST_CASE("NprRenderer::bake_and_apply_face_sdf activates live R8 SDF on unflagg
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto render_luma = [&](float az_deg, uint64_t fidx) -> double {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = az_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
-        rig.lights[0].intensity = 1.6f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = az_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_lights[0].intensity_ev100 = 1.6f;
         rig.bg_rgba[3] = 1.0f;
 
         aether::renderer::FrameRenderRequest req{};
@@ -901,7 +901,6 @@ TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtu
         CHECK(ies[5u * kIesLutWidth + 128u] < 0.05f);
 
         LightingRig rig = LightingRig::default_three_point();
-        rig.use_studio_lights = true;
         rig.studio_light_count = 12;
         for (uint32_t f = 0; f < 12u; ++f) {
             configure_fixture_defaults(rig.studio_lights[f], static_cast<StudioFixtureProfile>(f));
@@ -960,7 +959,6 @@ TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtu
 
     // (a) Softbox + Honeycomb Grid (30 deg) measurably attenuates peripheral edges relative to ungridded softbox
     LightingRig rig_open = LightingRig::default_three_point();
-    rig_open.use_studio_lights = true;
     rig_open.studio_light_count = 1;
     configure_fixture_defaults(rig_open.studio_lights[0], StudioFixtureProfile::RectSoftbox);
     rig_open.studio_lights[0].use_orbit_angles = false;
@@ -1071,7 +1069,6 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
 
         // Parallel Ortho ray picking vs Perspective ray picking on placed Softboxes
         LightingRig pick_rig = LightingRig::default_three_point();
-        pick_rig.use_studio_lights = true;
         pick_rig.studio_light_count = 2;
         configure_fixture_defaults(pick_rig.studio_lights[0], StudioFixtureProfile::RectSoftbox);
         pick_rig.studio_lights[0].use_orbit_angles = false;
@@ -1146,7 +1143,6 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
     REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.use_studio_lights = true;
     rig.studio_light_count = 6;
     for (uint32_t i = 0; i < 6u; ++i) {
         configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
@@ -1324,10 +1320,8 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
     REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.lights[0].color[0] = 1.0f;
-    rig.lights[0].color[1] = 1.0f;
-    rig.lights[0].color[2] = 1.0f;
-    rig.lights[0].intensity = 1.8f;
+    rig.studio_lights[0].tint_rgb = {1.0f, 1.0f, 1.0f};
+    rig.studio_lights[0].intensity_ev100 = 1.8f;
     rig.bloom_intensity = 0.0f;
     rig.satsuei.halation_strength = 0.0f;
     rig.satsuei.light_wrap_strength = 0.0f;
@@ -1419,6 +1413,87 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
     CHECK(b_outs.stage_broadcast_pip_height == 360u);
     REQUIRE(rhi->validation_error_count() == 0);
     REQUIRE(rhi->validation_warning_count() == 0);
+
+    renderer.destroy();
+    avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+
+TEST_CASE("Rev 3.1 Zero-Light Isolation Proof (Single Lighting Authority)", "[renderer][lighting][zero_light]") {
+    using namespace aether::renderer;
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Zero-Light GPU test: Vulkan unavailable");
+        return;
+    }
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.85f, 0.72f, 0.65f);
+    mat.toon_params[0] = 0.0f;
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.55f, 0.70f, 0.0f};
+    const float p1[3] = {0.55f, 0.70f, 0.0f};
+    const float p2[3] = {0.55f, 1.85f, 0.0f};
+    const float p3[3] = {-0.55f, 1.85f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.85f, 0.72f, 0.65f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kW = 128u;
+    constexpr uint32_t kH = 128u;
+    RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = false;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    for (uint32_t i = 0; i < rig.studio_light_count; ++i) {
+        rig.studio_lights[i].enabled = false;
+    }
+    rig.ambient_floor = 0.0f;
+    rig.environment_sky_strength = 0.0f;
+    rig.ground_bounce_strength = 0.0f;
+    rig.bg_rgba[0] = 0.0f;
+    rig.bg_rgba[1] = 0.0f;
+    rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    FrameRenderRequest req{};
+    req.avatar = avatar.get();
+    req.rig = &rig;
+    req.camera = PreviewCamera{0.0f, 1.30f, 0.0f, 0.0f, 0.0f, 2.2f, 0.65f};
+    req.frame_index = 1u;
+    req.frame_slot = 0u;
+    req.rt_enabled = false;
+    req.show_checkerboard = false;
+    req.show_orbit_orb = false;
+    req.debug_view = ShadingDebugView::Final;
+
+    REQUIRE(renderer.render_headless_frame(req).has_value());
+    const auto outs = renderer.graph().outputs();
+    auto vp_res = renderer.graph().readback_image_rgba8(outs.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+    REQUIRE(vp_res.has_value());
+    const auto& rgba = vp_res.value();
+    uint8_t max_rgb = 0u;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        max_rgb = std::max({max_rgb, rgba[i + 0], rgba[i + 1], rgba[i + 2]});
+    }
+    INFO("Zero-Light max_rgb=" << static_cast<int>(max_rgb));
+    CHECK(max_rgb == 0u);
+    REQUIRE(rhi->validation_error_count() == 0);
 
     renderer.destroy();
     avatar->destroy();

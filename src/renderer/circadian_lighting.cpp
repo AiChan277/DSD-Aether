@@ -287,45 +287,44 @@ CircadianLightingResult evaluate_circadian_lighting(float hour_0_to_24) noexcept
 }
 
 void apply_circadian_to_rig(const CircadianLightingResult& res, LightingRig& rig) noexcept {
-    if (rig.active_count < 3u) {
-        rig.active_count = 3u;
+    ensure_studio_lights_initialized(rig);
+    auto update_slot = [&](uint32_t idx, const char* fallback_name, StudioFixtureProfile profile, float az, float el,
+                           const std::array<float, 3>& rgb, float intensity, float kelvin, bool shadow) {
+        if (idx >= kMaxStudioLights) {
+            return;
+        }
+        if (idx >= rig.studio_light_count) {
+            rig.studio_light_count = idx + 1u;
+            rig.studio_lights[idx] = StudioLightSpec{};
+            configure_fixture_defaults(rig.studio_lights[idx], profile);
+            std::snprintf(rig.studio_lights[idx].name.data(), rig.studio_lights[idx].name.size(), "%s", fallback_name);
+        }
+        auto& s = rig.studio_lights[idx];
+        s.enabled = true;
+        s.cast_shadow = shadow;
+        s.use_orbit_angles = true;
+        s.orbit_azimuth_deg = az;
+        s.orbit_elevation_deg = el;
+        s.tint_rgb = rgb;
+        s.kelvin_cct = kelvin;
+        s.intensity_ev100 = intensity;
+    };
+
+    const uint32_t sun_idx = (rig.dominant_key_light_id < kMaxStudioLights) ? rig.dominant_key_light_id : 0u;
+    rig.dominant_key_light_id = sun_idx;
+    update_slot(sun_idx, "Solar Sun", StudioFixtureProfile::NaturalSunCieSky, res.key_azimuth_deg,
+                res.key_elevation_deg, res.key_rgb, res.key_intensity, res.key_kelvin, true);
+    rig.studio_lights[sun_idx].fixture = StudioFixtureProfile::NaturalSunCieSky;
+    if (rig.studio_light_count > 1u) {
+        const uint32_t fill_idx = (sun_idx == 1u) ? 0u : 1u;
+        update_slot(fill_idx, "Sky Fill", StudioFixtureProfile::LanternChinaBall, res.fill_azimuth_deg,
+                    res.fill_elevation_deg, res.fill_rgb, res.fill_intensity, 5600.0f, false);
     }
-    const auto d0 = dir_from_az_el(res.key_azimuth_deg, res.key_elevation_deg);
-    rig.lights[0].orbit_azimuth_deg = res.key_azimuth_deg;
-    rig.lights[0].orbit_elevation_deg = res.key_elevation_deg;
-    rig.lights[0].use_2d_orbit_angle = true;
-    rig.lights[0].direction_or_pos[0] = d0[0];
-    rig.lights[0].direction_or_pos[1] = d0[1];
-    rig.lights[0].direction_or_pos[2] = d0[2];
-    rig.lights[0].color[0] = res.key_rgb[0];
-    rig.lights[0].color[1] = res.key_rgb[1];
-    rig.lights[0].color[2] = res.key_rgb[2];
-    rig.lights[0].intensity = res.key_intensity;
-
-    const auto d1 = dir_from_az_el(res.fill_azimuth_deg, res.fill_elevation_deg);
-    rig.lights[1].orbit_azimuth_deg = res.fill_azimuth_deg;
-    rig.lights[1].orbit_elevation_deg = res.fill_elevation_deg;
-    rig.lights[1].use_2d_orbit_angle = true;
-    rig.lights[1].direction_or_pos[0] = d1[0];
-    rig.lights[1].direction_or_pos[1] = d1[1];
-    rig.lights[1].direction_or_pos[2] = d1[2];
-    rig.lights[1].color[0] = res.fill_rgb[0];
-    rig.lights[1].color[1] = res.fill_rgb[1];
-    rig.lights[1].color[2] = res.fill_rgb[2];
-    rig.lights[1].intensity = res.fill_intensity;
-
-    const auto d2 = dir_from_az_el(res.rim_azimuth_deg, res.rim_elevation_deg);
-    rig.lights[2].orbit_azimuth_deg = res.rim_azimuth_deg;
-    rig.lights[2].orbit_elevation_deg = res.rim_elevation_deg;
-    rig.lights[2].use_2d_orbit_angle = true;
-    rig.lights[2].direction_or_pos[0] = d2[0];
-    rig.lights[2].direction_or_pos[1] = d2[1];
-    rig.lights[2].direction_or_pos[2] = d2[2];
-    rig.lights[2].color[0] = res.rim_rgb[0];
-    rig.lights[2].color[1] = res.rim_rgb[1];
-    rig.lights[2].color[2] = res.rim_rgb[2];
-    rig.lights[2].intensity = res.rim_intensity;
-
+    if (rig.studio_light_count > 2u) {
+        const uint32_t rim_idx = (sun_idx == 2u) ? 0u : 2u;
+        update_slot(rim_idx, "Sky Rim", StudioFixtureProfile::Stripbox, res.rim_azimuth_deg,
+                    res.rim_elevation_deg, res.rim_rgb, res.rim_intensity, res.rim_kelvin, false);
+    }
     rig.shadow_warm_cool_shift = res.shadow_warm_cool_shift;
 }
 

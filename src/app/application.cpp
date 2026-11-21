@@ -1311,11 +1311,11 @@ int run_application(const AppLaunchOptions& opts) {
 
         ui::DevShellViewportActions vp_actions{};
         vp_actions.rt_enabled = render_cfg.enable_rt;
-        vp_actions.key_azimuth_deg = npr_renderer.lighting().lights[0].orbit_azimuth_deg;
-        vp_actions.key_elevation_deg = npr_renderer.lighting().lights[0].orbit_elevation_deg;
-        vp_actions.key_intensity = npr_renderer.lighting().lights[0].intensity;
-        vp_actions.fill_intensity = npr_renderer.lighting().lights[1].intensity;
-        vp_actions.rim_intensity = npr_renderer.lighting().lights[2].intensity;
+        if (const auto* dk = npr_renderer.lighting().dominant_key_light()) {
+            vp_actions.key_azimuth_deg = dk->orbit_azimuth_deg;
+            vp_actions.key_elevation_deg = dk->orbit_elevation_deg;
+            vp_actions.key_intensity = dk->intensity_ev100;
+        }
         vp_actions.live2d_flatness = npr_renderer.lighting().global_live2d_flatness;
         vp_actions.bloom_intensity = npr_renderer.lighting().bloom_intensity;
         vp_actions.outline_scale = npr_renderer.lighting().outline_width_scale;
@@ -1327,8 +1327,6 @@ int run_application(const AppLaunchOptions& opts) {
         vp_actions.crease_strength = npr_renderer.lighting().crease_strength;
         vp_actions.hair_highlight_intensity = npr_renderer.lighting().hair_highlight_intensity;
         vp_actions.rim_step_strength = npr_renderer.lighting().rim_step_strength;
-        vp_actions.lighting_fixture = static_cast<int>(npr_renderer.lighting().fixture_preset);
-        vp_actions.photometric_beam_angle_deg = npr_renderer.lighting().photometric_beam_angle_deg;
         vp_actions.eye_catchlight_intensity = npr_renderer.lighting().eye_catchlight_intensity;
         vp_actions.eye_catchlight_size = npr_renderer.lighting().eye_catchlight_size;
         vp_actions.crease_disguise_enabled = npr_renderer.lighting().crease_disguise_enabled;
@@ -2062,22 +2060,11 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.circadian_timezone = vp_actions.circadian_timezone_idx;
                 rig.circadian_time_minutes = vp_actions.circadian_time_override_min;
                 if (!vp_actions.circadian_enabled) {
-                    const auto preset =
-                        static_cast<renderer::LightingFixturePreset>(std::clamp(vp_actions.lighting_fixture, 0, 5));
-                    renderer::apply_lighting_fixture_preset(rig, preset, vp_actions.photometric_beam_angle_deg);
-                    if (vp_actions.studio_fixture > 0) {
-                        rig.key_studio_profile_override =
-                            static_cast<int8_t>(std::clamp(vp_actions.studio_fixture, 0, 11));
+                    if (auto* dk = rig.dominant_key_light_mut()) {
+                        dk->orbit_azimuth_deg = vp_actions.key_azimuth_deg;
+                        dk->orbit_elevation_deg = vp_actions.key_elevation_deg;
+                        dk->use_orbit_angles = true;
                     }
-                    rig.lights[0].orbit_azimuth_deg = vp_actions.key_azimuth_deg;
-                    rig.lights[0].orbit_elevation_deg = vp_actions.key_elevation_deg;
-                    rig.lights[1].orbit_azimuth_deg = vp_actions.fill_azimuth_deg;
-                    rig.lights[1].orbit_elevation_deg = vp_actions.fill_elevation_deg;
-                    rig.lights[2].orbit_azimuth_deg = vp_actions.rim_azimuth_deg;
-                    rig.lights[2].orbit_elevation_deg = vp_actions.rim_elevation_deg;
-                    rig.lights[0].intensity = vp_actions.key_intensity;
-                    rig.lights[1].intensity = vp_actions.fill_intensity;
-                    rig.lights[2].intensity = vp_actions.rim_intensity;
                     rig.shadow_warm_cool_shift = vp_actions.shadow_warm_cool_shift;
                 }
                 rig.global_live2d_flatness = vp_actions.live2d_flatness;
@@ -2094,14 +2081,6 @@ int run_application(const AppLaunchOptions& opts) {
                 rig.eye_catchlight_size = vp_actions.eye_catchlight_size;
                 rig.crease_disguise_enabled = vp_actions.crease_disguise_enabled;
                 rig.crease_disguise_strength = vp_actions.crease_disguise_strength;
-                rig.key_softbox_enabled = vp_actions.key_softbox_enabled;
-                rig.key_grid_enabled = vp_actions.key_grid_enabled;
-                rig.key_grid_angle_deg = vp_actions.key_grid_angle_deg;
-                rig.key_barn_doors_enabled = vp_actions.key_barn_doors_enabled;
-                rig.key_diffusion_enabled = vp_actions.key_diffusion_enabled;
-                rig.key_diffusion_density = vp_actions.key_diffusion_density;
-                rig.key_gel_enabled = vp_actions.key_gel_enabled;
-                rig.key_gel = static_cast<renderer::StudioGelPreset>(std::clamp(vp_actions.key_gel_preset, 0, 11));
                 rig.satsuei.light_wrap_strength = vp_actions.satsuei_light_wrap;
                 rig.satsuei.halation_strength = vp_actions.satsuei_halation;
                 rig.satsuei.backscatter_strength = vp_actions.satsuei_backscatter;
@@ -2796,11 +2775,15 @@ int run_application(const AppLaunchOptions& opts) {
                 render_view.show_checkerboard = vp_actions.show_checkerboard;
                 render_view.show_orbit_orb = vp_actions.show_orbit_orb;
                 render_view.baked_face_sdf_applied = baked_face_sdf_applied;
-                render_view.key_azimuth_deg = npr_renderer.lighting().lights[0].orbit_azimuth_deg;
-                render_view.key_elevation_deg = npr_renderer.lighting().lights[0].orbit_elevation_deg;
-                render_view.key_intensity = npr_renderer.lighting().lights[0].intensity;
-                render_view.fill_intensity = npr_renderer.lighting().lights[1].intensity;
-                render_view.rim_intensity = npr_renderer.lighting().lights[2].intensity;
+                if (const auto* dk = npr_renderer.lighting().dominant_key_light()) {
+                    render_view.key_azimuth_deg = dk->orbit_azimuth_deg;
+                    render_view.key_elevation_deg = dk->orbit_elevation_deg;
+                    render_view.key_intensity = dk->intensity_ev100;
+                } else {
+                    render_view.key_azimuth_deg = 0.0f;
+                    render_view.key_elevation_deg = 0.0f;
+                    render_view.key_intensity = 0.0f;
+                }
                 render_view.live2d_flatness = npr_renderer.lighting().global_live2d_flatness;
                 render_view.bloom_intensity = npr_renderer.lighting().bloom_intensity;
                 render_view.outline_scale = npr_renderer.lighting().outline_width_scale;

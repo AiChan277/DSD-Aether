@@ -58,18 +58,14 @@ uint32_t find_memory_type(VkPhysicalDevice pd, uint32_t type_filter, VkMemoryPro
     return UINT32_MAX;
 }
 
-std::array<float, 3> light_toward(const SceneLight& l) noexcept {
-    if (l.use_2d_orbit_angle) {
-        const float az = l.orbit_azimuth_deg * kDegToRad;
-        const float el = l.orbit_elevation_deg * kDegToRad;
-        const float ce = std::cos(el);
-        return {ce * std::sin(az), std::sin(el), ce * std::cos(az)};
-    }
-    const float len =
-        std::sqrt(l.direction_or_pos[0] * l.direction_or_pos[0] + l.direction_or_pos[1] * l.direction_or_pos[1] +
-                  l.direction_or_pos[2] * l.direction_or_pos[2]);
+std::array<float, 3> studio_light_toward(const StudioLightSpec& s) noexcept {
+    const auto pose = resolve_studio_light_world_pose(s, {0.0f, 1.32f, 0.0f}, {0.0f, 1.45f, 2.0f});
+    const float dx = pose.position_ws[0] - pose.target_ws[0];
+    const float dy = pose.position_ws[1] - pose.target_ws[1];
+    const float dz = pose.position_ws[2] - pose.target_ws[2];
+    const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
     const float inv = len > 1e-6f ? 1.0f / len : 0.0f;
-    return {l.direction_or_pos[0] * inv, l.direction_or_pos[1] * inv, l.direction_or_pos[2] * inv};
+    return {dx * inv, dy * inv, dz * inv};
 }
 
 } // namespace
@@ -333,13 +329,24 @@ bool Dx11Bridge::render(const GpuAvatar& avatar, const LightingRig& rig, const P
 
     Dx11NprFrameParams params{};
     params.view_proj = compute_view_proj(camera, static_cast<float>(width_) / static_cast<float>(height_));
-    const auto toward = light_toward(rig.lights[0]);
+    const StudioLightSpec* dom_key = rig.dominant_key_light();
+    const std::array<float, 3> toward =
+        (dom_key != nullptr) ? studio_light_toward(*dom_key) : std::array<float, 3>{0.42f, 0.56f, 0.71f};
     // The HLSL shader lights along -light_dir, so pass the direction from the light toward the scene.
     params.light_dir_flatness = {-toward[0], -toward[1], -toward[2],
                                  std::clamp(rig.global_live2d_flatness, 0.0f, 0.85f)};
-    const SceneLight& rim = rig.lights[std::min<uint32_t>(2U, LightingRig::kMaxLights - 1U)];
-    params.rim_color_strength = {rim.color[0], rim.color[1], rim.color[2],
-                                 rim.enabled ? std::clamp(rim.intensity * 0.25f, 0.0f, 1.0f) : 0.0f};
+    const uint32_t n_studio = std::min(rig.studio_light_count, kMaxStudioLights);
+    const StudioLightSpec* rim = nullptr;
+    for (uint32_t i = 0; i < n_studio; ++i) {
+        if (&rig.studio_lights[i] != dom_key && rig.studio_lights[i].enabled &&
+            rig.studio_lights[i].passive_flag == PassiveFlagMode::None) {
+            rim = &rig.studio_lights[i];
+        }
+    }
+    params.rim_color_strength = (rim != nullptr)
+                                    ? std::array<float, 4>{rim->tint_rgb[0], rim->tint_rgb[1], rim->tint_rgb[2],
+                                                           std::clamp(rim->intensity_ev100 * 0.25f, 0.0f, 1.0f)}
+                                    : std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f};
     params.clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
 
     if (!dx_.render_npr_draws(verts, avatar.rest_indices, draws_, params)) {

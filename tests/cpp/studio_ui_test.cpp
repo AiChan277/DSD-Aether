@@ -1316,7 +1316,6 @@ TEST_CASE("Phase 2 Lighting Tab: 16-light Mixer, Rigs JSON roundtrip, 7 Stage Ca
     {
         LightingRig rig = LightingRig::default_three_point();
         ensure_studio_lights_initialized(rig);
-        REQUIRE(rig.use_studio_lights);
         REQUIRE(rig.studio_light_count == 4U);
         const int flag_idx = add_passive_flag(rig, PassiveFlagMode::NegativeFillBlack);
         REQUIRE(flag_idx == 4);
@@ -1471,7 +1470,6 @@ TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and 
     StudioActions actions{};
 
     aether::renderer::LightingRig lrig = aether::renderer::LightingRig::default_three_point();
-    lrig.use_studio_lights = true;
     lrig.studio_light_count = 2;
     aether::renderer::configure_fixture_defaults(lrig.studio_lights[0],
                                                  aether::renderer::StudioFixtureProfile::RectSoftbox);

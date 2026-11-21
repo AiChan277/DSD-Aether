@@ -197,14 +197,12 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     return mul_mat4(p, v);
 }
 
-[[nodiscard]] inline Mat4Vec3 scene_light_dir_to_light(const SceneLight& l) noexcept {
-    if (l.use_2d_orbit_angle) {
-        const float az = l.orbit_azimuth_deg * kDegToRad;
-        const float el = l.orbit_elevation_deg * kDegToRad;
-        const float ce = std::cos(el);
-        return normalize3({ce * std::sin(az), std::sin(el), ce * std::cos(az)});
-    }
-    return normalize3({l.direction_or_pos[0], l.direction_or_pos[1], l.direction_or_pos[2]});
+[[nodiscard]] inline Mat4Vec3 studio_light_dir_to_light(const StudioLightSpec& s,
+                                                    const std::array<float, 3>& pivot_ws,
+                                                    const std::array<float, 3>& eye_pos_ws) noexcept {
+    const StudioLightWorldPose pose = resolve_studio_light_world_pose(s, pivot_ws, eye_pos_ws);
+    return normalize3({pose.position_ws[0] - pose.target_ws[0], pose.position_ws[1] - pose.target_ws[1],
+                       pose.position_ws[2] - pose.target_ws[2]});
 }
 
 struct StageRenderRegion {
@@ -373,67 +371,25 @@ struct StageRenderRegion {
     fg.filter_pro_params[2] = std::clamp(rig.paper_warmth_strength, 0.0f, 1.0f);
     fg.filter_pro_params[3] = std::clamp(rig.rim_depth_offset_px, 1.0f, 6.0f);
 
-    // Photometric lighting fixture shaping + auto-normalized exposure at anchor pivot
-    const uint32_t fix_id = static_cast<uint32_t>(rig.fixture_preset);
-    const float beam_deg = std::clamp(rig.photometric_beam_angle_deg, 8.0f, 55.0f);
-    const float half_beam_rad = 0.5f * beam_deg * kDegToRad;
-    float cos_inner = -1.0f;
-    float cos_outer = -1.0f;
-    float emitter_aspect = 2.15f; // SkyPanel S60-C: 64.5 cm / 30.0 cm
-    float barndoor_soft = 0.0f;
-    float cie_sky_w = 0.0f;
-    float ground_bounce_w = 0.15f;
-    float flux_norm = 1.0f;
-    switch (rig.fixture_preset) {
-    case LightingFixturePreset::ArriSkyPanelS60C:
-        emitter_aspect = 2.15f;
-        flux_norm = 1.00f;
-        break;
-    case LightingFixturePreset::ArriFresnelT2Orbiter: {
-        const float b_deg = std::clamp(beam_deg, 12.0f, 55.0f);
-        const float hr = 0.5f * b_deg * kDegToRad;
-        cos_inner = std::cos(hr * 0.62f);
-        cos_outer = std::cos(hr * 1.15f);
-        emitter_aspect = 1.00f;
-        barndoor_soft = 0.42f;
-        flux_norm = 1.03f;
-        (void)half_beam_rad;
-        break;
-    }
-    case LightingFixturePreset::DedolightDled7: {
-        const float b_deg = std::clamp(beam_deg, 8.0f, 25.0f);
-        const float hr = 0.5f * b_deg * kDegToRad;
-        cos_inner = std::cos(hr * 0.55f);
-        cos_outer = std::cos(hr * 1.10f);
-        emitter_aspect = 1.00f;
-        barndoor_soft = 0.28f;
-        ground_bounce_w = 0.08f;
-        flux_norm = 1.06f;
-        break;
-    }
-    case LightingFixturePreset::BroadcastRingLight:
-        emitter_aspect = 0.52f; // inner/outer ring ratio
-        ground_bounce_w = 0.22f;
-        flux_norm = 0.94f;
-        break;
-    case LightingFixturePreset::NaturalSunlightCieSky:
-        emitter_aspect = 1.00f;
-        cie_sky_w = 1.00f;
-        ground_bounce_w = 0.45f;
-        flux_norm = 0.98f;
-        break;
-    case LightingFixturePreset::NaturalWindowPortal:
-        emitter_aspect = 0.667f; // 1.2m x 1.8m portrait window
-        cie_sky_w = 0.35f;
-        ground_bounce_w = 0.24f;
-        flux_norm = 1.02f;
-        break;
-    }
-    fg.photometric_params0[0] = static_cast<float>(fix_id);
-    fg.photometric_params0[1] = cos_inner;
-    fg.photometric_params0[2] = cos_outer;
+    // Single Lighting Authority: derive photometric catchlight/sky metadata from dominant key in StudioLightingStore
+    const StudioLightSpec* dom_key = rig.dominant_key_light();
+    const uint32_t dom_fix_id = (dom_key != nullptr) ? static_cast<uint32_t>(dom_key->fixture) : 0u;
+    const float emitter_aspect =
+        (dom_key != nullptr && dom_key->height_or_inner_m > 1e-4f)
+            ? std::clamp(dom_key->width_or_outer_m / dom_key->height_or_inner_m, 0.25f, 4.0f)
+            : 1.5f;
+    const float amb_scale = std::max(0.0f, rig.ambient_floor);
+    const bool has_sun_sky =
+        (dom_key != nullptr && dom_key->fixture == StudioFixtureProfile::NaturalSunCieSky && !dom_key->window_portal);
+    const float cie_sky_w = (amb_scale > 0.0f || has_sun_sky) ? std::max(0.0f, rig.environment_sky_strength) : 0.0f;
+    const float ground_bounce_w = (amb_scale > 0.0f || has_sun_sky) ? std::max(0.0f, rig.ground_bounce_strength) : 0.0f;
+    const float flux_norm = 1.0f;
+
+    fg.photometric_params0[0] = static_cast<float>(dom_fix_id);
+    fg.photometric_params0[1] = -1.0f;
+    fg.photometric_params0[2] = -1.0f;
     fg.photometric_params0[3] = emitter_aspect;
-    fg.photometric_params1[0] = barndoor_soft;
+    fg.photometric_params1[0] = amb_scale;
     fg.photometric_params1[1] = cie_sky_w;
     fg.photometric_params1[2] = ground_bounce_w;
     fg.photometric_params1[3] = flux_norm;
@@ -442,7 +398,9 @@ struct StageRenderRegion {
     fg.eye_catchlight_params[1] = std::clamp(rig.eye_catchlight_size, 0.25f, 2.0f);
     fg.eye_catchlight_params[2] =
         rig.crease_disguise_enabled ? std::clamp(rig.crease_disguise_strength, 0.0f, 1.0f) : 0.0f;
-    fg.eye_catchlight_params[3] = (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) ? 1.0f : 0.0f;
+    fg.eye_catchlight_params[3] =
+        (dom_key != nullptr && (dom_key->coaxial_lock || dom_key->fixture == StudioFixtureProfile::BroadcastRing)) ? 1.0f
+                                                                                                               : 0.0f;
 
     // Eye sphere centers for curved optical cornea catchlight reflections (from humanoid bones when present)
     auto resolve_eye_world = [&](uint32_t hbone, float side_sign, float out_c[4]) {
@@ -524,12 +482,18 @@ struct StageRenderRegion {
     fg.satsuei_params[2] = rig.satsuei.halation_threshold;
     fg.satsuei_params[3] = rig.satsuei.backscatter_strength;
 
-    const Mat4Vec3 key_for_sky = scene_light_dir_to_light(rig.lights[0]);
+    const std::array<float, 3> piv_arr{pivot_ws.x, pivot_ws.y, pivot_ws.z};
+    const std::array<float, 3> eye_arr{eye.x, eye.y, eye.z};
+    const Mat4Vec3 key_for_sky =
+        (dom_key != nullptr) ? studio_light_dir_to_light(*dom_key, piv_arr, eye_arr) : Mat4Vec3{0.42f, 0.56f, 0.71f};
+    const std::array<float, 3> key_sky_col =
+        (dom_key != nullptr) ? dom_key->tint_rgb : std::array<float, 3>{0.0f, 0.0f, 0.0f};
     std::array<std::array<float, 4>, 9> sh9{};
-    const float sky_str = std::max(0.28f, fg.photometric_params1[1]);
-    compute_hillaire_sky_sh9({key_for_sky.x, key_for_sky.y, key_for_sky.z},
-                             {rig.lights[0].color[0], rig.lights[0].color[1], rig.lights[0].color[2]}, sky_str,
-                             std::max(0.25f, fg.photometric_params1[2]), sh9);
+    if (amb_scale > 0.0f || has_sun_sky) {
+        const float sky_str = std::max(amb_scale, cie_sky_w);
+        compute_hillaire_sky_sh9({key_for_sky.x, key_for_sky.y, key_for_sky.z}, key_sky_col, sky_str,
+                                 ground_bounce_w, sh9);
+    }
     for (int k = 0; k < 9; ++k) {
         for (int c = 0; c < 4; ++c) {
             fg.sky_sh9[k][c] = sh9[static_cast<size_t>(k)][static_cast<size_t>(c)];
@@ -551,39 +515,18 @@ struct StageRenderRegion {
     const uint8_t eff_mode = (req_mode == 0u || !req.rt_enabled || !rt_hardware_ready) ? uint8_t{0} : req_mode;
     const bool use_rt = (eff_mode != 0u);
     fg.state_u32[0] = static_cast<uint32_t>(req.frame_index & 0xFFFFFFFFull);
-    fg.state_u32[1] = std::min<uint32_t>(rig.active_count, LightingRig::kMaxLights);
+    fg.state_u32[1] = rig.active_studio_light_count();
     fg.state_u32[2] = static_cast<uint32_t>(req.debug_view);
     fg.state_u32[3] = (use_rt ? 1u : 0u) | (eff_mode == 2u ? 2u : 0u) | (rig.enable_2d_filter_pro ? 4u : 0u) |
                       (rig.enable_paper_warmth ? 8u : 0u) | ((static_cast<uint32_t>(req.aa_mode) & 3u) << 8u) |
                       ((static_cast<uint32_t>(eff_mode) & 3u) << 10u);
+    fg.studio_aux_u32[0] = rig.dominant_key_light_id;
 
     const Mat4Vec3 coaxial_dir = normalize3({eye.x - pivot_ws.x, eye.y - pivot_ws.y + 0.06f, eye.z - pivot_ws.z});
-    for (uint32_t li = 0; li < LightingRig::kMaxLights; ++li) {
-        const auto& sl = rig.lights[li];
-        auto& gl = fg.lights[li];
-        Mat4Vec3 ldir = scene_light_dir_to_light(sl);
-        if (li == 0u && rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) {
-            ldir = coaxial_dir;
-        }
-        gl.pos_or_dir[0] = (sl.type == LightType::Directional) ? ldir.x : sl.direction_or_pos[0];
-        gl.pos_or_dir[1] = (sl.type == LightType::Directional) ? ldir.y : sl.direction_or_pos[1];
-        gl.pos_or_dir[2] = (sl.type == LightType::Directional) ? ldir.z : sl.direction_or_pos[2];
-        gl.pos_or_dir[3] = (sl.type == LightType::Directional) ? 0.0f : 1.0f;
-        gl.color_intensity[0] = sl.color[0] * sl.intensity;
-        gl.color_intensity[1] = sl.color[1] * sl.intensity;
-        gl.color_intensity[2] = sl.color[2] * sl.intensity;
-        gl.color_intensity[3] = sl.cone_angle_rad;
-        gl.direction_radius[0] = ldir.x;
-        gl.direction_radius[1] = ldir.y;
-        gl.direction_radius[2] = ldir.z;
-        gl.direction_radius[3] = sl.angular_radius_rad;
-        gl.role_and_flags[0] = static_cast<uint32_t>(sl.role);
-        gl.role_and_flags[1] = (sl.enabled ? 1u : 0u) | (sl.cast_rt_shadow ? 2u : 0u);
-        gl.role_and_flags[2] = 0xFFu;
-    }
-    const Mat4Vec3 key_for_csm = (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight)
-                                     ? coaxial_dir
-                                     : scene_light_dir_to_light(rig.lights[0]);
+    const Mat4Vec3 key_for_csm =
+        (dom_key != nullptr && (dom_key->coaxial_lock || dom_key->fixture == StudioFixtureProfile::BroadcastRing))
+            ? coaxial_dir
+            : key_for_sky;
     fg.shadow_view_proj[0] = build_csm_ortho_matrix(pivot_ws, key_for_csm);
     return eff_mode;
 }

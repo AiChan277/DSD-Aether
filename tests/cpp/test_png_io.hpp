@@ -210,7 +210,7 @@ struct CanonicalSceneSpec {
         s.name = "three_quarter_left";
         s.camera = renderer::PreviewCamera{0.0f, 1.35f, 0.0f, -0.55f, 0.08f, 1.30f, 0.55f};
         s.rig = renderer::LightingRig::default_three_point();
-        s.rig.lights[0].orbit_azimuth_deg = -45.0f;
+        s.rig.studio_lights[0].orbit_azimuth_deg = -45.0f;
         scenes.push_back(s);
     }
     {
@@ -218,9 +218,9 @@ struct CanonicalSceneSpec {
         s.name = "rim_backlight";
         s.camera = renderer::PreviewCamera{0.0f, 1.32f, 0.0f, 0.25f, 0.04f, 1.35f, 0.55f};
         s.rig = renderer::LightingRig::default_three_point();
-        s.rig.lights[0].intensity = 0.45f;
-        s.rig.lights[2].intensity = 3.10f;
-        s.rig.lights[2].orbit_azimuth_deg = 175.0f;
+        s.rig.studio_lights[0].intensity_ev100 = 0.45f;
+        s.rig.studio_lights[2].intensity_ev100 = 3.10f;
+        s.rig.studio_lights[2].orbit_azimuth_deg = 175.0f;
         scenes.push_back(s);
     }
     {
@@ -236,7 +236,7 @@ struct CanonicalSceneSpec {
         s.name = "hair_shadow_sweep";
         s.camera = renderer::PreviewCamera{0.0f, 1.46f, 0.0f, 0.08f, 0.05f, 0.72f, 0.52f};
         s.rig = renderer::LightingRig::default_three_point();
-        s.rig.lights[0].orbit_azimuth_deg = 60.0f;
+        s.rig.studio_lights[0].orbit_azimuth_deg = 60.0f;
         s.rig.hair_shadow_offset_px = 6.0f;
         s.rig.hair_shadow_strength = 0.65f;
         scenes.push_back(s);

@@ -271,22 +271,6 @@ void InspectorPanel::draw(StudioMode mode, bool on_air, const HardwareInventory&
                     actions.viewport.lighting_dirty = true;
                     settings_dirty = true;
                 }
-                if (draw_property_row(ParamId::RenderLightingFixture, params, undo, fonts, row_actions)) {
-                    const int fix_idx = std::clamp(params.get_int(ParamId::RenderLightingFixture), 0, 5);
-                    renderer::LightingRig tmp = renderer::LightingRig::default_three_point();
-                    renderer::apply_lighting_fixture_preset(tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
-                                                            fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
-                    (void)params.set(ParamId::RenderKeyAzimuthDeg, tmp.lights[0].orbit_azimuth_deg);
-                    (void)params.set(ParamId::RenderKeyElevationDeg, tmp.lights[0].orbit_elevation_deg);
-                    (void)params.set(ParamId::RenderKeyIntensity, tmp.lights[0].intensity);
-                    (void)params.set(ParamId::RenderFillIntensity, tmp.lights[1].intensity);
-                    (void)params.set(ParamId::RenderRimIntensity, tmp.lights[2].intensity);
-                    (void)params.set(ParamId::RenderPhotometricBeamAngleDeg, tmp.photometric_beam_angle_deg);
-                    static constexpr int kLegacyToStudio[6] = {5, 6, 7, 9, 11, 11};
-                    (void)params.set(ParamId::RenderStudioFixture, static_cast<double>(kLegacyToStudio[fix_idx]));
-                    actions.viewport.lighting_dirty = true;
-                    settings_dirty = true;
-                }
                 if (draw_property_row(ParamId::RenderCircadianEnabled, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::RenderCircadianTimezone, params, undo, fonts, row_actions) ||
                     draw_property_row(ParamId::RenderCircadianTimeMinutes, params, undo, fonts, row_actions)) {

@@ -40,12 +40,7 @@ struct GpuSourceVertex {
     float4 smooth_tan;   // xyzw = smooth_tangent[4]
 };
 
-struct GpuLight {
-    float4 pos_or_dir;       // xyz, w=0 directional, w=1 point/spot
-    float4 color_intensity;  // rgb=linear color*intensity, w=cone_angle_rad
-    float4 direction_radius; // xyz=dir, w=penumbra_or_radius_rad
-    uint4 role_and_flags;    // x=role, y=flags (bit0 enabled, bit1 cast_rt), z=layer_mask, w=pad
-};
+// Legacy GpuLight removed (Rev 3.1 Single Lighting Authority: StudioLightGPU[16] only)
 
 struct GpuMaterial {
     float4 lit_color;
@@ -196,7 +191,6 @@ struct GpuFrameGlobals {
     uint64_t _phase3_pad_bda;
     float4 target_uv_scale;
     float4 target_half_uv_scale;
-    GpuLight lights[8];
 };
 
 struct GpuPmxSdef {
@@ -478,26 +472,7 @@ float quantize_cel(float l_eff, float shift, float feather) {
     return smoothstep(shift - feather, shift + feather, l_eff);
 }
 
-// 3-Band Spherical Harmonics L0/L1/L2 ambient built from active studio Key/Fill/Rim rig + sky/ground bounce.
-float3 eval_3band_sh_ambient(float3 n, GpuFrameGlobals fg) {
-    float3 key_col = (fg.state_u32.y > 0u) ? fg.lights[0].color_intensity.rgb : float3(0.95, 0.94, 0.96);
-    float3 fill_col = (fg.state_u32.y > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u)
-                          ? fg.lights[1].color_intensity.rgb
-                          : float3(0.45, 0.56, 0.80);
-    float3 fill_dir = (fg.state_u32.y > 1u)
-                          ? normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(-0.6, 0.25, 0.7))
-                          : float3(-0.6, 0.25, 0.7);
-    float3 sky_col = lerp(float3(0.46, 0.58, 0.86), fill_col * 0.85, 0.55);
-    float3 ground_col = lerp(float3(0.28, 0.24, 0.27), key_col * 0.26, 0.50);
-
-    // Zonal L0 + L1 directional + L2 quadratic up/down envelope
-    float y = n.y;
-    float3 l0 = (sky_col + ground_col) * 0.28 + fill_col * 0.14;
-    float3 l1 = (sky_col - ground_col) * (0.24 * y) + fill_col * (0.34 * saturate(dot(n, fill_dir) * 0.5 + 0.5));
-    float l2_band = 0.08 * (3.0 * y * y - 1.0);
-    float3 l2 = lerp(ground_col, sky_col, saturate(y * 0.5 + 0.5)) * max(l2_band, -0.05);
-    return max(l0 + l1 + l2, float3(0.06, 0.06, 0.08));
-}
+// Legacy eval_3band_sh_ambient removed (Rev 3.1: Hillaire SH9 + ambient_floor only)
 
 float2 ndc_to_screen_uv(float2 ndc) {
     return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
@@ -726,10 +701,7 @@ float3 eval_hillaire_sky_sh9(float3 n_ws, GpuFrameGlobals fg) {
     sh += fg.sky_sh9[6].xyz * (0.315392 * (3.0 * n.y * n.y - 1.0));
     sh += fg.sky_sh9[7].xyz * (1.092548 * n.x * n.z);
     sh += fg.sky_sh9[8].xyz * (0.546274 * (n.x * n.x - n.y * n.y));
-    if (luminance(sh) < 1e-4) {
-        return eval_3band_sh_ambient(n, fg);
-    }
-    return max(sh, float3(0.02, 0.025, 0.035));
+    return max(sh, float3(0.0, 0.0, 0.0));
 }
 
 float eval_studio_gobo(uint gobo_id, float2 p_uv, float blur) {

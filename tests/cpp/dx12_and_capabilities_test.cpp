@@ -241,8 +241,8 @@ TEST_CASE("Task 1: DirectX 12 parity vs Vulkan & strict anti-flip orientation on
     REQUIRE(vk_npr.bind_avatar(avatar.get()).has_value());
 
     aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
-    rig.lights[0].orbit_azimuth_deg = 52.0f;
-    rig.lights[0].orbit_elevation_deg = 32.0f;
+    rig.studio_lights[0].orbit_azimuth_deg = 52.0f;
+    rig.studio_lights[0].orbit_elevation_deg = 32.0f;
     rig.lighting_mode = 1u;
 
     auto cam = aether::renderer::fit_camera_to_avatar(*avatar);
@@ -676,8 +676,8 @@ TEST_CASE("Task 7: Circadian Solar-Time Lighting timezones, 24h continuity & Nig
 
     LightingRig rig = LightingRig::default_three_point();
     apply_circadian_to_rig(golden, rig);
-    CHECK(std::abs(rig.lights[0].intensity - golden.key_intensity) < 1e-4f);
-    CHECK(std::abs(rig.lights[2].intensity - golden.rim_intensity) < 1e-4f);
+    CHECK(std::abs(rig.studio_lights[0].intensity_ev100 - golden.key_intensity) < 1e-4f);
+    CHECK(std::abs(rig.studio_lights[2].intensity_ev100 - golden.rim_intensity) < 1e-4f);
 }
 
 TEST_CASE("Task 8: NPU Safe-Zone Box C^1 tanh compression, pitch glitch clamping & predictive capsule anti-clip",
@@ -1141,9 +1141,10 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
         REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
 
         aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
-        aether::renderer::apply_lighting_fixture_preset(rig, aether::renderer::LightingFixturePreset::ArriSkyPanelS60C);
-        rig.lights[0].orbit_azimuth_deg = 32.0f;
-        rig.lights[0].orbit_elevation_deg = 26.0f;
+        aether::renderer::configure_fixture_defaults(rig.studio_lights[0],
+                                                     aether::renderer::StudioFixtureProfile::ArriSkyPanel);
+        rig.studio_lights[0].orbit_azimuth_deg = 32.0f;
+        rig.studio_lights[0].orbit_elevation_deg = 26.0f;
         const auto cam = make_neck_closeup_camera(*avatar);
 
         // Compute world key light direction L_key (az=32 deg, el=26 deg)
@@ -1393,7 +1394,6 @@ TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gr
 
     // Place 6 huge front softboxes + barn doors + honeycomb directly in front of the avatar
     LightingRig rig = LightingRig::default_three_point();
-    rig.use_studio_lights = true;
     rig.studio_light_count = 6;
     for (uint32_t i = 0; i < 6u; ++i) {
         configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
@@ -1702,10 +1702,8 @@ TEST_CASE("LightingStageView DirectX 12 1:1 Pixel Aspect Ratio Across Wide/Tall 
     REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.lights[0].color[0] = 1.0f;
-    rig.lights[0].color[1] = 1.0f;
-    rig.lights[0].color[2] = 1.0f;
-    rig.lights[0].intensity = 1.8f;
+    rig.studio_lights[0].tint_rgb = {1.0f, 1.0f, 1.0f};
+    rig.studio_lights[0].intensity_ev100 = 1.8f;
     rig.bloom_intensity = 0.0f;
     rig.satsuei.halation_strength = 0.0f;
     rig.satsuei.light_wrap_strength = 0.0f;

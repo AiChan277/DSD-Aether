@@ -54,13 +54,7 @@ static_assert(sizeof(GpuSkinnedVertex) == 96);
 static_assert(AETHER_OFFSETOF(GpuSkinnedVertex, pos_zflat) == 0);
 static_assert(AETHER_OFFSETOF(GpuSkinnedVertex, uv) == 80);
 
-struct alignas(16) GpuLight {
-    float pos_or_dir[4]{};
-    float color_intensity[4]{};
-    float direction_radius[4]{};
-    uint32_t role_and_flags[4]{};
-};
-static_assert(sizeof(GpuLight) == 64);
+// Legacy GpuLight removed (Rev 3.1 Single Lighting Authority: StudioLightGPU[16] only)
 
 struct alignas(16) GpuMaterial {
     float lit_color[4]{1.0f, 1.0f, 1.0f, 1.0f};
@@ -187,11 +181,9 @@ struct alignas(16) GpuFrameGlobals {
     // Active sub-rect UV mapping inside physical render targets: xy = active_size / buf_size, zw = max_valid_uv
     float target_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
     float target_half_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
-    GpuLight lights[8]{};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);
 static_assert(sizeof(GpuFrameGlobals) <= 4096);
-static_assert(AETHER_OFFSETOF(GpuFrameGlobals, lights) + 8 * sizeof(GpuLight) == sizeof(GpuFrameGlobals));
 
 struct alignas(64) GpuReSTIRReservoir {
     float sample_pos_len[4]{};  // xyz = hit point world pos, w = W_sum * p_hat^-1

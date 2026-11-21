@@ -27,7 +27,7 @@ using detail::kPi;
 using detail::Mat4Vec3;
 using detail::mul_mat4;
 using detail::normalize3;
-using detail::scene_light_dir_to_light;
+using detail::studio_light_dir_to_light;
 
 inline void bind_pipeline_checked(VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipeline pso,
                                   const char* tag) noexcept {
@@ -2752,13 +2752,27 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     fg.stage_camera_params[1] = heat_cam.ortho_height;
     fg.stage_camera_params[2] = is_stage ? static_cast<float>(static_cast<uint8_t>(req.stage_diag_mode)) : 0.0f;
     fg.stage_camera_params[3] = (is_stage && req.stage_fast_panning) ? 1.0f : 0.0f;
-    const Mat4Vec3 kd = scene_light_dir_to_light(req.rig->lights[0]);
-    fg.lights[0].pos_or_dir[0] = kd.x;
-    fg.lights[0].pos_or_dir[1] = kd.y;
-    fg.lights[0].pos_or_dir[2] = kd.z;
-    fg.lights[0].color_intensity[0] = req.rig->lights[0].color[0] * req.rig->lights[0].intensity;
-    fg.lights[0].color_intensity[1] = req.rig->lights[0].color[1] * req.rig->lights[0].intensity;
-    fg.lights[0].color_intensity[2] = req.rig->lights[0].color[2] * req.rig->lights[0].intensity;
+    const StudioLightSpec* dom_key = req.rig->dominant_key_light();
+    if (dom_key != nullptr) {
+        const Mat4Vec3 kd = studio_light_dir_to_light(*dom_key, {0.0f, 1.32f, 0.0f}, {eye.x, eye.y, eye.z});
+        fg.photometric_params0[0] = kd.x;
+        fg.photometric_params0[1] = kd.y;
+        fg.photometric_params0[2] = kd.z;
+        fg.photometric_params0[3] = 1.0f;
+        fg.photometric_params1[0] = dom_key->tint_rgb[0] * dom_key->intensity_ev100;
+        fg.photometric_params1[1] = dom_key->tint_rgb[1] * dom_key->intensity_ev100;
+        fg.photometric_params1[2] = dom_key->tint_rgb[2] * dom_key->intensity_ev100;
+        fg.photometric_params1[3] = 1.0f;
+    } else {
+        fg.photometric_params0[0] = 0.42f;
+        fg.photometric_params0[1] = 0.56f;
+        fg.photometric_params0[2] = 0.71f;
+        fg.photometric_params0[3] = 0.0f;
+        fg.photometric_params1[0] = 0.0f;
+        fg.photometric_params1[1] = 0.0f;
+        fg.photometric_params1[2] = 0.0f;
+        fg.photometric_params1[3] = 0.0f;
+    }
     std::memcpy(fg_alloc.mapped, &fg, sizeof(fg));
 
     if (!is_stage) {

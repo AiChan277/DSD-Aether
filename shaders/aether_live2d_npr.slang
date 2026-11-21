@@ -296,69 +296,70 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         }
     }
 
-    uint light_count = fg.state_u32.y;
     uint studio_count = (fg.studio_lights_bda != 0ul) ? min(fg.studio_slots0.w, 16u) : 0u;
-    GpuLight key_l = fg.lights[0];
     float3 key_dir = float3(0.0, 0.0, 1.0);
-    float3 key_col = float3(1.0, 1.0, 1.0);
+    float3 key_col = float3(0.0, 0.0, 0.0);
+    float3 rim_dir_ws = float3(-0.35, 0.45, -0.82);
+    float3 hair_l_dir = float3(0.0, 0.0, 1.0);
+    float3 hair_l_col = float3(0.0, 0.0, 0.0);
     float key_diff_soft = 0.5;
+    float key_area_rad = 0.05;
     bool key_softbox_on = true;
+    bool has_active_key = false;
+    bool found_rim = false;
+    bool found_hair = false;
     uint surface_ch_bit = is_face ? LIGHT_CH_FACE : (is_hair ? LIGHT_CH_HAIR : LIGHT_CH_BODY);
 
+    uint dom_idx = 0xFFFFFFFFu;
     if (studio_count > 0u) {
-        bool found_key = false;
-        key_col = float3(0.0, 0.0, 0.0);
+        uint pref = fg.studio_aux_u32.x;
+        if (pref < studio_count) {
+            StudioLightGPU psl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, pref);
+            if ((psl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u &&
+                (psl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) == 0u) {
+                dom_idx = pref;
+            }
+        }
         for (uint ki = 0u; ki < studio_count; ++ki) {
             StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, ki);
             if ((ksl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u &&
-                (ksl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) == 0u &&
-                !found_key) {
-                float kd, kmod;
-                eval_studio_light_modifiers(ksl, fg, i.world_pos, key_dir, kd, kmod);
-                key_diff_soft = ksl.diffusion_softness;
-                key_softbox_on = (ksl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u;
-                key_col = ksl.color_rgb_linear * ksl.intensity_ev100;
-                found_key = true;
-                break;
+                (ksl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) == 0u) {
+                if (dom_idx == 0xFFFFFFFFu) {
+                    dom_idx = ki;
+                }
+                if (ki == dom_idx && !has_active_key) {
+                    float kd, kmod;
+                    eval_studio_light_modifiers(ksl, fg, i.world_pos, key_dir, kd, kmod);
+                    key_diff_soft = ksl.diffusion_softness;
+                    key_softbox_on = (ksl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u;
+                    key_col = ksl.color_rgb_linear * ksl.intensity_ev100;
+                    key_area_rad = clamp(atan2(0.5 * max(ksl.size_xy_radius.x, ksl.size_xy_radius.y), max(kd, 0.5)),
+                                         0.005, 0.28);
+                    has_active_key = true;
+                    rim_dir_ws = key_dir;
+                    hair_l_dir = key_dir;
+                    hair_l_col = key_col;
+                }
             }
         }
-    } else if (light_count > 0u && (key_l.role_and_flags.y & 1u) != 0u) {
-        key_dir = (key_l.pos_or_dir.w > 0.5)
-                      ? normalize_safe(key_l.pos_or_dir.xyz - i.world_pos, float3(0.0, 0.0, 1.0))
-                      : normalize_safe(key_l.pos_or_dir.xyz, float3(0.0, 0.0, 1.0));
-        key_col = key_l.color_intensity.rgb;
     }
 
     // Photometric fixture cone & 4-leaf barn-door shaping centered at avatar anchor
     float fix_id = fg.photometric_params0.x;
     float flux_norm = fg.photometric_params1.w;
     float beam_atten = 1.0;
-    if (studio_count > 0u) {
-        StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, 0u);
-        if ((ksl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u &&
-            (ksl.light_channel_mask & surface_ch_bit) != 0u) {
+    if (has_active_key && dom_idx < studio_count) {
+        StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, dom_idx);
+        if ((ksl.light_channel_mask & surface_ch_bit) != 0u) {
             float3 d_tmp;
             float dist_tmp, mod_tmp;
             eval_studio_light_modifiers(ksl, fg, i.world_pos, d_tmp, dist_tmp, mod_tmp);
             beam_atten = lerp(0.18, 1.0, clamp(mod_tmp, 0.0, 1.35));
-        } else if ((ksl.light_channel_mask & surface_ch_bit) == 0u) {
+        } else {
             beam_atten = 0.0;
         }
-    } else if (fg.photometric_params0.y > -0.5) {
-        float3 anchor_ws = mul_col(fg.inv_view, float4(fg.head_pivot_view_and_flatness.xyz, 1.0)).xyz;
-        float3 spot_origin = anchor_ws + key_dir * 1.80;
-        float3 to_px = normalize_safe(i.world_pos - spot_origin, -key_dir);
-        float radial = smoothstep(fg.photometric_params0.z, fg.photometric_params0.y, dot(to_px, -key_dir));
-        float bd_soft = fg.photometric_params1.x;
-        if (bd_soft > 0.01) {
-            float3 spot_r = normalize_safe(cross(float3(0.0, 1.0, 0.0), key_dir), float3(1.0, 0.0, 0.0));
-            float3 spot_u = normalize_safe(cross(key_dir, spot_r), float3(0.0, 1.0, 0.0));
-            float3 rel = i.world_pos - anchor_ws;
-            float bd_x = 1.0 - smoothstep(0.45, 0.90, abs(dot(rel, spot_r)));
-            float bd_y = 1.0 - smoothstep(0.60, 1.15, abs(dot(rel, spot_u)));
-            radial *= lerp(1.0, bd_x * bd_y, bd_soft);
-        }
-        beam_atten = lerp(0.18, 1.0, radial);
+    } else {
+        beam_atten = 0.0;
     }
 
     // Single-Pass Studio Multi-Light Accumulation (up to 16 StudioLightGPU via LTC + Modifiers)
@@ -367,79 +368,83 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float3 accent_spec_acc = float3(0.0, 0.0, 0.0);
     float3 multi_catchlight_acc = float3(0.0, 0.0, 0.0);
 
-    if (studio_count > 0u) {
-        for (uint li = 0u; li < studio_count; ++li) {
-            StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, li);
-            bool enabled = (sl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u;
-            bool is_passive = (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u;
-            if (!enabled || is_passive || (sl.light_channel_mask & surface_ch_bit) == 0u) {
-                continue;
+    for (uint li = 0u; li < studio_count; ++li) {
+        StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, li);
+        bool enabled = (sl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u;
+        bool is_passive = (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u;
+        if (!enabled || is_passive) {
+            continue;
+        }
+        float3 ldir;
+        float ldist, lmod;
+        eval_studio_light_modifiers(sl, fg, i.world_pos, ldir, ldist, lmod);
+        if (li != dom_idx) {
+            if (!found_rim && dot(ldir, key_dir) < 0.15) {
+                rim_dir_ws = ldir;
+                found_rim = true;
             }
-            float3 ldir;
-            float ldist, lmod;
-            eval_studio_light_modifiers(sl, fg, i.world_pos, ldir, ldist, lmod);
-            if (lmod <= 0.002) {
-                continue;
-            }
-            float diff_ltc = 0.0;
-            float spec_ltc = 0.0;
-            float mat_rough = is_eye_iris ? 0.04 : (is_hair ? 0.24 : (is_skin_pixel ? 0.65 : 0.42));
-            eval_ltc_studio_radiance(sl, fg, i.world_pos, n_lit, view_v, mat_rough, diff_ltc, spec_ltc);
-
-            float ndl_s = saturate(dot(n_lit, ldir));
-            float geom_term = is_skin_pixel ? 1.0 : disney_shadow_terminator(true_n, n_lit, ldir);
-            float e_area = lerp(ndl_s, max(diff_ltc * 1.45, ndl_s * 0.65),
-                                ((sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u) ? 0.72 : 0.22);
-            float3 l_energy = sl.color_rgb_linear * (sl.intensity_ev100 * lmod * geom_term);
-
-            if (li == 0u) {
-                float key_w = is_skin_pixel ? lerp(0.92, 1.0, saturate(e_area)) : max(e_area, 0.35);
-                primary_diff_acc += l_energy * key_w;
-            } else {
-                accent_diff_acc += l_energy * e_area * 0.55;
-                if (!is_skin_pixel && !is_eye_iris) {
-                    accent_spec_acc += l_energy * spec_ltc * (is_hair ? 0.35 : 0.22);
-                }
-            }
-            if (is_eye_iris && ((sl.light_channel_mask & LIGHT_CH_CATCHLIGHT) != 0u) && sl.catchlight_weight > 0.001) {
-                float3 eye_c = (dot(i.world_pos - fg.eye_left_center_r.xyz, i.world_pos - fg.eye_left_center_r.xyz) <=
-                                dot(i.world_pos - fg.eye_right_center_r.xyz, i.world_pos - fg.eye_right_center_r.xyz))
-                                   ? fg.eye_left_center_r.xyz
-                                   : fg.eye_right_center_r.xyz;
-                float3 n_radial = normalize_safe(i.world_pos - eye_c, true_n);
-                float3 n_cornea = normalize_safe(lerp(true_n, n_radial, 0.72), true_n);
-                float c_diff, c_spec;
-                float c_rough = ((sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u) ? 0.055 : 0.025;
-                eval_ltc_studio_radiance(sl, fg, i.world_pos, n_cornea, view_v, c_rough, c_diff, c_spec);
-                multi_catchlight_acc += sl.color_rgb_linear * (c_spec * sl.intensity_ev100 * sl.catchlight_weight * 0.65);
+            if ((sl.light_channel_mask & LIGHT_CH_HAIR) != 0u) {
+                hair_l_dir = ldir;
+                hair_l_col = sl.color_rgb_linear * sl.intensity_ev100;
+                found_hair = true;
             }
         }
-    }
+        if ((sl.light_channel_mask & surface_ch_bit) == 0u || lmod <= 0.002) {
+            continue;
+        }
+        float diff_ltc = 0.0;
+        float spec_ltc = 0.0;
+        float mat_rough = is_eye_iris ? 0.04 : (is_hair ? 0.24 : (is_skin_pixel ? 0.65 : 0.42));
+        eval_ltc_studio_radiance(sl, fg, i.world_pos, n_lit, view_v, mat_rough, diff_ltc, spec_ltc);
 
-    // Hillaire (2020) SH9 Atmosphere + 3-band ambient + Pre-Cel GI Color Bleed
-    float3 sh_ambient = eval_hillaire_sky_sh9(n_lit, fg);
-    float3 fill_indirect = float3(0.0, 0.0, 0.0);
-    if (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u) {
-        float3 fill_dir = normalize_safe(fg.lights[1].pos_or_dir.xyz, float3(0.0, 1.0, 0.0));
-        float fill_w = saturate(dot(n_lit, fill_dir) * 0.5 + 0.5);
-        fill_indirect = fg.lights[1].color_intensity.rgb * (fill_w * 0.25);
+        float ndl_s = saturate(dot(n_lit, ldir));
+        float geom_term = is_skin_pixel ? 1.0 : disney_shadow_terminator(true_n, n_lit, ldir);
+        float e_area = lerp(ndl_s, max(diff_ltc * 1.45, ndl_s * 0.65),
+                            ((sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u) ? 0.72 : 0.22);
+        float3 l_energy = sl.color_rgb_linear * (sl.intensity_ev100 * lmod * geom_term);
+
+        if (li == dom_idx) {
+            float key_w = is_skin_pixel ? lerp(0.92, 1.0, saturate(e_area)) : max(e_area, 0.35);
+            primary_diff_acc += l_energy * key_w;
+        } else {
+            accent_diff_acc += l_energy * e_area * 0.55;
+            if (!is_skin_pixel && !is_eye_iris) {
+                accent_spec_acc += l_energy * spec_ltc * (is_hair ? 0.35 : 0.22);
+            }
+        }
+        if (is_eye_iris && ((sl.light_channel_mask & LIGHT_CH_CATCHLIGHT) != 0u) && sl.catchlight_weight > 0.001) {
+            float3 eye_c = (dot(i.world_pos - fg.eye_left_center_r.xyz, i.world_pos - fg.eye_left_center_r.xyz) <=
+                            dot(i.world_pos - fg.eye_right_center_r.xyz, i.world_pos - fg.eye_right_center_r.xyz))
+                               ? fg.eye_left_center_r.xyz
+                               : fg.eye_right_center_r.xyz;
+            float3 n_radial = normalize_safe(i.world_pos - eye_c, true_n);
+            float3 n_cornea = normalize_safe(lerp(true_n, n_radial, 0.72), true_n);
+            float c_diff, c_spec;
+            float c_rough = ((sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u) ? 0.055 : 0.025;
+            eval_ltc_studio_radiance(sl, fg, i.world_pos, n_cornea, view_v, c_rough, c_diff, c_spec);
+            multi_catchlight_acc += sl.color_rgb_linear * (c_spec * sl.intensity_ev100 * sl.catchlight_weight * 0.65);
+        }
     }
+    (void)found_hair;
+
+    // Hillaire (2020) SH9 Atmosphere + Environment Sky/Ambient Floor + Pre-Cel GI Color Bleed
+    float3 sh_ambient = eval_hillaire_sky_sh9(n_lit, fg);
     float3 cie_sky = lerp(float3(0.75, 0.84, 0.96), float3(0.45, 0.72, 1.00), saturate(shade_n.y * 0.65 + 0.35)) *
                      (0.24 * fg.photometric_params1.y);
     float3 earth_bounce = float3(0.56, 0.46, 0.38) * saturate(-shade_n.y * 0.55 + 0.20) *
                           (0.18 * fg.photometric_params1.z);
     float3 e_bounce = bounce_rgb * max(mat.hair_specular_params.w, 0.35);
-    float3 indirect = sh_ambient * ((lighting_mode == 0u) ? 0.44 : 0.30) + fill_indirect + cie_sky + earth_bounce +
+    float3 indirect = sh_ambient * ((lighting_mode == 0u) ? 0.44 : 0.30) + cie_sky + earth_bounce +
                       e_bounce * 0.65 + accent_diff_acc * 0.45;
     if (is_skin_pixel && lighting_mode >= 1u) {
-        indirect = max(indirect, sh_ambient * 0.36 + fill_indirect + cie_sky);
+        indirect = max(indirect, sh_ambient * 0.36 + cie_sky);
     }
 
     float gi_luma = luminance(e_bounce);
     float l_gi_lift = k_gi * gi_luma * 0.45;
     float ndl_unshadowed = dot(n_lit, key_dir);
     float extra_feather = 0.02 * crease_w * crease_disguise + (key_softbox_on ? 0.025 * key_diff_soft : 0.0);
-    float rt_soft = clamp((key_softbox_on ? 0.16 : 0.06) + fg.lights[0].direction_radius.w * 2.1, 0.06, 0.44);
+    float rt_soft = clamp((key_softbox_on ? 0.16 : 0.06) + key_area_rad * 1.1, 0.06, 0.44);
 
     float cel_lit = 1.0;
     float deep_shadow = 0.0;
@@ -567,7 +572,7 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     }
 
     // Energy-conserving COVER Corp Soft-Knee Multi-Light Compression + OKLab Secondary Accent Hue Protection
-    float3 primary_base = (studio_count > 0u) ? primary_diff_acc : (key_col * flux_norm);
+    float3 primary_base = primary_diff_acc;
     float3 raw_lit = primary_base + accent_diff_acc + indirect * 0.14;
     float3 lit_irradiance = compress_soft_knee_diffuse(raw_lit, primary_base, accent_diff_acc);
     float3 shade_irradiance = min(key_col * (0.28 * flux_norm) + indirect * 0.52, float3(0.68, 0.70, 0.76));
@@ -584,9 +589,6 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
                          lit_rgba.rgb * shadow_fringe_sss;
 
     // Silhouette 2D stepped rim light (restrained inside back hair & !is_front_face interior faces)
-    float3 rim_dir_ws = (light_count > 2u && (fg.lights[2].role_and_flags.y & 1u) != 0u)
-                            ? normalize_safe(fg.lights[2].pos_or_dir.xyz, key_dir)
-                            : key_dir;
     float3 rim_dir_vs = normalize_safe(mul_col3(fg.view, rim_dir_ws), float3(0.4, 0.6, 0.2));
     float2 light_scr = normalize_safe(float3(rim_dir_vs.x, -rim_dir_vs.y, 0.0), float3(1.0, 0.0, 0.0)).xy;
     float depth_edge_rim = 0.0;
@@ -611,7 +613,7 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float3 rim_col_base = lerp(mat.rim_color_power.rgb, key_col * 0.28, 0.65);
     float3 rim_term = ((rim_col_base * (rim_step * rim_occ * rim_light_dir * rim_step_strength * 0.65)) +
                        (mat.rim_color_power.rgb * (fresnel_soft * rim_occ * 0.22))) *
-                      backface_atten * dark_albedo_atten;
+                      backface_atten * dark_albedo_atten * (has_active_key ? 1.0 : 0.0);
 
     // Matcap term
     float3 matcap_term = float3(0.0, 0.0, 0.0);
@@ -700,13 +702,6 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         float3 hair_vel = clamp(fg.hair_velocity_ws.xyz, float3(-1.5, -1.5, -1.5), float3(1.5, 1.5, 1.5));
         float3 t_shift1 = normalize_safe(t_crown_tip + true_n * strand_shift + hair_vel * 0.18, t_crown_tip);
         float3 t_shift2 = normalize_safe(t_crown_tip + true_n * (strand_shift - 0.14) + hair_vel * 0.24, t_crown_tip);
-
-        float3 hair_l_dir = (light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u)
-                                ? normalize_safe(fg.lights[3].pos_or_dir.xyz, key_dir)
-                                : key_dir;
-        float3 hair_l_col = (light_count > 3u && (fg.lights[3].role_and_flags.y & 1u) != 0u)
-                                ? fg.lights[3].color_intensity.rgb
-                                : key_col;
 
         float3 h1 = normalize_safe(hair_l_dir + view_v, view_v);
         float3 h2 = normalize_safe(rim_dir_ws + view_v, view_v);
@@ -802,8 +797,8 @@ float4 ps_orb(NprVsOut i) : SV_Target0 {
 
     float3 n = float3(q.x, q.y, sqrt(max(0.0, 1.0 - q2)));
     GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
-    float3 key_dir = normalize_safe(fg.lights[0].pos_or_dir.xyz, float3(0.42, 0.56, 0.71));
-    float3 key_col = fg.lights[0].color_intensity.rgb;
+    float3 key_dir = normalize_safe(fg.photometric_params0.xyz, float3(0.42, 0.56, 0.71));
+    float3 key_col = fg.photometric_params1.xyz;
 
     float cel = smoothstep(-0.08, 0.12, dot(n, key_dir));
     float3 col = lerp(float3(0.16, 0.19, 0.26), float3(0.76, 0.80, 0.88) * clamp(key_col, 0.2, 1.4), cel);

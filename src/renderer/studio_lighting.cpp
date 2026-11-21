@@ -83,23 +83,6 @@ inline void set4(float (&dst)[4], float a, float b, float c, float d) noexcept {
     dst[3] = d;
 }
 
-[[nodiscard]] StudioFixtureProfile legacy_to_studio_fixture(LightingFixturePreset preset) noexcept {
-    switch (preset) {
-    case LightingFixturePreset::ArriSkyPanelS60C:
-        return StudioFixtureProfile::ArriSkyPanel;
-    case LightingFixturePreset::ArriFresnelT2Orbiter:
-        return StudioFixtureProfile::ArriFresnel;
-    case LightingFixturePreset::DedolightDled7:
-        return StudioFixtureProfile::DedolightSpot;
-    case LightingFixturePreset::BroadcastRingLight:
-        return StudioFixtureProfile::BroadcastRing;
-    case LightingFixturePreset::NaturalSunlightCieSky:
-    case LightingFixturePreset::NaturalWindowPortal:
-        return StudioFixtureProfile::NaturalSunCieSky;
-    }
-    return StudioFixtureProfile::RectSoftbox;
-}
-
 } // namespace
 
 void configure_fixture_defaults(StudioLightSpec& spec, StudioFixtureProfile profile) noexcept {
@@ -314,84 +297,6 @@ void bake_studio_light_world_pose(StudioLightSpec& spec, const std::array<float,
     spec.use_orbit_angles = false;
 }
 
-namespace {
-
-uint32_t synthesize_legacy_studio_lights(const LightingRig& rig, const std::array<float, 3>& pivot_ws,
-                                         std::array<StudioLightSpec, kMaxStudioLights>& out_specs) noexcept {
-    const uint32_t n = std::min<uint32_t>(rig.active_count, LightingRig::kMaxLights);
-    const StudioFixtureProfile key_profile =
-        (rig.key_studio_profile_override >= 0 && rig.key_studio_profile_override <= 11)
-            ? static_cast<StudioFixtureProfile>(rig.key_studio_profile_override)
-            : legacy_to_studio_fixture(rig.fixture_preset);
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < n && count < kMaxStudioLights; ++i) {
-        const auto& sl = rig.lights[i];
-        StudioLightSpec spec{};
-        spec.enabled = sl.enabled;
-        spec.cast_shadow = sl.cast_rt_shadow && (sl.role != LightRole::Rim && sl.role != LightRole::HairOrbit);
-        spec.use_orbit_angles = sl.use_2d_orbit_angle;
-        spec.orbit_azimuth_deg = sl.orbit_azimuth_deg;
-        spec.orbit_elevation_deg = sl.orbit_elevation_deg;
-        spec.orbit_distance_m = 2.15f;
-        spec.position_ws = {sl.direction_or_pos[0], sl.direction_or_pos[1], sl.direction_or_pos[2]};
-        spec.target_ws = pivot_ws;
-        spec.intensity_ev100 = sl.intensity;
-        spec.kelvin_cct = 5600.0f;
-        spec.tint_rgb = {sl.color[0], sl.color[1], sl.color[2]};
-
-        if (i == 0u) {
-            set_name_buf(spec.name, "Key Light");
-            configure_fixture_defaults(spec, key_profile);
-            spec.softbox_enabled = rig.key_softbox_enabled;
-            spec.grid_enabled = rig.key_grid_enabled;
-            spec.grid_angle_deg = rig.key_grid_angle_deg;
-            spec.barn_doors_enabled = rig.key_barn_doors_enabled;
-            spec.barn_door_cuts_deg = rig.key_barn_door_cuts_deg;
-            spec.diffusion_enabled = rig.key_diffusion_enabled;
-            spec.diffusion_density = rig.key_diffusion_density;
-            spec.gel_enabled = rig.key_gel_enabled;
-            spec.gel = rig.key_gel;
-            spec.gobo = rig.key_gobo;
-            if (key_profile == StudioFixtureProfile::ArriFresnel ||
-                key_profile == StudioFixtureProfile::DedolightSpot ||
-                key_profile == StudioFixtureProfile::EllipsoidalLeko) {
-                const float beam = std::clamp(rig.photometric_beam_angle_deg, 8.0f, 55.0f);
-                spec.spot_outer_deg = beam;
-                spec.spot_inner_deg = beam * ((key_profile == StudioFixtureProfile::DedolightSpot) ? 0.55f : 0.65f);
-            }
-            if (rig.fixture_preset == LightingFixturePreset::NaturalWindowPortal) {
-                spec.window_portal = true;
-                spec.width_or_outer_m = 1.20f;
-                spec.height_or_inner_m = 1.80f;
-            }
-            if (rig.fixture_preset == LightingFixturePreset::BroadcastRingLight) {
-                spec.coaxial_lock = true;
-            }
-        } else if (sl.role == LightRole::Fill) {
-            set_name_buf(spec.name, "Soft Fill");
-            configure_fixture_defaults(spec, StudioFixtureProfile::LanternChinaBall);
-            spec.catchlight_weight = 0.25f;
-        } else if (sl.role == LightRole::Rim) {
-            set_name_buf(spec.name, "Rim Light");
-            configure_fixture_defaults(spec, StudioFixtureProfile::Stripbox);
-            spec.catchlight_weight = 0.40f;
-        } else if (sl.role == LightRole::HairOrbit) {
-            set_name_buf(spec.name, "Hair Orbit");
-            configure_fixture_defaults(spec, StudioFixtureProfile::Stripbox);
-            spec.catchlight_weight = 0.35f;
-        } else {
-            char label[40]{};
-            std::snprintf(label, sizeof(label), "Light %u", i + 1u);
-            set_name_buf(spec.name, label);
-            configure_fixture_defaults(spec, StudioFixtureProfile::RectSoftbox);
-        }
-        out_specs[count++] = spec;
-    }
-    return count;
-}
-
-} // namespace
-
 uint32_t pack_studio_lights_gpu(const LightingRig& rig, const std::array<float, 3>& pivot_ws,
                                 const std::array<float, 3>& eye_pos_ws,
                                 std::array<StudioLightGPU, kMaxStudioLights>& out_gpu) noexcept {
@@ -487,7 +392,7 @@ uint32_t pack_studio_lights_gpu(const LightingRig& rig, const std::array<float, 
     };
 
     uint32_t count = 0;
-    if (rig.use_studio_lights && rig.studio_light_count > 0u) {
+    if (rig.studio_light_count > 0u) {
         const uint32_t n = std::min(rig.studio_light_count, kMaxStudioLights);
         bool any_solo = false;
         for (uint32_t i = 0; i < n; ++i) {
@@ -505,14 +410,7 @@ uint32_t pack_studio_lights_gpu(const LightingRig& rig, const std::array<float, 
         }
         return count;
     }
-
-    // Legacy 8-light LightingRig bridge: synthesize StudioLightSpec per active light cleanly
-    std::array<StudioLightSpec, kMaxStudioLights> synthesized{};
-    const uint32_t synth_count = synthesize_legacy_studio_lights(rig, pivot_ws, synthesized);
-    for (uint32_t i = 0; i < synth_count && count < kMaxStudioLights; ++i) {
-        pack_one(synthesized[i], count++);
-    }
-    return count;
+    return 0u;
 }
 
 void generate_heitz_ltc_luts(std::array<float, kLtcLutSize * kLtcLutSize * 4>& out_inv_m,
@@ -741,12 +639,17 @@ const char* studio_gobo_name(StudioGoboPattern gobo) noexcept {
 }
 
 void ensure_studio_lights_initialized(LightingRig& rig, const std::array<float, 3>& pivot_ws) noexcept {
-    if (rig.use_studio_lights && rig.studio_light_count > 0u) {
+    if (rig.studio_light_count > 0u) {
         rig.studio_light_count = std::min(rig.studio_light_count, kMaxStudioLights);
         return;
     }
-    rig.studio_light_count = synthesize_legacy_studio_lights(rig, pivot_ws, rig.studio_lights);
-    rig.use_studio_lights = true;
+    LightingRig def = LightingRig::default_three_point();
+    rig.studio_lights = def.studio_lights;
+    rig.studio_light_count = def.studio_light_count;
+    rig.dominant_key_light_id = def.dominant_key_light_id;
+    for (uint32_t i = 0; i < rig.studio_light_count; ++i) {
+        rig.studio_lights[i].target_ws = pivot_ws;
+    }
 }
 
 int add_studio_light(LightingRig& rig, StudioFixtureProfile profile, const std::array<float, 3>& pivot_ws) noexcept {
@@ -803,9 +706,6 @@ int add_passive_flag(LightingRig& rig, PassiveFlagMode mode, const std::array<fl
 }
 
 int duplicate_studio_light(LightingRig& rig, uint32_t index) noexcept {
-    if (!rig.use_studio_lights) {
-        ensure_studio_lights_initialized(rig);
-    }
     if (index >= rig.studio_light_count || rig.studio_light_count >= kMaxStudioLights) {
         return -1;
     }
@@ -821,10 +721,7 @@ int duplicate_studio_light(LightingRig& rig, uint32_t index) noexcept {
 }
 
 bool remove_studio_light(LightingRig& rig, uint32_t index) noexcept {
-    if (!rig.use_studio_lights) {
-        ensure_studio_lights_initialized(rig);
-    }
-    if (index >= rig.studio_light_count || rig.studio_light_count <= 1u) {
+    if (index >= rig.studio_light_count || rig.studio_light_count == 0u) {
         return false;
     }
     for (uint32_t i = index; i + 1u < rig.studio_light_count; ++i) {
@@ -832,6 +729,13 @@ bool remove_studio_light(LightingRig& rig, uint32_t index) noexcept {
     }
     rig.studio_lights[rig.studio_light_count - 1u] = StudioLightSpec{};
     --rig.studio_light_count;
+    if (rig.studio_light_count == 0u) {
+        rig.dominant_key_light_id = 0u;
+    } else if (rig.dominant_key_light_id == index) {
+        rig.dominant_key_light_id = 0u;
+    } else if (rig.dominant_key_light_id > index) {
+        --rig.dominant_key_light_id;
+    }
     return true;
 }
 
@@ -853,7 +757,6 @@ const char* studio_rig_preset_name(StudioRigPresetId id) noexcept {
 
 void apply_studio_rig_preset(LightingRig& rig, StudioRigPresetId id, const std::array<float, 3>& pivot_ws) noexcept {
     rig.studio_lights = {};
-    rig.use_studio_lights = true;
 
     auto init_slot = [&](uint32_t i, const char* name, StudioFixtureProfile prof, float az, float el, float dist,
                          float ev, float cct, bool shadow) -> StudioLightSpec& {
@@ -1141,7 +1044,6 @@ bool load_lighting_rigs_json(const std::filesystem::path& path,
             }
             StudioRigPresetRecord rec{};
             rec.rig = LightingRig::default_three_point();
-            rec.rig.use_studio_lights = true;
             set_preset_name_buf(rec.name, pj.value("name", std::string("Untitled Rig")).c_str());
             rec.rig.lighting_mode = static_cast<uint8_t>(std::clamp(pj.value("lighting_mode", 1), 0, 2));
             rec.rig.global_live2d_flatness = pj.value("global_live2d_flatness", rec.rig.global_live2d_flatness);
@@ -1387,15 +1289,8 @@ int pick_stage_studio_light(const LightingRig& rig, const std::array<float, 3>& 
                             const std::array<float, 3>& eye_pos_ws, const PreviewCamera& stage_cam, float u_01,
                             float v_01, float aspect, float* out_hit_t) noexcept {
     const StagePickRay ray = compute_stage_pick_ray(stage_cam, u_01, v_01, aspect);
-    uint32_t count = rig.studio_light_count;
-    std::array<StudioLightSpec, kMaxStudioLights> scratch{};
+    const uint32_t count = std::min(rig.studio_light_count, kMaxStudioLights);
     const StudioLightSpec* list = rig.studio_lights.data();
-    if (!rig.use_studio_lights || count == 0u) {
-        count = synthesize_legacy_studio_lights(rig, pivot_ws, scratch);
-        list = scratch.data();
-    } else {
-        count = std::min(count, kMaxStudioLights);
-    }
 
     int best_idx = -1;
     float best_t = 1e9f;
@@ -1528,15 +1423,8 @@ uint32_t build_stage_schematic_overlay(const LightingRig& rig, const StageSchema
     }
 
     // 3. Pure Schematic Studio Light & Modifier Geometry
-    uint32_t light_count = rig.studio_light_count;
-    std::array<StudioLightSpec, kMaxStudioLights> scratch{};
+    const uint32_t light_count = std::min(rig.studio_light_count, kMaxStudioLights);
     const StudioLightSpec* list = rig.studio_lights.data();
-    if (!rig.use_studio_lights || light_count == 0u) {
-        light_count = synthesize_legacy_studio_lights(rig, params.pivot_ws, scratch);
-        list = scratch.data();
-    } else {
-        light_count = std::min(light_count, kMaxStudioLights);
-    }
 
     bool any_solo = false;
     for (uint32_t i = 0; i < light_count; ++i) {

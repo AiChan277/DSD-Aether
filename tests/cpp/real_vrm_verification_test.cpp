@@ -418,9 +418,9 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
             if (wuwa_nextgen) {
                 rig.cel_band_sharpness = 0.018f;
                 rig.rim_step_strength = 0.65f;
-                rig.lights[0].orbit_azimuth_deg = 36.0f;
-                rig.lights[0].orbit_elevation_deg = 26.0f;
-                rig.lights[0].intensity = 1.08f;
+                rig.studio_lights[0].orbit_azimuth_deg = 36.0f;
+                rig.studio_lights[0].orbit_elevation_deg = 26.0f;
+                rig.studio_lights[0].intensity_ev100 = 1.08f;
             } else if (shinkai_golden) {
                 rig.indirect_bleed_strength = 1.05f;
                 rig.bloom_intensity = 0.14f;
@@ -484,8 +484,8 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
                                 float az_deg = 65.0f) {
             rig = base_rig;
             rig.lighting_mode = lm;
-            rig.lights[0].orbit_azimuth_deg = az_deg;
-            rig.lights[0].orbit_elevation_deg = 30.0f;
+            rig.studio_lights[0].orbit_azimuth_deg = az_deg;
+            rig.studio_lights[0].orbit_elevation_deg = 30.0f;
             const int warmup = (lm >= 2u) ? 8 : 4;
             for (int w = 0; w < warmup; ++w) {
                 aether::renderer::FrameRenderRequest req{};
@@ -2319,7 +2319,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
     };
 
     // Scan visible pixels to find exact representatives for each requested anatomical/garment landmark
-    const auto key_dir_s = aether::renderer::detail::scene_light_dir_to_light(rig.lights[0]);
+    const auto key_dir_s = aether::renderer::detail::studio_light_dir_to_light(
+        rig.studio_lights[0], {0.0f, 1.32f, 0.0f}, {0.0f, 1.45f, 2.0f});
     std::vector<ProbePoint> probes;
     auto find_best = [&](const char* label, auto pred, auto score_fn) {
         ProbePoint best{};
@@ -2638,10 +2639,20 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
         std::printf("\n=== PHASE 2 PHOTOMETRIC FIXTURES (6 profiles @ 1.0 EV) ===\n");
         std::vector<float> fix_lin;
         std::vector<uint8_t> fix_u8;
+        static constexpr aether::renderer::StudioFixtureProfile kProfiles[6] = {
+            aether::renderer::StudioFixtureProfile::ArriSkyPanel,
+            aether::renderer::StudioFixtureProfile::ArriFresnel,
+            aether::renderer::StudioFixtureProfile::DedolightSpot,
+            aether::renderer::StudioFixtureProfile::BroadcastRing,
+            aether::renderer::StudioFixtureProfile::NaturalSunCieSky,
+            aether::renderer::StudioFixtureProfile::RectSoftbox,
+        };
         for (int fi = 0; fi < 6; ++fi) {
             auto frig = rig;
-            aether::renderer::apply_lighting_fixture_preset(
-                frig, static_cast<aether::renderer::LightingFixturePreset>(fi));
+            aether::renderer::configure_fixture_defaults(frig.studio_lights[0], kProfiles[fi]);
+            if (fi == 5) {
+                frig.studio_lights[0].window_portal = true;
+            }
             render_probe_pass(frig, aether::renderer::ShadingDebugView::Final, 6, fix_lin, &fix_u8);
             const auto st = analyze_rgba8(fix_u8, kW, kH);
             const size_t c_idx = (static_cast<size_t>(probes[0].py) * kW + static_cast<size_t>(probes[0].px)) * 4ULL;

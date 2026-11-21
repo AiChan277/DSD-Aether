@@ -8,48 +8,18 @@
 
 namespace aether::renderer {
 
-enum class LightingFixturePreset : uint8_t {
-    ArriSkyPanelS60C = 0,      // 64.5cm x 30.0cm soft diffusion area panel, rectangular eye catchlight
-    ArriFresnelT2Orbiter = 1,  // 12-55 deg focusable Fresnel cone + 4-leaf barn-doors, circular catchlight
-    DedolightDled7 = 2,        // Tight 8-25 deg precision rim/hair/accent spot, pinpoint catchlight
-    BroadcastRingLight = 3,    // Camera-coaxial annular emitter, soft front fill, ring eye catchlight
-    NaturalSunlightCieSky = 4, // 0.53 deg parallel solar beam + analytical CIE sky & ground bounce
-    NaturalWindowPortal = 5,   // Lateral 1.2m x 1.8m window area portal, tall soft window catchlight
-};
-
-enum class LightRole : uint8_t {
-    Key = 0,
-    Fill = 1,
-    Rim = 2,
-    HairOrbit = 3,
-};
-
-enum class LightType : uint8_t {
-    Directional = 0,
-    Point = 1,
-    Spot = 2,
-};
-
-struct SceneLight {
-    LightRole role{LightRole::Key};
-    LightType type{LightType::Directional};
-    bool enabled{true};
-    bool cast_rt_shadow{true};
-    bool use_2d_orbit_angle{true};
-    float direction_or_pos[3]{0.42f, 0.56f, 0.71f};
-    float color[3]{1.0f, 0.97f, 0.94f};
-    float intensity{1.85f};
-    float angular_radius_rad{0.06f};
-    float cone_angle_rad{0.75f};
-    float orbit_azimuth_deg{32.0f};
-    float orbit_elevation_deg{28.0f};
+/** VRM-to-MMD 2.5D Visual Parity parameters (Rev 3.1 §8.3, serialized in .alfx). */
+struct VrmMmdParityParams {
+    bool auto_toon_harmonizer_enabled{true};
+    float vrm_cel_crispness_boost{0.85f};
+    float vrm_shadow_chroma_lift{0.22f};
+    bool vrm_auto_edge_scale_enabled{true};
+    float vrm_hair_angel_ring_boost{0.75f};
+    bool pmx_alpha_bleed_padding{true};
+    bool pmx_strict_material_draw_order{true};
 };
 
 struct LightingRig {
-    static constexpr uint32_t kMaxLights = 8;
-
-    std::array<SceneLight, kMaxLights> lights{};
-    uint32_t active_count{4};
 
     // Spec §10 & 2D Hand-Drawn Live2D Illustration look parameters
     float global_live2d_flatness{0.75f};
@@ -76,10 +46,8 @@ struct LightingRig {
     uint32_t tone_mode{1}; // 0 = Standard clamp, 1 = Soft highlights (AgX shoulder)
     float bg_rgba[4]{0.0f, 0.0f, 0.0f, 0.0f};
 
-    // 3-tier lighting, pre-quantized GI, Filter Pro, circadian, photometric fixtures & [TESTING] crease disguise
+    // 3-tier lighting, pre-quantized GI, Filter Pro, circadian, catchlights & [TESTING] crease disguise
     uint8_t lighting_mode{1}; // 0 = Traditional (Raster+SDF), 1 = Hybrid RT, 2 = 2.5D Path Tracing
-    LightingFixturePreset fixture_preset{LightingFixturePreset::ArriSkyPanelS60C};
-    float photometric_beam_angle_deg{32.0f}; // Focusable beam for Fresnel (12-55 deg) & Dedolight (8-25 deg)
     float eye_catchlight_intensity{0.85f};   // Cornea catchlight reflection brightness (0 = muted)
     float eye_catchlight_size{1.00f};        // Cornea catchlight angular scale (0.25..2.0)
     bool crease_disguise_enabled{false};     // [TESTING] Disguise Low-Poly Creases (default OFF)
@@ -95,266 +63,164 @@ struct LightingRig {
     int32_t circadian_timezone{0};
     int32_t circadian_time_minutes{-1}; // -1 = Live Clock, 0..1439 = Manual preview scrub
 
-    // Modular Studio Optical Modifiers (Key Light & Quick Controls)
-    bool key_softbox_enabled{true};
-    bool key_grid_enabled{false};
-    float key_grid_angle_deg{40.0f}; // 30 / 40 / 60 deg
-    bool key_barn_doors_enabled{false};
-    std::array<float, 4> key_barn_door_cuts_deg{38.0f, 38.0f, 42.0f, 42.0f};
-    bool key_diffusion_enabled{true};
-    float key_diffusion_density{0.65f};
-    bool key_gel_enabled{false};
-    StudioGelPreset key_gel{StudioGelPreset::None};
-    StudioGoboPattern key_gobo{StudioGoboPattern::None};
-
-    // Extended 16-light Studio Array + Split Holo-Grading + Satsuei Composite
+    // Single Lighting Authority: 16-slot StudioLightingStore + Environment Sky/Ambient Floor + Parity
     std::array<StudioLightSpec, kMaxStudioLights> studio_lights{};
     uint32_t studio_light_count{0};
-    bool use_studio_lights{false};
-    int8_t key_studio_profile_override{-1};
+    uint32_t dominant_key_light_id{0};
+    float ambient_floor{0.28f};
+    float environment_sky_strength{0.28f};
+    float ground_bounce_strength{0.15f};
+    float multi_light_soft_knee_threshold{0.85f};
     SplitLayerGradingParams split_grading{};
     SatsueiCompositeParams satsuei{};
+    VrmMmdParityParams vrm_mmd_parity{};
+
+    [[nodiscard]] const StudioLightSpec* dominant_key_light() const noexcept {
+        const uint32_t n = std::min(studio_light_count, kMaxStudioLights);
+        if (n == 0u) {
+            return nullptr;
+        }
+        bool any_solo = false;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (studio_lights[i].solo && studio_lights[i].enabled) {
+                any_solo = true;
+                break;
+            }
+        }
+        auto is_active_emitter = [any_solo](const StudioLightSpec& s) noexcept {
+            if (!s.enabled || s.passive_flag != PassiveFlagMode::None) {
+                return false;
+            }
+            return !any_solo || s.solo;
+        };
+        if (dominant_key_light_id < n && is_active_emitter(studio_lights[dominant_key_light_id])) {
+            return &studio_lights[dominant_key_light_id];
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            if (is_active_emitter(studio_lights[i])) {
+                return &studio_lights[i];
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] StudioLightSpec* dominant_key_light_mut() noexcept {
+        return const_cast<StudioLightSpec*>(dominant_key_light());
+    }
+
+    [[nodiscard]] uint32_t active_studio_light_count() const noexcept {
+        const uint32_t n = std::min(studio_light_count, kMaxStudioLights);
+        bool any_solo = false;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (studio_lights[i].solo && studio_lights[i].enabled) {
+                any_solo = true;
+                break;
+            }
+        }
+        uint32_t active = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            const auto& s = studio_lights[i];
+            if (s.enabled && (!any_solo || s.solo) && s.passive_flag == PassiveFlagMode::None) {
+                ++active;
+            }
+        }
+        return active;
+    }
 
     [[nodiscard]] static LightingRig default_three_point() noexcept {
         LightingRig rig{};
-        rig.active_count = 4;
         rig.rim_step_strength = 0.42f;
         rig.hair_highlight_intensity = 0.65f;
+        rig.studio_light_count = 4;
+        rig.dominant_key_light_id = 0;
 
-        // 0: Key Light (ARRI SkyPanel S60-C calibrated at ~1.0 EV avatar anchor exposure)
-        rig.lights[0].role = LightRole::Key;
-        rig.lights[0].type = LightType::Directional;
-        rig.lights[0].enabled = true;
-        rig.lights[0].cast_rt_shadow = true;
-        rig.lights[0].use_2d_orbit_angle = true;
-        rig.lights[0].orbit_azimuth_deg = 32.0f;
-        rig.lights[0].orbit_elevation_deg = 26.0f;
-        rig.lights[0].color[0] = 1.0f;
-        rig.lights[0].color[1] = 0.98f;
-        rig.lights[0].color[2] = 0.95f;
-        rig.lights[0].intensity = 1.00f;
-        rig.lights[0].angular_radius_rad = 0.11f;
+        auto set_name = [](std::array<char, 40>& dst, const char* src) noexcept {
+            dst.fill('\0');
+            for (size_t i = 0; i + 1 < dst.size() && src[i] != '\0'; ++i) {
+                dst[i] = src[i];
+            }
+        };
 
+        // 0: Key Light (RectSoftbox calibrated at ~1.0 EV)
+        {
+            auto& s = rig.studio_lights[0];
+            s = StudioLightSpec{};
+            set_name(s.name, "Key Light");
+            s.fixture = StudioFixtureProfile::RectSoftbox;
+            s.enabled = true;
+            s.cast_shadow = true;
+            s.use_orbit_angles = true;
+            s.orbit_azimuth_deg = 32.0f;
+            s.orbit_elevation_deg = 26.0f;
+            s.orbit_distance_m = 2.15f;
+            s.tint_rgb = {1.0f, 0.98f, 0.95f};
+            s.intensity_ev100 = 1.00f;
+            s.width_or_outer_m = 0.90f;
+            s.height_or_inner_m = 0.60f;
+            s.softbox_enabled = true;
+            s.catchlight_weight = 1.0f;
+        }
         // 1: Soft Fill Light
-        rig.lights[1].role = LightRole::Fill;
-        rig.lights[1].type = LightType::Directional;
-        rig.lights[1].enabled = true;
-        rig.lights[1].cast_rt_shadow = false;
-        rig.lights[1].orbit_azimuth_deg = -52.0f;
-        rig.lights[1].orbit_elevation_deg = 12.0f;
-        rig.lights[1].color[0] = 0.72f;
-        rig.lights[1].color[1] = 0.83f;
-        rig.lights[1].color[2] = 1.0f;
-        rig.lights[1].intensity = 0.24f;
-        rig.lights[1].angular_radius_rad = 0.14f;
-
+        {
+            auto& s = rig.studio_lights[1];
+            s = StudioLightSpec{};
+            set_name(s.name, "Soft Fill");
+            s.fixture = StudioFixtureProfile::LanternChinaBall;
+            s.enabled = true;
+            s.cast_shadow = false;
+            s.use_orbit_angles = true;
+            s.orbit_azimuth_deg = -52.0f;
+            s.orbit_elevation_deg = 12.0f;
+            s.orbit_distance_m = 2.15f;
+            s.tint_rgb = {0.72f, 0.83f, 1.0f};
+            s.intensity_ev100 = 0.24f;
+            s.width_or_outer_m = 0.45f;
+            s.height_or_inner_m = 0.45f;
+            s.softbox_enabled = true;
+            s.catchlight_weight = 0.25f;
+        }
         // 2: Occluded Rim Light
-        rig.lights[2].role = LightRole::Rim;
-        rig.lights[2].type = LightType::Directional;
-        rig.lights[2].enabled = true;
-        rig.lights[2].cast_rt_shadow = true;
-        rig.lights[2].orbit_azimuth_deg = 148.0f;
-        rig.lights[2].orbit_elevation_deg = 22.0f;
-        rig.lights[2].color[0] = 0.86f;
-        rig.lights[2].color[1] = 0.92f;
-        rig.lights[2].color[2] = 1.0f;
-        rig.lights[2].intensity = 0.28f;
-        rig.lights[2].angular_radius_rad = 0.04f;
-
+        {
+            auto& s = rig.studio_lights[2];
+            s = StudioLightSpec{};
+            set_name(s.name, "Rim Light");
+            s.fixture = StudioFixtureProfile::Stripbox;
+            s.enabled = true;
+            s.cast_shadow = false;
+            s.use_orbit_angles = true;
+            s.orbit_azimuth_deg = 148.0f;
+            s.orbit_elevation_deg = 22.0f;
+            s.orbit_distance_m = 2.15f;
+            s.tint_rgb = {0.86f, 0.92f, 1.0f};
+            s.intensity_ev100 = 0.28f;
+            s.width_or_outer_m = 0.30f;
+            s.height_or_inner_m = 1.20f;
+            s.softbox_enabled = true;
+            s.catchlight_weight = 0.40f;
+        }
         // 3: Hair Orbit Specular Driver (angel-ring highlight)
-        rig.lights[3].role = LightRole::HairOrbit;
-        rig.lights[3].type = LightType::Directional;
-        rig.lights[3].enabled = true;
-        rig.lights[3].cast_rt_shadow = false;
-        rig.lights[3].orbit_azimuth_deg = 10.0f;
-        rig.lights[3].orbit_elevation_deg = 52.0f;
-        rig.lights[3].color[0] = 1.0f;
-        rig.lights[3].color[1] = 0.98f;
-        rig.lights[3].color[2] = 0.96f;
-        rig.lights[3].intensity = 0.90f;
+        {
+            auto& s = rig.studio_lights[3];
+            s = StudioLightSpec{};
+            set_name(s.name, "Hair Orbit");
+            s.fixture = StudioFixtureProfile::Stripbox;
+            s.enabled = true;
+            s.cast_shadow = false;
+            s.use_orbit_angles = true;
+            s.orbit_azimuth_deg = 10.0f;
+            s.orbit_elevation_deg = 52.0f;
+            s.orbit_distance_m = 2.15f;
+            s.tint_rgb = {1.0f, 0.98f, 0.96f};
+            s.intensity_ev100 = 0.90f;
+            s.width_or_outer_m = 0.30f;
+            s.height_or_inner_m = 1.20f;
+            s.softbox_enabled = true;
+            s.catchlight_weight = 0.35f;
+        }
         return rig;
     }
 };
 
-/**
- * Configures `rig` with one of the 6 photometric studio (ARRI / Dedolight / Ring) or natural lighting
- * presets, auto-normalizing luminaire luminous flux at the avatar anchor so all profiles maintain balanced ~1.0 EV.
- */
-inline void apply_lighting_fixture_preset(LightingRig& rig, LightingFixturePreset preset,
-                                          float custom_beam_deg = -1.0f) noexcept {
-    rig.fixture_preset = preset;
-    rig.key_studio_profile_override = -1;
-    if (custom_beam_deg > 1.0f) {
-        rig.photometric_beam_angle_deg = std::clamp(custom_beam_deg, 8.0f, 55.0f);
-    }
-    rig.active_count = 4;
-    for (auto& l : rig.lights) {
-        l.enabled = true;
-        l.use_2d_orbit_angle = true;
-    }
-    rig.lights[0].role = LightRole::Key;
-    rig.lights[0].type = LightType::Directional;
-    rig.lights[0].cast_rt_shadow = true;
-    rig.lights[1].role = LightRole::Fill;
-    rig.lights[1].type = LightType::Directional;
-    rig.lights[1].cast_rt_shadow = false;
-    rig.lights[2].role = LightRole::Rim;
-    rig.lights[2].type = LightType::Directional;
-    rig.lights[2].cast_rt_shadow = true;
-    rig.lights[3].role = LightRole::HairOrbit;
-    rig.lights[3].type = LightType::Directional;
-    rig.lights[3].cast_rt_shadow = false;
-
-    switch (preset) {
-    case LightingFixturePreset::ArriSkyPanelS60C:
-        rig.lights[0].orbit_azimuth_deg = 32.0f;
-        rig.lights[0].orbit_elevation_deg = 26.0f;
-        rig.lights[0].color[0] = 1.00f;
-        rig.lights[0].color[1] = 0.98f;
-        rig.lights[0].color[2] = 0.95f;
-        rig.lights[0].intensity = 1.00f;
-        rig.lights[0].angular_radius_rad = 0.11f; // 64.5 cm x 30.0 cm soft diffuser penumbra
-
-        rig.lights[1].orbit_azimuth_deg = -52.0f;
-        rig.lights[1].orbit_elevation_deg = 12.0f;
-        rig.lights[1].color[0] = 0.72f;
-        rig.lights[1].color[1] = 0.83f;
-        rig.lights[1].color[2] = 1.00f;
-        rig.lights[1].intensity = 0.24f;
-
-        rig.lights[2].orbit_azimuth_deg = 148.0f;
-        rig.lights[2].orbit_elevation_deg = 22.0f;
-        rig.lights[2].color[0] = 0.86f;
-        rig.lights[2].color[1] = 0.92f;
-        rig.lights[2].color[2] = 1.00f;
-        rig.lights[2].intensity = 0.28f;
-        break;
-
-    case LightingFixturePreset::ArriFresnelT2Orbiter:
-        rig.photometric_beam_angle_deg = std::clamp(rig.photometric_beam_angle_deg, 12.0f, 55.0f);
-        rig.lights[0].orbit_azimuth_deg = 38.0f;
-        rig.lights[0].orbit_elevation_deg = 28.0f;
-        rig.lights[0].color[0] = 1.00f;
-        rig.lights[0].color[1] = 0.96f;
-        rig.lights[0].color[2] = 0.90f; // Crisp tungsten-daylight Fresnel
-        rig.lights[0].intensity = 1.04f;
-        rig.lights[0].angular_radius_rad = 0.042f;
-        rig.lights[0].cone_angle_rad = rig.photometric_beam_angle_deg * (3.14159265f / 180.0f);
-
-        rig.lights[1].orbit_azimuth_deg = -55.0f;
-        rig.lights[1].orbit_elevation_deg = 10.0f;
-        rig.lights[1].color[0] = 0.68f;
-        rig.lights[1].color[1] = 0.79f;
-        rig.lights[1].color[2] = 1.00f;
-        rig.lights[1].intensity = 0.20f;
-
-        rig.lights[2].orbit_azimuth_deg = 144.0f;
-        rig.lights[2].orbit_elevation_deg = 24.0f;
-        rig.lights[2].color[0] = 0.95f;
-        rig.lights[2].color[1] = 0.96f;
-        rig.lights[2].color[2] = 1.00f;
-        rig.lights[2].intensity = 0.30f;
-        break;
-
-    case LightingFixturePreset::DedolightDled7:
-        rig.photometric_beam_angle_deg = std::clamp(rig.photometric_beam_angle_deg, 8.0f, 25.0f);
-        rig.lights[0].orbit_azimuth_deg = 46.0f;
-        rig.lights[0].orbit_elevation_deg = 32.0f;
-        rig.lights[0].color[0] = 1.00f;
-        rig.lights[0].color[1] = 0.97f;
-        rig.lights[0].color[2] = 0.92f;
-        rig.lights[0].intensity = 1.06f;
-        rig.lights[0].angular_radius_rad = 0.015f; // Optical condenser sharp edge
-        rig.lights[0].cone_angle_rad = rig.photometric_beam_angle_deg * (3.14159265f / 180.0f);
-
-        rig.lights[1].orbit_azimuth_deg = -58.0f;
-        rig.lights[1].orbit_elevation_deg = 8.0f;
-        rig.lights[1].color[0] = 0.62f;
-        rig.lights[1].color[1] = 0.74f;
-        rig.lights[1].color[2] = 0.96f;
-        rig.lights[1].intensity = 0.18f;
-
-        rig.lights[2].orbit_azimuth_deg = 138.0f;
-        rig.lights[2].orbit_elevation_deg = 30.0f;
-        rig.lights[2].color[0] = 1.00f;
-        rig.lights[2].color[1] = 0.96f;
-        rig.lights[2].color[2] = 0.90f;
-        rig.lights[2].intensity = 0.38f;
-        break;
-
-    case LightingFixturePreset::BroadcastRingLight:
-        rig.lights[0].orbit_azimuth_deg = 0.0f;
-        rig.lights[0].orbit_elevation_deg = 6.0f;
-        rig.lights[0].color[0] = 1.00f;
-        rig.lights[0].color[1] = 0.99f;
-        rig.lights[0].color[2] = 0.97f;
-        rig.lights[0].intensity = 0.95f;
-        rig.lights[0].angular_radius_rad = 0.085f;
-
-        rig.lights[1].orbit_azimuth_deg = -18.0f;
-        rig.lights[1].orbit_elevation_deg = -8.0f;
-        rig.lights[1].color[0] = 0.94f;
-        rig.lights[1].color[1] = 0.96f;
-        rig.lights[1].color[2] = 1.00f;
-        rig.lights[1].intensity = 0.16f;
-
-        rig.lights[2].orbit_azimuth_deg = 155.0f;
-        rig.lights[2].orbit_elevation_deg = 18.0f;
-        rig.lights[2].color[0] = 0.88f;
-        rig.lights[2].color[1] = 0.93f;
-        rig.lights[2].color[2] = 1.00f;
-        rig.lights[2].intensity = 0.22f;
-        break;
-
-    case LightingFixturePreset::NaturalSunlightCieSky:
-        rig.lights[0].orbit_azimuth_deg = 42.0f;
-        rig.lights[0].orbit_elevation_deg = 36.0f;
-        rig.lights[0].color[0] = 1.00f;
-        rig.lights[0].color[1] = 0.95f;
-        rig.lights[0].color[2] = 0.86f; // Clear daylight solar beam
-        rig.lights[0].intensity = 0.98f;
-        rig.lights[0].angular_radius_rad = 0.00462f; // True 0.53 deg solar disc
-
-        rig.lights[1].orbit_azimuth_deg = -30.0f;
-        rig.lights[1].orbit_elevation_deg = 58.0f;
-        rig.lights[1].color[0] = 0.56f;
-        rig.lights[1].color[1] = 0.78f;
-        rig.lights[1].color[2] = 1.00f; // CIE clear sky dome
-        rig.lights[1].intensity = 0.28f;
-
-        rig.lights[2].orbit_azimuth_deg = 148.0f;
-        rig.lights[2].orbit_elevation_deg = 24.0f;
-        rig.lights[2].color[0] = 0.72f;
-        rig.lights[2].color[1] = 0.86f;
-        rig.lights[2].color[2] = 1.00f;
-        rig.lights[2].intensity = 0.26f;
-        break;
-
-    case LightingFixturePreset::NaturalWindowPortal:
-        rig.lights[0].orbit_azimuth_deg = 66.0f;
-        rig.lights[0].orbit_elevation_deg = 18.0f;
-        rig.lights[0].color[0] = 0.92f;
-        rig.lights[0].color[1] = 0.96f;
-        rig.lights[0].color[2] = 1.00f; // Overcast/daylight sky through 1.2m x 1.8m window
-        rig.lights[0].intensity = 1.04f;
-        rig.lights[0].angular_radius_rad = 0.16f; // Wide soft window area penumbra
-
-        rig.lights[1].orbit_azimuth_deg = -68.0f;
-        rig.lights[1].orbit_elevation_deg = 8.0f;
-        rig.lights[1].color[0] = 0.82f;
-        rig.lights[1].color[1] = 0.84f;
-        rig.lights[1].color[2] = 0.88f; // Soft interior room bounce wrap
-        rig.lights[1].intensity = 0.30f;
-
-        rig.lights[2].orbit_azimuth_deg = 140.0f;
-        rig.lights[2].orbit_elevation_deg = 22.0f;
-        rig.lights[2].color[0] = 0.86f;
-        rig.lights[2].color[1] = 0.92f;
-        rig.lights[2].color[2] = 1.00f;
-        rig.lights[2].intensity = 0.20f;
-        break;
-    }
-}
 
 /** Named studio lighting rig preset record for JSON serialization (`config/lighting_rigs.json`). */
 struct StudioRigPresetRecord {
