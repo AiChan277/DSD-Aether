@@ -93,7 +93,7 @@ void cs_fallback(uint3 tid : SV_DispatchThreadID) {
     aether_store(g_Pc.param0, tid.xy, float4(vis, 1.0, 0.0, 1.0));
     aether_store(g_Pc.param1, tid.xy, float4(rim_occ, 1.0, 0.0, 1.0));
     if (write_half) {
-        float3 sh_amb = eval_3band_sh_ambient(world_n, fg) * fg.light_params.w;
+        float3 sh_amb = eval_hillaire_sky_sh9(world_n, fg) * fg.light_params.w;
         aether_store(g_Pc.param2, tid.xy >> 1u, float4(sh_amb, 1.0));
     }
 }

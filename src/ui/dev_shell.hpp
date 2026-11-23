@@ -16,6 +16,10 @@
 #include <cstdint>
 #include <memory>
 
+namespace aether::core {
+class SessionManager;
+}
+
 namespace aether::ui {
 
 class StudioWorkspace;
@@ -38,7 +42,6 @@ struct DevShellInputEcho {
 
 struct DevShellAvatarView {
     VkDescriptorSet viewport_texture{VK_NULL_HANDLE};
-    VkDescriptorSet orbit_orb_texture{VK_NULL_HANDLE};
     uint32_t viewport_w{0};
     uint32_t viewport_h{0};
     bool has_avatar{false};
@@ -182,17 +185,16 @@ struct DevShellRenderView {
     bool denoiser_fallback_triggered{false};
     bool show_skeleton_heatmap{false};
     bool show_checkerboard{true};
-    bool show_orbit_orb{true};
+    bool show_orbit_orb{false};
     bool baked_face_sdf_applied{false};
-    float key_azimuth_deg{32.0f};
-    float key_elevation_deg{26.0f};
-    float key_intensity{1.00f};
-    float fill_intensity{0.28f};
-    float rim_intensity{0.35f};
+    float dominant_key_azimuth_deg{32.0f};
+    float dominant_key_elevation_deg{26.0f};
+    float dominant_key_intensity{1.00f};
     float live2d_flatness{0.75f};
     float bloom_intensity{0.06f};
     float outline_scale{1.0f};
     float total_gpu_ms{0.0f};
+    float skin_prepass_gpu_ms{0.0f};
     float rt_gpu_ms{0.0f};
     float denoise_gpu_ms{0.0f};
     float denoise_p95_120f_ms{0.0f};
@@ -284,21 +286,16 @@ struct DevShellViewportActions {
     bool show_skeleton_heatmap{false};
     bool show_rig_colliders{false};
     bool show_checkerboard{true};
-    bool show_orbit_orb{true};
+    bool show_orbit_orb{false};
     bool rt_enabled{true};
     uint8_t lighting_mode{1}; // 0 = Traditional, 1 = Hybrid RT, 2 = 2.5D Path Tracing
     uint8_t debug_view{0};
     uint8_t denoiser_kind{0};
     uint8_t render_backend{0}; // 0 = Vulkan, 1 = DirectX 11, 2 = DirectX 12 (applied by T3 on change)
-    float key_azimuth_deg{32.0f};
-    float key_elevation_deg{26.0f};
-    float fill_azimuth_deg{-52.0f}; // Fill / Rim orbit rigidly with the key (ui::LightRigOffsets)
-    float fill_elevation_deg{12.0f};
-    float rim_azimuth_deg{148.0f};
-    float rim_elevation_deg{22.0f};
-    float key_intensity{1.00f};
-    float fill_intensity{0.28f};
-    float rim_intensity{0.35f};
+    float dominant_key_azimuth_deg{32.0f};
+    float dominant_key_elevation_deg{26.0f};
+    float dominant_key_intensity{1.00f};
+    bool quick_key_orbit_dirty{false};
     float live2d_flatness{0.75f};
     float bloom_intensity{0.06f};
     float outline_scale{1.0f};
@@ -317,8 +314,6 @@ struct DevShellViewportActions {
     float filter_dog_ink_boost{0.60f};
     bool filter_paper_warmth{true};
     float filter_paper_warmth_strength{0.25f};
-    int lighting_fixture{0};
-    float photometric_beam_angle_deg{32.0f};
     float eye_catchlight_intensity{0.85f};
     float eye_catchlight_size{1.00f};
     bool crease_disguise_enabled{false};
@@ -326,15 +321,6 @@ struct DevShellViewportActions {
     bool circadian_enabled{false};
     int32_t circadian_timezone_idx{0};
     int32_t circadian_time_override_min{-1};
-    int32_t studio_fixture{0};
-    bool key_softbox_enabled{true};
-    bool key_grid_enabled{false};
-    float key_grid_angle_deg{40.0f};
-    bool key_barn_doors_enabled{false};
-    bool key_diffusion_enabled{true};
-    float key_diffusion_density{0.65f};
-    bool key_gel_enabled{false};
-    int32_t key_gel_preset{0};
     float satsuei_light_wrap{0.22f};
     float satsuei_halation{0.18f};
     float satsuei_backscatter{0.55f};
@@ -447,7 +433,8 @@ class DevShell {
     DevShell& operator=(DevShell&&) noexcept;
 
     void init(const RuntimePaths& paths, const HardwareInventory& hw, float dpi_scale,
-              const char* initial_avatar_path = nullptr, bool allow_disk_config = true);
+              const char* initial_avatar_path = nullptr, bool allow_disk_config = true,
+              core::SessionManager* session_mgr = nullptr);
     void shutdown();
     void drain_logs() noexcept;
 

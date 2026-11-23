@@ -235,7 +235,8 @@ TEST_CASE("P5-M2P-PIPELINE: Full T1->T2->T3(LateLatch+Passes1..12)->T4(Spout+VCa
         const uint64_t drain_t0 = aether::now_us();
         const bool drained = pipeline->wait_output_slots_drained(f == 0u ? 1000u : 250u);
         const double drain_ms = static_cast<double>(aether::now_us() - drain_t0) / 1000.0;
-        INFO("frame=" << f << " drain_ms=" << drain_ms << " spout_active=" << pipeline->latest_output_status().spout_active);
+        INFO("frame=" << f << " drain_ms=" << drain_ms
+                      << " spout_active=" << pipeline->latest_output_status().spout_active);
         REQUIRE(drained);
         const auto telem = pipeline->latest_telemetry();
         if (f >= kWarmupFrames && telem.last_frame.frame_sequence == skin_snap.frame_sequence) {

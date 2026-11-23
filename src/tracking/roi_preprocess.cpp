@@ -472,8 +472,7 @@ RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
                 const uint8_t* y_plane = px;
                 const uint8_t* uv_plane = px + static_cast<size_t>(src.stride_y) * src.height;
                 yv = y_plane[static_cast<size_t>(y) * src.stride_y + x];
-                const size_t uv_off =
-                    static_cast<size_t>(y >> 1U) * src.stride_uv + static_cast<size_t>(x & ~1U);
+                const size_t uv_off = static_cast<size_t>(y >> 1U) * src.stride_uv + static_cast<size_t>(x & ~1U);
                 cb = uv_plane[uv_off + 0U];
                 cr = uv_plane[uv_off + 1U];
             } else if (src.format == CameraPixelFormat::YUY2) {
@@ -522,7 +521,7 @@ RoiRectNorm detect_skin_centroid_roi(const CapturedFrameBuffer& src) noexcept {
 }
 
 void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, uint32_t dst_h,
-                                 uint8_t* dst_rgba) noexcept {
+                               uint8_t* dst_rgba) noexcept {
     if (dst_rgba == nullptr || src.width == 0U || src.height == 0U || dst_w == 0U || dst_h == 0U) {
         return;
     }
@@ -540,8 +539,7 @@ void downscale_camera_to_rgba8(const CapturedFrameBuffer& src, uint32_t dst_w, u
                 const uint8_t* uv_plane = px + static_cast<size_t>(src.stride_y) * src.height;
                 const float luma = static_cast<float>(y_plane[static_cast<size_t>(sy) * src.stride_y + sx]);
                 const uint32_t uvy = std::min(sy >> 1U, max_uv_y);
-                const size_t uv_off =
-                    static_cast<size_t>(uvy) * src.stride_uv + static_cast<size_t>(sx & ~1U);
+                const size_t uv_off = static_cast<size_t>(uvy) * src.stride_uv + static_cast<size_t>(sx & ~1U);
                 const float u = static_cast<float>(uv_plane[uv_off + 0U]) - 128.0f;
                 const float v = static_cast<float>(uv_plane[uv_off + 1U]) - 128.0f;
                 const float c = std::max(luma - 16.0f, 0.0f) * 1.1643835f;

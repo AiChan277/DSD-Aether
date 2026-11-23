@@ -99,7 +99,6 @@ struct Harness {
         req.camera = camera;
         req.rt_enabled = false;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         if (bridge != nullptr && bridge->render(*avatar, rig, camera)) {
             bridge->fill_request(req);
         }

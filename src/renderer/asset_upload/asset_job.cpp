@@ -259,6 +259,23 @@ void AssetJob::worker_main(rhi::RhiDevice* rhi, std::string path_utf8, uint32_t 
         return;
     }
 
+    // Retain decoded CPU texture bytes and finish all CPU parity/skeleton/morph prep on the loader worker thread
+    // so main-thread `finalize_gpu_upload()` does minimal work (`HR-08`, `<= 50 ms`).
+    const uint64_t tex_pix_bytes = reqs.stream_bytes[AETHER_STREAM_TEXTURE_PIXELS];
+    if (tex_pix_bytes > 0) {
+        const uint8_t* tp = base_ptr + staged->stream_offsets[AETHER_STREAM_TEXTURE_PIXELS];
+        staged->cpu_texture_pixels.assign(tp, tp + static_cast<size_t>(tex_pix_bytes));
+    }
+    prepare_cpu_avatar_payload(*staged);
+
+    if (cancel_requested_.load(std::memory_order_acquire)) {
+        staged->release();
+        set_error(AETHER_E_CANCELLED, "Asset load cancelled");
+        state_.store(AssetJobState::Cancelled, std::memory_order_release);
+        restore_role();
+        return;
+    }
+
     StagedAvatarUpload* raw = staged.release();
     StagedAvatarUpload* prev = staged_ptr_.exchange(raw, std::memory_order_acq_rel);
     if (prev != nullptr) {

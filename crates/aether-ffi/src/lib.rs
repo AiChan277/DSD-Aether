@@ -192,6 +192,24 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> AetherStatus;
 
+    /// Serializes the active node graph document into canonical UTF-8 JSON (`*out_json_utf8`),
+    /// which must be freed with [`aether_string_free`]. `[any]`
+    pub fn aether_graph_serialize_json(
+        host: AetherHostHandle,
+        out_json_utf8: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> AetherStatus;
+
+    /// Parses and applies a node graph JSON document cleanly onto `host`. `[any]`
+    pub fn aether_graph_deserialize_json(
+        host: AetherHostHandle,
+        json_utf8: *const c_char,
+        len: usize,
+    ) -> AetherStatus;
+
+    /// Frees a NUL-terminated UTF-8 string returned by `aether_graph_serialize_json`. `[any]`
+    pub fn aether_string_free(ptr: *mut c_char);
+
     /// Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`
     pub fn aether_ffi_layout_table_json(out_len: *mut usize) -> *const u8;
 }

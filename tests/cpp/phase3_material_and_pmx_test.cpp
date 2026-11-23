@@ -1,8 +1,11 @@
 #include "aether_ffi_contract.h"
 #include "animation/pmx_physics.hpp"
 #include "core/hot_path_guard.hpp"
+#include "renderer/asset_upload/vrm_parity_prep.hpp"
+#include "renderer/avatar_rt_classifier.hpp"
 #include "renderer/frame_globals_builder.hpp"
 #include "renderer/material_override_cache.hpp"
+#include "renderer/transparent_pass.hpp"
 #include "ui/panels/nodegraph/node_canvas.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -13,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -92,7 +96,8 @@ std::vector<uint8_t> build_synthetic_pmx_21_binary() {
     push_utf8_text(b, "Phase 3 PMX 2.1 Test");
     push_utf8_text(b, "Phase 3 PMX 2.1 Test En");
 
-    // 6 Vertices (3 for Face_Skin triangle with edge_scale=0.0 and SDEF on v0; 3 for Hair_Mat triangle with edge_scale=1.0)
+    // 6 Vertices (3 for Face_Skin triangle with edge_scale=0.0 and SDEF on v0; 3 for Hair_Mat triangle with
+    // edge_scale=1.0)
     push_i32(b, 6);
     // v0: SDEF (deform_type = 3), edge_scale = 0.0 (jawline)
     push_f32_3(b, -1.0f, 15.0f, 2.5f); // LH pos
@@ -103,10 +108,10 @@ std::vector<uint8_t> build_synthetic_pmx_21_binary() {
     push_i8(b, 4); // bone 0 = 首 (Neck)
     push_i8(b, 5); // bone 1 = 頭 (Head)
     push_f32(b, 0.5f);
-    push_f32_3(b, 0.0f, 15.0f, 2.5f);  // C
-    push_f32_3(b, 0.0f, 14.8f, 2.5f);  // R0
-    push_f32_3(b, 0.0f, 15.2f, 2.5f);  // R1
-    push_f32(b, 0.0f);                 // edge_scale = 0.0 (suppress ink!)
+    push_f32_3(b, 0.0f, 15.0f, 2.5f); // C
+    push_f32_3(b, 0.0f, 14.8f, 2.5f); // R0
+    push_f32_3(b, 0.0f, 15.2f, 2.5f); // R1
+    push_f32(b, 0.0f);                // edge_scale = 0.0 (suppress ink!)
 
     // v1: BDEF1, edge_scale = 0.0
     push_f32_3(b, 1.0f, 15.0f, 2.5f);
@@ -202,9 +207,9 @@ std::vector<uint8_t> build_synthetic_pmx_21_binary() {
         }
         if ((flags & 0x0020u) != 0u) {
             push_i8(b, ik_target);
-            push_i32(b, 8);     // ik_loops
-            push_f32(b, 0.5f);  // ik_limit_rad
-            push_i32(b, 1);     // 1 ik link
+            push_i32(b, 8);    // ik_loops
+            push_f32(b, 0.5f); // ik_limit_rad
+            push_i32(b, 1);    // 1 ik link
             push_i8(b, ik_link_bone);
             push_u8(b, 1); // has_limit
             push_f32_3(b, -1.5f, -1.5f, -1.5f);
@@ -263,16 +268,16 @@ std::vector<uint8_t> build_synthetic_pmx_21_binary() {
     push_u8(b, 4);
     push_u8(b, 8); // Material morph
     push_i32(b, 1);
-    push_i8(b, 0);                   // material 0
-    push_u8(b, 1);                   // additive mode
-    push_f32_4(b, 0.1f, 0.2f, 0.3f, 0.0f); // diffuse (16 B)
-    push_f32_3(b, 0.0f, 0.0f, 0.0f);       // specular (12 B)
-    push_f32(b, 0.0f);                     // spec_power (4 B)
-    push_f32_3(b, 0.05f, 0.05f, 0.05f);    // ambient (12 B)
-    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f); // edge_color (16 B)
-    push_f32(b, 0.0f);                     // edge_size (4 B)
-    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f); // tex_tint (16 B)
-    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f); // sphere_tint (16 B)
+    push_i8(b, 0);                          // material 0
+    push_u8(b, 1);                          // additive mode
+    push_f32_4(b, 0.1f, 0.2f, 0.3f, 0.0f);  // diffuse (16 B)
+    push_f32_3(b, 0.0f, 0.0f, 0.0f);        // specular (12 B)
+    push_f32(b, 0.0f);                      // spec_power (4 B)
+    push_f32_3(b, 0.05f, 0.05f, 0.05f);     // ambient (12 B)
+    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f);  // edge_color (16 B)
+    push_f32(b, 0.0f);                      // edge_size (4 B)
+    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f);  // tex_tint (16 B)
+    push_f32_4(b, 0.0f, 0.0f, 0.0f, 0.0f);  // sphere_tint (16 B)
     push_f32_4(b, 0.15f, 0.0f, 0.0f, 0.0f); // toon_tint (16 B)
 
     // Morph 4: Group
@@ -331,7 +336,7 @@ std::vector<uint8_t> build_synthetic_pmx_21_binary() {
     return b;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("Phase 3: Non-destructive Node Material Override, TextureGrade, and DynamicMaterialDriver zero-alloc",
           "[phase3][materials]") {
@@ -370,8 +375,8 @@ TEST_CASE("Phase 3: Non-destructive Node Material Override, TextureGrade, and Dy
     REQUIRE(host != nullptr);
 
     aether_set_thread_role(AETHER_THREAD_ROLE_UI);
-    REQUIRE(aether_host_set_model_metadata_json(
-                host, R"({"format":1,"materials":["Face_Skin","Hair_Mat"]})") == AETHER_OK);
+    REQUIRE(aether_host_set_model_metadata_json(host, R"({"format":1,"materials":["Face_Skin","Hair_Mat"]})") ==
+            AETHER_OK);
 
     const char* graph_json = R"({
         "schema_version": 1,
@@ -433,8 +438,8 @@ TEST_CASE("Phase 3: Non-destructive Node Material Override, TextureGrade, and Dy
     {
         AETHER_HOT_PATH_SCOPE;
         REQUIRE(aether_host_evaluate_active_ex(host, &gin, 12.0f, &gout, &mat_ovr) == AETHER_OK);
-        aether::renderer::apply_material_overrides_non_destructive(
-            base_mats, pool, mat_ovr, active_mats, active_grades);
+        aether::renderer::apply_material_overrides_non_destructive(base_mats, pool, mat_ovr, active_mats,
+                                                                   active_grades);
     }
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
 
@@ -457,8 +462,7 @@ TEST_CASE("Phase 3: Non-destructive Node Material Override, TextureGrade, and Dy
     AetherMaterialOverrideBuffer empty_ovr{};
     empty_ovr.struct_size = sizeof(empty_ovr);
     empty_ovr.count = 0U;
-    aether::renderer::apply_material_overrides_non_destructive(
-        base_mats, pool, empty_ovr, active_mats, active_grades);
+    aether::renderer::apply_material_overrides_non_destructive(base_mats, pool, empty_ovr, active_mats, active_grades);
     CHECK_THAT(active_mats[1].shade_color_gi[0], Catch::Matchers::WithinAbs(base_mats[1].shade_color_gi[0], 1e-5f));
     CHECK_THAT(active_mats[1].outline_width, Catch::Matchers::WithinAbs(base_mats[1].outline_width, 1e-5f));
     CHECK_THAT(active_grades[1].dynamic_params[3], Catch::Matchers::WithinAbs(0.0f, 1e-5f));
@@ -471,8 +475,7 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
     aether_set_thread_role(AETHER_THREAD_ROLE_LOADER);
 
     const std::vector<uint8_t> pmx_bytes = build_synthetic_pmx_21_binary();
-    const std::filesystem::path tmp_pmx =
-        std::filesystem::temp_directory_path() / "aether_phase3_synthetic_test.pmx";
+    const std::filesystem::path tmp_pmx = std::filesystem::temp_directory_path() / "aether_phase3_synthetic_test.pmx";
     {
         std::ofstream ofs(tmp_pmx, std::ios::binary | std::ios::trunc);
         REQUIRE(ofs.is_open());
@@ -513,7 +516,8 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
     AetherAvatarDesc desc{};
     REQUIRE(aether_loader_fill(loader, slices.data(), AETHER_STREAM_COUNT, &desc) == AETHER_OK);
 
-    // Verify Japanese humanoid bone mapping (下半身 -> Hips=0, 上半身 -> Spine=1, 首 -> Neck=4, 頭 -> Head=5, 左腕 -> LeftUpperArm=18, 左ひじ -> LeftLowerArm=19)
+    // Verify Japanese humanoid bone mapping (下半身 -> Hips=0, 上半身 -> Spine=1, 首 -> Neck=4, 頭 -> Head=5, 左腕 ->
+    // LeftUpperArm=18, 左ひじ -> LeftLowerArm=19)
     CHECK(desc.humanoid_to_joint[0] == 2U);  // Hips -> 下半身
     CHECK(desc.humanoid_to_joint[1] == 3U);  // Spine -> 上半身
     CHECK(desc.humanoid_to_joint[4] == 4U);  // Neck -> 首
@@ -645,7 +649,8 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
 
         const float sdef_radius = std::hypot(sdef_pos[0], sdef_pos[2]);
         const float lbs_radius = std::hypot(lbs_pos[0], lbs_pos[2]);
-        // SDEF preserves 100% of the 0.10 m cylinder radius; LBS collapses to cos(60 deg) = 0.05 m (50% candy-wrapper collapse!)
+        // SDEF preserves 100% of the 0.10 m cylinder radius; LBS collapses to cos(60 deg) = 0.05 m (50% candy-wrapper
+        // collapse!)
         CHECK_THAT(sdef_radius, Catch::Matchers::WithinAbs(0.10f, 1e-4f));
         CHECK(lbs_radius < 0.055f);
         CHECK(sdef_radius > lbs_radius * 1.9f);
@@ -676,8 +681,8 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
     }
 
     // Prime initial rest pose once before entering hot loop
-    solver.step(aether::animation::PmxSkeletonAndPhysicsSolver::kFixedDt,
-                bone_span, local_t, local_r, local_s, world_mats);
+    solver.step(aether::animation::PmxSkeletonAndPhysicsSolver::kFixedDt, bone_span, local_t, local_r, local_s,
+                world_mats);
 
     {
         AETHER_HOT_PATH_SCOPE;
@@ -695,8 +700,8 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
             local_r[8 * 4U + 2] = 0.0f;
             local_r[8 * 4U + 3] = 1.0f;
 
-            solver.step(aether::animation::PmxSkeletonAndPhysicsSolver::kFixedDt,
-                        bone_span, local_t, local_r, local_s, world_mats);
+            solver.step(aether::animation::PmxSkeletonAndPhysicsSolver::kFixedDt, bone_span, local_t, local_r, local_s,
+                        world_mats);
         }
     }
 
@@ -704,8 +709,8 @@ TEST_CASE("Phase 3: Native PMX 2.1 Loader, Ray-MMD Classification, SDEF Skinning
         CHECK(std::isfinite(st.pos.x));
         CHECK(std::isfinite(st.pos.y));
         CHECK(std::isfinite(st.pos.z));
-        const float lin_speed = std::sqrt(st.lin_vel.x * st.lin_vel.x + st.lin_vel.y * st.lin_vel.y +
-                                          st.lin_vel.z * st.lin_vel.z);
+        const float lin_speed =
+            std::sqrt(st.lin_vel.x * st.lin_vel.x + st.lin_vel.y * st.lin_vel.y + st.lin_vel.z * st.lin_vel.z);
         CHECK(lin_speed <= aether::animation::PmxSkeletonAndPhysicsSolver::kMaxLinearVel + 1e-3f);
     }
 }
@@ -741,4 +746,300 @@ TEST_CASE("Phase 3: NodeCanvas authors ModelSource, MaterialSlotOverride, Textur
     CHECK(roundtrip.find_node(n_grade) != nullptr);
     CHECK(roundtrip.find_node(n_drv) != nullptr);
     CHECK(roundtrip.find_node(n_ovr) != nullptr);
+}
+
+TEST_CASE("Rev 3.1 PMX 4-Tier Transparency, .spa/.sph Mix, RT Classifier & VrmParityPrep", "[phase3][pmx][rev31]") {
+    namespace fs = std::filesystem;
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+
+    const fs::path dir = fs::temp_directory_path() / "aether_rev31_cpp_pmx_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "TexDir", ec);
+
+    auto write_tga = [&](const fs::path& p, uint8_t r, uint8_t g, uint8_t b, uint8_t a, bool half_zero = false,
+                         bool glow_center = false) {
+        std::vector<uint8_t> tga(18 + 16 * 4, 0);
+        tga[2] = 2;
+        tga[12] = 4;
+        tga[14] = 4;
+        tga[16] = 32;
+        tga[17] = 0x28;
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const size_t o = 18 + static_cast<size_t>(y * 4 + x) * 4;
+                uint8_t px_a = a;
+                uint8_t px_r = r, px_g = g, px_b = b;
+                if (half_zero && x < 2) {
+                    px_a = 0;
+                }
+                if (glow_center && x == 1 && y == 1) {
+                    px_r = 255;
+                    px_g = 250;
+                    px_b = 240;
+                    px_a = 255;
+                }
+                tga[o + 0] = px_b;
+                tga[o + 1] = px_g;
+                tga[o + 2] = px_r;
+                tga[o + 3] = px_a;
+            }
+        }
+        std::ofstream f(p, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(tga.data()), static_cast<std::streamsize>(tga.size()));
+    };
+
+    write_tga(dir / "TexDir" / "Opaque.tga", 210, 190, 180, 255);
+    write_tga(dir / "TexDir" / "Lash.tga", 30, 25, 30, 255, true, false);
+    write_tga(dir / "TexDir" / "Veil.tga", 200, 215, 255, 128);
+    write_tga(dir / "TexDir" / "EyeKira.spa", 0, 0, 0, 255, false, true);
+    write_tga(dir / "TexDir" / "SphereMul.sph", 100, 100, 100, 255);
+
+    auto push_utf16_str = [&](std::vector<uint8_t>& buf, std::string_view ascii) {
+        push_i32(buf, static_cast<int32_t>(ascii.size() * 2));
+        for (char c : ascii) {
+            buf.push_back(static_cast<uint8_t>(c));
+            buf.push_back(0);
+        }
+    };
+
+    std::vector<uint8_t> pmx;
+    pmx.insert(pmx.end(), {'P', 'M', 'X', ' '});
+    push_f32(pmx, 2.0f);
+    push_u8(pmx, 8);
+    for (uint8_t g : std::array<uint8_t, 8>{0, 0, 1, 1, 1, 1, 1, 1}) {
+        push_u8(pmx, g);
+    }
+    push_utf16_str(pmx, "Rev31Pmx");
+    push_utf16_str(pmx, "Rev31PmxEn");
+    push_utf16_str(pmx, "");
+    push_utf16_str(pmx, "");
+
+    push_i32(pmx, 12);
+    for (int i = 0; i < 12; ++i) {
+        const float uv_u = (i % 3 == 0) ? 0.0f : ((i % 3 == 1) ? 1.0f : 0.5f);
+        const float uv_v = (i % 3 == 2) ? 1.0f : 0.0f;
+        push_f32_3(pmx, static_cast<float>(i / 3) + 0.1f * static_cast<float>(i % 3), 0.0f, 0.0f);
+        push_f32_3(pmx, 0.0f, 0.0f, -1.0f);
+        push_f32(pmx, uv_u);
+        push_f32(pmx, uv_v);
+        push_u8(pmx, 0); // BDEF1
+        push_i8(pmx, 0);
+        push_f32(pmx, 1.0f);
+    }
+    push_i32(pmx, 12);
+    for (uint8_t i = 0; i < 12; ++i) {
+        push_u8(pmx, i);
+    }
+    push_i32(pmx, 5);
+    push_utf16_str(pmx, "\\texdir\\opaque.TGA");
+    push_utf16_str(pmx, ".\\TEXDIR\\LASH.tga");
+    push_utf16_str(pmx, "texdir\\veil.tga");
+    push_utf16_str(pmx, "texdir\\eyekira.spa");
+    push_utf16_str(pmx, "texdir/spheremul.sph");
+
+    push_i32(pmx, 4);
+    struct MatSpec {
+        const char* name;
+        int8_t tex;
+        int8_t sph;
+        uint8_t sph_mode;
+        uint8_t flags;
+    };
+    const std::array<MatSpec, 4> ms{{
+        {"Body_Opaque", 0, 4, 1, 0x10u | 0x04u},
+        {"Lash_Cutout", 1, 4, 0, 0x01u},
+        {"Veil_Blend", 2, 4, 0, 0x01u},
+        {"Eye_Kira", 3, 3, 2, 0x01u},
+    }};
+    for (const auto& s : ms) {
+        push_utf16_str(pmx, s.name);
+        push_utf16_str(pmx, s.name);
+        push_f32_4(pmx, 1.0f, 1.0f, 1.0f, 1.0f);
+        push_f32_3(pmx, 0.2f, 0.2f, 0.2f);
+        push_f32(pmx, 8.0f);
+        push_f32_3(pmx, 0.5f, 0.5f, 0.5f);
+        push_u8(pmx, s.flags);
+        push_f32_4(pmx, 0.0f, 0.0f, 0.0f, 1.0f);
+        push_f32(pmx, 1.0f);
+        push_i8(pmx, s.tex);
+        push_i8(pmx, s.sph);
+        push_u8(pmx, s.sph_mode);
+        push_u8(pmx, 1);
+        push_u8(pmx, 0);
+        push_utf16_str(pmx, "");
+        push_i32(pmx, 3);
+    }
+    push_i32(pmx, 1);
+    push_utf16_str(pmx, "Center");
+    push_utf16_str(pmx, "center");
+    push_f32_3(pmx, 0.0f, 0.0f, 0.0f);
+    push_i8(pmx, -1);
+    push_i32(pmx, 0);
+    push_u16(pmx, 0);
+    push_f32_3(pmx, 0.0f, 0.0f, 0.0f);
+    for (int k = 0; k < 4; ++k) {
+        push_i32(pmx, 0);
+    }
+
+    const fs::path pmx_path = dir / "rev31_test.pmx";
+    {
+        std::ofstream f(pmx_path, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(pmx.data()), static_cast<std::streamsize>(pmx.size()));
+    }
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_LOADER);
+    const std::string pmx_path_str = pmx_path.string();
+    AetherLoadRequest req{};
+    req.path_utf8 = pmx_path_str.c_str();
+    req.flags = AETHER_LOAD_FLAG_DECODE_TEXTURES;
+    req.max_threads = 1u;
+    AetherLoaderHandle loader = nullptr;
+    REQUIRE(aether_loader_open(&req, &loader) == AETHER_OK);
+    AetherAssetRequirements reqs{};
+    REQUIRE(aether_loader_query(loader, &reqs) == AETHER_OK);
+    CHECK(reqs.material_count == 4u);
+
+    std::array<std::vector<uint8_t>, AETHER_STREAM_COUNT> backing{};
+    std::array<AetherArenaSlice, AETHER_STREAM_COUNT> streams{};
+    for (uint32_t s = 0; s < AETHER_STREAM_COUNT; ++s) {
+        streams[s].stream_kind = s;
+        streams[s].size_bytes = reqs.stream_bytes[s];
+        if (reqs.stream_bytes[s] > 0u) {
+            backing[s].resize(static_cast<size_t>(reqs.stream_bytes[s]) + 128u, 0u);
+            const uintptr_t raw = reinterpret_cast<uintptr_t>(backing[s].data());
+            streams[s].ptr = reinterpret_cast<uint8_t*>((raw + 63ULL) & ~uintptr_t{63ULL});
+        }
+    }
+    AetherAvatarDesc desc{};
+    REQUIRE(aether_loader_fill(loader, streams.data(), AETHER_STREAM_COUNT, &desc) == AETHER_OK);
+    aether_loader_close(loader);
+
+    const auto* mats = reinterpret_cast<const AetherNprMaterial*>(streams[AETHER_STREAM_MATERIALS].ptr);
+    const auto* sms = reinterpret_cast<const AetherSubmeshDesc*>(streams[AETHER_STREAM_SUBMESHES].ptr);
+    CHECK(mats[0].alpha_mode == AETHER_ALPHA_MODE_OPAQUE);
+    CHECK_THAT(mats[0].matcap_color[3], Catch::Matchers::WithinAbs(0.0f, 1e-4f)); // .sph multiply
+    CHECK((mats[0].flags & AETHER_MAT_FLAG_NO_SHADOW_CAST) == 0u);
+    CHECK((mats[0].flags & AETHER_MAT_FLAG_NO_OUTLINE) == 0u);
+
+    CHECK(mats[1].alpha_mode == AETHER_ALPHA_MODE_MASK);
+    CHECK((mats[1].flags & AETHER_MAT_FLAG_ALPHA_CUTOUT) != 0u);
+    CHECK((mats[1].flags & AETHER_MAT_FLAG_NO_SHADOW_CAST) != 0u);
+    CHECK((mats[1].flags & AETHER_MAT_FLAG_NO_OUTLINE) != 0u);
+
+    CHECK(mats[2].alpha_mode == AETHER_ALPHA_MODE_BLEND);
+    CHECK((mats[2].flags & AETHER_MAT_FLAG_STRICT_DRAW_ORDER) != 0u);
+
+    CHECK(mats[3].alpha_mode == AETHER_ALPHA_MODE_ADDITIVE);
+    CHECK((mats[3].flags & AETHER_MAT_FLAG_ADDITIVE) != 0u);
+    CHECK_THAT(mats[3].matcap_color[3], Catch::Matchers::WithinAbs(1.0f, 1e-4f)); // .spa add
+    CHECK((sms[3].flags & AETHER_SUBMESH_FLAG_ADDITIVE) != 0u);
+
+    // Populate GpuAvatar and verify RT partitioning + VrmParityPrep + SurfaceGroupID
+    aether::renderer::GpuAvatar av;
+    av.materials.assign(mats, mats + reqs.material_count);
+    av.submeshes.assign(sms, sms + reqs.submesh_count);
+    const auto* idxs = reinterpret_cast<const uint32_t*>(streams[AETHER_STREAM_INDEX_U32].ptr);
+    av.rest_indices.assign(idxs, idxs + reqs.index_count);
+    const auto* v25s = reinterpret_cast<const AetherVertex25D*>(streams[AETHER_STREAM_VERTEX25D].ptr);
+    av.rest_vertices.assign(v25s, v25s + reqs.vertex_count);
+    const auto* srfs = reinterpret_cast<const AetherVertexSurface*>(streams[AETHER_STREAM_SURFACE].ptr);
+    av.rest_surfaces.assign(srfs, srfs + reqs.vertex_count);
+    av.strings.assign(reinterpret_cast<const char*>(streams[AETHER_STREAM_STRINGS].ptr),
+                      static_cast<size_t>(reqs.stream_bytes[AETHER_STREAM_STRINGS]));
+
+    const auto part = aether::renderer::build_rt_partitioned_indices(av);
+    // Only Opaque submesh 0 casts shadow; cutout has CastShadow==0 here, blend & additive excluded.
+    CHECK(part.sorted_indices.size() == 3u);
+
+    // Check VrmParityPrep OKLab + outline_width_scale modulation on non-PMX VRM avatar
+    av.pmx_aux_header.is_pmx = 0u;
+    av.desc.source_format = AETHER_SOURCE_FORMAT_VRM1;
+    av.materials[0].flags &= ~AETHER_MAT_FLAG_IS_PMX;
+    av.materials[0].base_color[0] = 0.8f;
+    av.materials[0].base_color[1] = 0.5f;
+    av.materials[0].base_color[2] = 0.4f;
+    av.materials[0].shade_color_gi[0] = 0.8f;
+    av.materials[0].shade_color_gi[1] = 0.5f;
+    av.materials[0].shade_color_gi[2] = 0.4f;
+    av.materials[0].tex_shade = AETHER_INVALID_INDEX;
+    const auto pstats = aether::renderer::prepare_vrm_and_pmx_parity(av, true);
+    CHECK(pstats.oklab_harmonized_materials >= 1u);
+    CHECK(av.materials[0].shade_color_gi[2] < av.materials[0].base_color[2]);
+
+    std::vector<aether::renderer::GpuMaterial> gmats;
+    std::vector<aether::renderer::GpuSubmeshDraw> gsubs;
+    std::vector<uint32_t> opq, cut, trn;
+    std::vector<uint32_t> dummy_slots(8, 0u);
+    aether::renderer::detail::populate_materials_and_submeshes(av, dummy_slots, 0u, UINT32_MAX, gmats, gsubs, opq, cut,
+                                                               trn);
+    CHECK(((gsubs[0].flags >> 24u) & 0xFFu) != 0u);
+    CHECK_THAT(gmats[0].shade_color[3], Catch::Matchers::WithinAbs(0.0f, 1e-4f));
+    CHECK_THAT(gmats[3].shade_color[3], Catch::Matchers::WithinAbs(1.0f, 1e-4f));
+    CHECK(trn.size() == 2u); // Blend + Additive in authored order
+
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("Rev 3.1 PMX physics clamps dt <= 1/30 s and stays finite under dt spikes/NaN", "[pmx][physics][rev31]") {
+    std::array<AetherJointDesc, 2> bones{};
+    bones[0].parent_index = -1;
+    bones[0].humanoid_bone = AETHER_BONE_HIPS;
+    bones[0].bind_translation[1] = 1.0f;
+    bones[0].bind_rotation_quat[3] = 1.0f;
+    bones[0].bind_scale[0] = bones[0].bind_scale[1] = bones[0].bind_scale[2] = 1.0f;
+
+    bones[1].parent_index = 0;
+    bones[1].humanoid_bone = 0xFFFFu;
+    bones[1].bind_translation[1] = -0.15f;
+    bones[1].bind_rotation_quat[3] = 1.0f;
+    bones[1].bind_scale[0] = bones[1].bind_scale[1] = bones[1].bind_scale[2] = 1.0f;
+
+    std::array<AetherPmxRigidBodyDesc, 2> rbs{};
+    rbs[0].bone_index = 0;
+    rbs[0].phys_mode = AETHER_PMX_RB_KINEMATIC;
+    rbs[0].shape_kind = AETHER_PMX_SHAPE_SPHERE;
+    rbs[0].size[0] = 0.08f;
+    rbs[0].pos_ms[1] = 1.0f;
+
+    rbs[1].bone_index = 1;
+    rbs[1].phys_mode = AETHER_PMX_RB_DYNAMIC;
+    rbs[1].shape_kind = AETHER_PMX_SHAPE_CAPSULE;
+    rbs[1].size[0] = 0.04f;
+    rbs[1].size[1] = 0.15f;
+    rbs[1].mass = 0.5f;
+    rbs[1].linear_damping = 0.4f;
+    rbs[1].angular_damping = 0.4f;
+    rbs[1].pos_ms[1] = 0.85f;
+
+    std::array<AetherPmxConstraint6DofDesc, 1> jnts{};
+    jnts[0].rb_a = 0;
+    jnts[0].rb_b = 1;
+    jnts[0].spring_pos[1] = 20.0f;
+
+    aether::animation::PmxSkeletonAndPhysicsSolver solver{};
+    solver.init(bones, {}, {}, rbs, jnts);
+
+    std::vector<float> local_t(6, 0.0f);
+    std::vector<float> local_r(8, 0.0f);
+    std::vector<float> local_s(6, 1.0f);
+    std::vector<float> world_mats(32, 0.0f);
+    local_t[1] = 1.0f;
+    local_t[4] = -0.15f;
+    local_r[3] = 1.0f;
+    local_r[7] = 1.0f;
+
+    solver.step(10.0f, bones, local_t, local_r, local_s, world_mats);
+    solver.step(std::numeric_limits<float>::quiet_NaN(), bones, local_t, local_r, local_s, world_mats);
+
+    REQUIRE(solver.rigid_body_states().size() == 2u);
+    for (const auto& rb : solver.rigid_body_states()) {
+        CHECK(std::isfinite(rb.pos.x));
+        CHECK(std::isfinite(rb.pos.y));
+        CHECK(std::isfinite(rb.pos.z));
+        CHECK(std::isfinite(rb.lin_vel.y));
+        CHECK(std::abs(rb.pos.y) < 5.0f);
+    }
 }

@@ -84,7 +84,6 @@ struct FrameRenderRequest {
     bool show_skeleton_heatmap{false};
     bool wireframe{false};
     bool show_rig_colliders{false};
-    bool show_orbit_orb{true};
     bool render_csm_shadow{true};
     float outline_width_scale{1.0f};
     std::array<float, 3> avatar_pos{0.0f, 0.0f, 0.0f};
@@ -169,8 +168,6 @@ struct FrameGraphOutputs {
     VkImageView quad_right_view{VK_NULL_HANDLE};
     VkImage stage_broadcast_pip_image{VK_NULL_HANDLE};
     VkImageView stage_broadcast_pip_view{VK_NULL_HANDLE};
-    VkImage orbit_orb_image{VK_NULL_HANDLE};
-    VkImageView orbit_orb_view{VK_NULL_HANDLE};
     VkImage rt_shadow_raw_image{VK_NULL_HANDLE};
     VkImage rt_shadow_denoised_image{VK_NULL_HANDLE};
     VkImage hdr_scene_image{VK_NULL_HANDLE};
@@ -209,7 +206,6 @@ struct FrameGraphOutputs {
 class FrameGraph {
   public:
     static constexpr uint32_t kBloomMipCount = 6;
-    static constexpr uint32_t kOrbitOrbSize = 128;
     static constexpr uint32_t kCsmSize = 2048;
     static constexpr uint32_t kOutputRingSlots = 3;
 
@@ -268,6 +264,9 @@ class FrameGraph {
     [[nodiscard]] rhi::BindlessHeap& bindless() noexcept { return bindless_; }
     [[nodiscard]] bool rt_available() const noexcept { return device_ != nullptr && device_->rt_supported(); }
     [[nodiscard]] bool pipelines_ready() const noexcept { return pipelines_ready_; }
+    void invalidate_temporal_history() noexcept;
+    [[nodiscard]] uint64_t skin_dispatch_count() const noexcept { return skin_dispatch_count_; }
+    [[nodiscard]] uint64_t blas_update_count() const noexcept { return blas_update_count_; }
 
   private:
     void record_external_color_blit(VkCommandBuffer cmd, const FrameRenderRequest& req, uint32_t w,
@@ -389,9 +388,6 @@ class FrameGraph {
     uint32_t prev_stage_scene_h_{0};
 
     // Static targets
-    RegisteredImage orbit_orb_out_{};
-    rhi::RhiImage orbit_orb_depth_{};
-    VkImageLayout orbit_orb_depth_layout_{VK_IMAGE_LAYOUT_UNDEFINED};
     RegisteredImage csm_depth_{};
     RegisteredImage blue_noise_64_{};
     RegisteredImage ltc_inv_m_{};
@@ -410,11 +406,13 @@ class FrameGraph {
     VkPipeline pso_csm_fallback_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_opaque_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_double_sided_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_blend_cull_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_blend_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_additive_cull_{VK_NULL_HANDLE};
+    VkPipeline pso_live2d_additive_nocull_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_opaque_wire_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_double_sided_wire_{VK_NULL_HANDLE};
     VkPipeline pso_live2d_blend_wire_{VK_NULL_HANDLE};
-    VkPipeline pso_orbit_orb_{VK_NULL_HANDLE};
     VkPipeline pso_outline_hull_{VK_NULL_HANDLE};
     VkPipeline pso_crease_lines_{VK_NULL_HANDLE};
     VkPipeline pso_bloom_down_{VK_NULL_HANDLE};
@@ -434,6 +432,8 @@ class FrameGraph {
     std::array<int64_t, 32> shader_mtimes_{};
     uint64_t last_rt_pose_hash_{0};
     uint64_t last_rt_as_update_us_{0};
+    uint64_t skin_dispatch_count_{0};
+    uint64_t blas_update_count_{0};
     const GpuAvatar* last_rt_avatar_{nullptr};
     bool bgra8_supports_storage_{false};
     bool pipelines_ready_{false};

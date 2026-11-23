@@ -63,7 +63,7 @@ struct CircadianLightingResult {
 /** Smoothly evaluates solar trajectory, EV intensities, Kelvin tinting, and anime shadow palette over 24 hours. */
 [[nodiscard]] CircadianLightingResult evaluate_circadian_lighting(float hour_0_to_24) noexcept;
 
-/** Applies evaluated solar/studio rig onto `LightingRig` lights[0..2] (Key, Fill, Rim). */
+/** Applies evaluated solar trajectory to a single locked `NaturalSunCieSky` slot in `LightingRig`. */
 void apply_circadian_to_rig(const CircadianLightingResult& res, LightingRig& rig) noexcept;
 
 } // namespace aether::renderer

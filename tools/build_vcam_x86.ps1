@@ -2,8 +2,8 @@ param(
     [ValidateSet("Debug", "RelWithDebInfo", "Release")]
     [string]$Config = "Release",
     [string]$BuildDir = "build/vcam-x86",
-    [string]$Version = "1.0.3",
-    [string]$ReleaseTag = "a1.0.3B"
+    [string]$Version = "1.0.4",
+    [string]$ReleaseTag = "a1.0.4B"
 )
 
 Set-StrictMode -Version Latest

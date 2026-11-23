@@ -196,12 +196,15 @@ Expected<void> RhiSwapchain::recreate_swapchain_only(uint32_t width, uint32_t he
         if (::GetClientRect(static_cast<HWND>(hwnd_), &cr) != FALSE) {
             const uint32_t phys_w = static_cast<uint32_t>(std::max<LONG>(0L, cr.right - cr.left));
             const uint32_t phys_h = static_cast<uint32_t>(std::max<LONG>(0L, cr.bottom - cr.top));
-            if (phys_w > 0U && phys_h > 0U) {
-                width = phys_w;
-                height = phys_h;
-                desired_w_ = phys_w;
-                desired_h_ = phys_h;
+            if (phys_w == 0U || phys_h == 0U || ::IsIconic(static_cast<HWND>(hwnd_)) != FALSE) {
+                extent_ = VkExtent2D{0, 0};
+                need_recreate_ = true;
+                return Expected<void>{};
             }
+            width = phys_w;
+            height = phys_h;
+            desired_w_ = phys_w;
+            desired_h_ = phys_h;
         }
     }
 #endif
@@ -214,6 +217,11 @@ Expected<void> RhiSwapchain::recreate_swapchain_only(uint32_t width, uint32_t he
     } else {
         extent_.width = std::clamp(desired_w_, caps.minImageExtent.width, caps.maxImageExtent.width);
         extent_.height = std::clamp(desired_h_, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    if (extent_.width == 0U || extent_.height == 0U) {
+        extent_ = VkExtent2D{0, 0};
+        need_recreate_ = true;
+        return Expected<void>{};
     }
 
     uint32_t req_images = caps.minImageCount + 1U;
@@ -294,6 +302,12 @@ Expected<void> RhiSwapchain::set_vsync(bool enabled) {
 }
 
 Expected<AcquiredFrame> RhiSwapchain::acquire_and_begin_commands() {
+#if defined(_WIN32)
+    if (hwnd_ != nullptr && ::IsIconic(static_cast<HWND>(hwnd_)) != FALSE) {
+        need_recreate_ = true;
+        return AcquiredFrame{}; // Minimized window: avoid 0x0 acquire/recreate churn
+    }
+#endif
     if (need_recreate_) {
         auto rc = recreate_swapchain_only(desired_w_, desired_h_);
         if (!rc) {

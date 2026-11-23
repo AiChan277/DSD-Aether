@@ -18,11 +18,11 @@ inline constexpr uint32_t kArkitSlotCount = 52;
 struct AudioLipSyncFrame {
     uint64_t sequence{0};
     uint64_t timestamp_us{0};
-    float vad{0.0f};                     // > 0.0f when voice activity gate is active
-    float audio_open_y{0.0f};            // [0, 1] RMS speech envelope in vocal band (120-3800 Hz)
-    std::array<float, 5> vowel_probs{};  // Normalized formant vowel probabilities [A, I, U, E, O]
-    std::array<float, 3> band_energy{};  // B1 (250-650), B2 (700-1600), B3 (1700-3200) Hz RMS energy
-    float rms_db{-96.0f};                // Vocal-band RMS level in dBFS
+    float vad{0.0f};                    // > 0.0f when voice activity gate is active
+    float audio_open_y{0.0f};           // [0, 1] RMS speech envelope in vocal band (120-3800 Hz)
+    std::array<float, 5> vowel_probs{}; // Normalized formant vowel probabilities [A, I, U, E, O]
+    std::array<float, 3> band_energy{}; // B1 (250-650), B2 (700-1600), B3 (1700-3200) Hz RMS energy
+    float rms_db{-96.0f};               // Vocal-band RMS level in dBFS
     bool device_available{false};
     bool assist_active{false};
 };

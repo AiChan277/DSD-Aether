@@ -7,6 +7,7 @@
 #include "generated/phase4_shaders_spv.hpp"
 #include "renderer/frame_globals_builder.hpp"
 #include "renderer/sdf_generator.hpp"
+#include "renderer/transparent_pass.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,7 +28,7 @@ using detail::kPi;
 using detail::Mat4Vec3;
 using detail::mul_mat4;
 using detail::normalize3;
-using detail::scene_light_dir_to_light;
+using detail::studio_light_dir_to_light;
 
 inline void bind_pipeline_checked(VkCommandBuffer cmd, VkPipelineBindPoint bp, VkPipeline pso,
                                   const char* tag) noexcept {
@@ -255,7 +256,8 @@ Expected<void> FrameGraph::ensure_stage_target_sizes(uint32_t stage_w, uint32_t 
                                                      bool& out_rebuilt) {
     out_rebuilt = false;
     if (device_ == nullptr || device_->device() == VK_NULL_HANDLE) {
-        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "FrameGraph::ensure_stage_target_sizes uninitialized")};
+        return Unexpected<Error>{
+            Error::make(ErrorCode::InvalidArg, "FrameGraph::ensure_stage_target_sizes uninitialized")};
     }
     const uint32_t sw = std::clamp(stage_w, 16u, 4096u);
     const uint32_t sh = std::clamp(stage_h, 16u, 4096u);
@@ -264,8 +266,10 @@ Expected<void> FrameGraph::ensure_stage_target_sizes(uint32_t stage_w, uint32_t 
     const uint32_t rw = std::clamp(qright_w, 16u, 4096u);
     const uint32_t rh = std::clamp(qright_h, 16u, 4096u);
 
-    const bool need_stage = (stage_viewport_out_.img.handle == VK_NULL_HANDLE) || (sw > stage_rt_w_) || (sh > stage_rt_h_);
-    const bool need_qtop = (quad_top_out_.img.handle == VK_NULL_HANDLE) || (tw > quad_top_rt_w_) || (th > quad_top_rt_h_);
+    const bool need_stage =
+        (stage_viewport_out_.img.handle == VK_NULL_HANDLE) || (sw > stage_rt_w_) || (sh > stage_rt_h_);
+    const bool need_qtop =
+        (quad_top_out_.img.handle == VK_NULL_HANDLE) || (tw > quad_top_rt_w_) || (th > quad_top_rt_h_);
     const bool need_qright =
         (quad_right_out_.img.handle == VK_NULL_HANDLE) || (rw > quad_right_rt_w_) || (rh > quad_right_rt_h_);
 
@@ -384,9 +388,8 @@ void FrameGraph::destroy() noexcept {
     transparent_draw_indices_.clear();
     avatar_face_sdf_slot_ = UINT32_MAX;
     bound_avatar_ = nullptr;
-    for (auto& hb : history_) {
-        hb.have_prev_view_proj = false;
-    }
+    accel_.destroy_avatar_structures();
+    invalidate_temporal_history();
     last_rt_avatar_ = nullptr;
     last_rt_pose_hash_ = 0;
     last_rt_as_update_us_ = 0;
@@ -468,24 +471,6 @@ Expected<void> FrameGraph::create_static_targets() {
             return Unexpected<Error>{slot_res.error()};
         }
         fallback_white_slot_ = slot_res.value();
-    }
-
-    // 128x128 Light Orbit Orb target
-    {
-        auto res = device_->create_image_2d(kOrbitOrbSize, kOrbitOrbSize, VK_FORMAT_B8G8R8A8_UNORM,
-                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                                            VK_IMAGE_ASPECT_COLOR_BIT);
-        if (!res) {
-            return Unexpected<Error>{res.error()};
-        }
-        orbit_orb_out_.img = res.value();
-        orbit_orb_out_.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        auto s = bindless_.register_sampled_image(orbit_orb_out_.img.view);
-        if (!s) {
-            return Unexpected<Error>{s.error()};
-        }
-        orbit_orb_out_.sampled_slot = s.value();
     }
 
     // 2048x2048 CSM depth target
@@ -575,8 +560,8 @@ Expected<void> FrameGraph::create_static_targets() {
     };
 
     if (ltc_inv_m_.img.handle == VK_NULL_HANDLE || ltc_amp_.img.handle == VK_NULL_HANDLE) {
-        std::array<float, kLtcLutSize * kLtcLutSize * 4> inv_m{};
-        std::array<float, kLtcLutSize * kLtcLutSize * 4> amp{};
+        std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4> inv_m{};
+        std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4> amp{};
         generate_heitz_ltc_luts(inv_m, amp);
         if (auto r = upload_static_tex(ltc_inv_m_, kLtcLutSize, kLtcLutSize, VK_FORMAT_R32G32B32A32_SFLOAT,
                                        inv_m.data(), inv_m.size() * sizeof(float));
@@ -590,7 +575,7 @@ Expected<void> FrameGraph::create_static_targets() {
         }
     }
     if (ies_lut_.img.handle == VK_NULL_HANDLE) {
-        std::array<float, kIesLutWidth * kIesLutRows> ies{};
+        std::array<float, static_cast<size_t>(kIesLutWidth) * kIesLutRows> ies{};
         generate_ies_lm63_lut(ies);
         if (auto r = upload_static_tex(ies_lut_, kIesLutWidth, kIesLutRows, VK_FORMAT_R32_SFLOAT, ies.data(),
                                        ies.size() * sizeof(float));
@@ -621,9 +606,6 @@ void FrameGraph::destroy_static_targets() noexcept {
         device_->destroy_image(r.img);
         r.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
-    drop(orbit_orb_out_);
-    device_->destroy_image(orbit_orb_depth_);
-    orbit_orb_depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     drop(csm_depth_);
     drop(blue_noise_64_);
     drop(ltc_inv_m_);
@@ -649,8 +631,8 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
 
     auto make_reg = [&](RegisteredImage& dst, uint32_t rw, uint32_t rh, VkFormat fmt, VkImageUsageFlags usage,
                         bool sampled, bool storage, bool uint_sampled,
-                        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT,
-                        bool concurrent_transfer = false, const char* dbg_name = nullptr) -> Expected<void> {
+                        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT, bool concurrent_transfer = false,
+                        const char* dbg_name = nullptr) -> Expected<void> {
         auto img_res = device_->create_image_2d(rw, rh, fmt, usage, aspect, concurrent_transfer);
         if (!img_res) {
             return Unexpected<Error>{img_res.error()};
@@ -693,7 +675,7 @@ Expected<void> FrameGraph::create_size_dependent_targets(uint32_t w, uint32_t h)
         return r;
     if (auto r = make_reg(gb_mv_, w, h, VK_FORMAT_R16G16_SFLOAT, att_sampled, true, false, false); !r)
         return r;
-    if (auto r = make_reg(gb_mat_, w, h, VK_FORMAT_R16_UINT, att_sampled, false, false, true); !r)
+    if (auto r = make_reg(gb_mat_, w, h, VK_FORMAT_R32_UINT, att_sampled, false, false, true); !r)
         return r;
     if (auto r = make_reg(gb_misc_, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att_sampled, true, false, false); !r)
         return r;
@@ -1005,7 +987,9 @@ void FrameGraph::destroy_size_dependent_targets() noexcept {
         drop(hb.prev_rt_shadow);
         drop(hb.prev_rim_occ);
         drop(hb.prev_bounce);
+        hb.have_prev_view_proj = false;
     }
+    denoiser_.invalidate_temporal_history();
 }
 
 Expected<void> FrameGraph::create_pipelines(bool reload_only) {
@@ -1028,11 +1012,13 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         destroy_pso(pso_csm_fallback_);
         destroy_pso(pso_live2d_opaque_);
         destroy_pso(pso_live2d_double_sided_);
+        destroy_pso(pso_live2d_blend_cull_);
         destroy_pso(pso_live2d_blend_);
+        destroy_pso(pso_live2d_additive_cull_);
+        destroy_pso(pso_live2d_additive_nocull_);
         destroy_pso(pso_live2d_opaque_wire_);
         destroy_pso(pso_live2d_double_sided_wire_);
         destroy_pso(pso_live2d_blend_wire_);
-        destroy_pso(pso_orbit_orb_);
         destroy_pso(pso_outline_hull_);
         destroy_pso(pso_crease_lines_);
         destroy_pso(pso_bloom_down_);
@@ -1117,6 +1103,7 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         uint8_t stencil_read_mask{0xFFu};
         uint8_t stencil_write_mask{0xFFu};
         bool color_write_disable{false};
+        bool additive_blend{false};
     };
 
     auto build_gfx = [&](const GfxDesc& gd, VkPipeline& out_pso) -> Expected<void> {
@@ -1180,7 +1167,15 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
                                                ? VkColorComponentFlags{0}
                                                : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
-            if (gd.premul_blend) {
+            if (gd.additive_blend) {
+                blend_atts[i].blendEnable = VK_TRUE;
+                blend_atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                blend_atts[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                blend_atts[i].colorBlendOp = VK_BLEND_OP_ADD;
+                blend_atts[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+                blend_atts[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                blend_atts[i].alphaBlendOp = VK_BLEND_OP_ADD;
+            } else if (gd.premul_blend) {
                 blend_atts[i].blendEnable = VK_TRUE;
                 blend_atts[i].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
                 blend_atts[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -1265,7 +1260,7 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
     static constexpr std::array<VkFormat, 4> kPrepassFormats = {
         VK_FORMAT_R16G16_UNORM,
         VK_FORMAT_R16G16_SFLOAT,
-        VK_FORMAT_R16_UINT,
+        VK_FORMAT_R32_UINT,
         VK_FORMAT_R16G16B16A16_SFLOAT,
     };
     const VkFormat kHdrFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -1300,11 +1295,40 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         return r;
     }
     if (auto r = build_gfx({shaders::Phase4ShaderId::Live2dNprVs, shaders::Phase4ShaderId::Live2dNprFs, &kHdrFmt, 1,
+                            VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_BACK_BIT, true,
+                            false, false, true, false},
+                           pso_live2d_blend_cull_);
+        !r) {
+        return r;
+    }
+    if (auto r = build_gfx({shaders::Phase4ShaderId::Live2dNprVs, shaders::Phase4ShaderId::Live2dNprFs, &kHdrFmt, 1,
                             VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_CULL_MODE_NONE, true, false,
                             false, true, false},
                            pso_live2d_blend_);
         !r) {
         return r;
+    }
+    {
+        GfxDesc add_cull{shaders::Phase4ShaderId::Live2dNprVs,
+                         shaders::Phase4ShaderId::Live2dNprFs,
+                         &kHdrFmt,
+                         1,
+                         VK_FORMAT_D32_SFLOAT_S8_UINT,
+                         VK_FORMAT_D32_SFLOAT_S8_UINT,
+                         VK_CULL_MODE_BACK_BIT,
+                         true,
+                         false,
+                         false,
+                         false,
+                         false};
+        add_cull.additive_blend = true;
+        if (auto r = build_gfx(add_cull, pso_live2d_additive_cull_); !r) {
+            return r;
+        }
+        add_cull.cull = VK_CULL_MODE_NONE;
+        if (auto r = build_gfx(add_cull, pso_live2d_additive_nocull_); !r) {
+            return r;
+        }
     }
     wireframe_supported_ = device_->gpu_info().fill_mode_non_solid;
     if (wireframe_supported_) {
@@ -1337,13 +1361,6 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         !r) {
         return r;
     }
-    if (auto r =
-            build_gfx({shaders::Phase4ShaderId::OrbitOrbVs, shaders::Phase4ShaderId::OrbitOrbFs, &kLdrFmt, 1,
-                       VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_CULL_MODE_NONE, false, false, false, false, false},
-                      pso_orbit_orb_);
-        !r) {
-        return r;
-    }
     if (auto r = build_gfx({shaders::Phase4ShaderId::ViewportComposeVs, shaders::Phase4ShaderId::ViewportComposeFs,
                             &kLdrFmt, 1, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_CULL_MODE_NONE, false, false,
                             false, false, false},
@@ -1358,11 +1375,10 @@ Expected<void> FrameGraph::create_pipelines(bool reload_only) {
         !r) {
         return r;
     }
-    if (auto r =
-            build_gfx({shaders::Phase4ShaderId::StageSchematicVs, shaders::Phase4ShaderId::StageSchematicFs, &kLdrFmt,
-                       1, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_CULL_MODE_NONE, false, false, false, true,
-                       false},
-                      pso_stage_schematic_);
+    if (auto r = build_gfx({shaders::Phase4ShaderId::StageSchematicVs, shaders::Phase4ShaderId::StageSchematicFs,
+                            &kLdrFmt, 1, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_CULL_MODE_NONE, false, false,
+                            false, true, false},
+                           pso_stage_schematic_);
         !r) {
         return r;
     }
@@ -1388,11 +1404,13 @@ void FrameGraph::destroy_pipelines() noexcept {
     drop_p(pso_csm_fallback_);
     drop_p(pso_live2d_opaque_);
     drop_p(pso_live2d_double_sided_);
+    drop_p(pso_live2d_blend_cull_);
     drop_p(pso_live2d_blend_);
+    drop_p(pso_live2d_additive_cull_);
+    drop_p(pso_live2d_additive_nocull_);
     drop_p(pso_live2d_opaque_wire_);
     drop_p(pso_live2d_double_sided_wire_);
     drop_p(pso_live2d_blend_wire_);
-    drop_p(pso_orbit_orb_);
     drop_p(pso_outline_hull_);
     drop_p(pso_crease_lines_);
     drop_p(pso_bloom_down_);
@@ -1480,6 +1498,13 @@ Expected<void> FrameGraph::apply_face_sdf(const SdfBakeOutput& baked) {
     return {};
 }
 
+void FrameGraph::invalidate_temporal_history() noexcept {
+    for (auto& hb : history_) {
+        hb.have_prev_view_proj = false;
+    }
+    denoiser_.invalidate_temporal_history();
+}
+
 Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     if (device_ == nullptr) {
         return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "FrameGraph::bind_avatar uninitialized")};
@@ -1511,9 +1536,8 @@ Expected<void> FrameGraph::bind_avatar(const GpuAvatar* avatar) {
     transparent_draw_indices_.clear();
     avatar_face_sdf_slot_ = UINT32_MAX;
     bound_avatar_ = nullptr;
-    for (auto& hb : history_) {
-        hb.have_prev_view_proj = false;
-    }
+    accel_.destroy_avatar_structures();
+    invalidate_temporal_history();
     last_rt_avatar_ = nullptr;
     last_rt_as_update_us_ = 0ULL;
     last_rt_pose_hash_ = 0ULL;
@@ -1658,8 +1682,9 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     const detail::StageRenderRegion sreg =
         is_stage_view
             ? detail::compute_stage_render_region(req, rw, rh, dst_rt_w, dst_rt_h)
-            : detail::StageRenderRegion{rw, rh, rw, rh, static_cast<float>(rw) / static_cast<float>(rh),
-                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+            : detail::StageRenderRegion{rw,   rh,   rw,   rh,   static_cast<float>(rw) / static_cast<float>(rh),
+                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                                        1.0f, 1.0f, 1.0f};
     const uint32_t w = sreg.scene_w;
     const uint32_t h = sreg.scene_h;
 
@@ -1677,9 +1702,17 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
     const LightingRig& rig = *req.rig;
 
     const bool record_timing = !req.skip_skin_and_blas;
+    const bool record_stage_scope =
+        is_stage_view && (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::MainStage);
     if (record_timing) {
         timing_.cmd_reset_frame(cmd, fslot);
         rebar_.begin_frame(req.frame_index, req.completed_frame_index);
+    }
+    if (record_stage_scope) {
+        if (!record_timing) {
+            timing_.cmd_reset_scope(cmd, fslot, rhi::GpuPassId::LightingStage);
+        }
+        timing_.begin_scope(cmd, fslot, rhi::GpuPassId::LightingStage);
     }
     auto t_begin = [&](rhi::GpuPassId id) noexcept {
         if (record_timing) {
@@ -1695,14 +1728,17 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
 
     auto fg_alloc_res = rebar_.allocate(sizeof(GpuFrameGlobals), 64);
     if (!fg_alloc_res) {
+        if (record_stage_scope) {
+            timing_.end_scope(cmd, fslot, rhi::GpuPassId::LightingStage);
+        }
         return;
     }
     const bool allow_view_hist =
         !is_stage_view || (req.stage_output_slot == FrameRenderRequest::StageOutputSlot::MainStage);
     const uint32_t view_bank = is_stage_view ? 1u : 0u;
     TemporalHistoryBank& hb = history_[view_bank];
-    const bool stage_size_changed = is_stage_view && allow_view_hist &&
-                                    (w != prev_stage_scene_w_ || h != prev_stage_scene_h_);
+    const bool stage_size_changed =
+        is_stage_view && allow_view_hist && (w != prev_stage_scene_w_ || h != prev_stage_scene_h_);
     if (is_stage_view && allow_view_hist) {
         prev_stage_scene_w_ = w;
         prev_stage_scene_h_ = h;
@@ -1824,8 +1860,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
         // (DirectX 12 / 11) Broadcast frame the Vulkan graph never runs Pass 1, so the LightingStage pass must skin.
         const bool skinned_this_frame =
             (last_skinned_avatar_ == req.avatar) && (last_skinned_frame_index_ == req.frame_index);
-        const bool reuse_skin_and_tlas =
-            req.skip_skin_and_blas && skinned_this_frame && (!use_rt || accel_.is_ready());
+        const bool reuse_skin_and_tlas = req.skip_skin_and_blas && skinned_this_frame && (!use_rt || accel_.is_ready());
         last_skinned_avatar_ = req.avatar;
         last_skinned_frame_index_ = req.frame_index;
         if (!reuse_skin_and_tlas) {
@@ -1844,17 +1879,19 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 pc.param0 = req.avatar->requirements.vertex_count;
                 pc.param1 = hist_valid ? 1u : 0u;
                 bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pso_skin_morph_, "skin_morph");
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_global_, 0, 1, &set0, 0,
+                                        nullptr);
                 vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
                 vkCmdDispatch(cmd, (pc.param0 + 63u) / 64u, 1, 1);
+                ++skin_dispatch_count_;
             }
             t_end(rhi::GpuPassId::SkinMorph);
 
             const VkPipelineStageFlags2 skin_dst_stage =
                 VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
                 (use_rt ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR : 0ULL);
-            cmd_buffer_barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, skin_dst_stage,
-                               VK_ACCESS_2_SHADER_READ_BIT);
+            cmd_buffer_barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+                               skin_dst_stage, VK_ACCESS_2_SHADER_READ_BIT);
 
             // === PASS 2: BLAS refit (or 300-frame rebuild) + TLAS rebuild ===
             if (use_rt) {
@@ -1892,8 +1929,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                     }
                     const bool must_build =
                         (!accel_.is_ready() || req.avatar != last_rt_avatar_ || last_rt_as_update_us_ == 0ULL);
-                    // Always refit immediately whenever pose or morph target hash changed so rasterizer & BLAS have 0.0-px
-                    // drift.
+                    // Always refit immediately whenever pose or morph target hash changed so rasterizer & BLAS have
+                    // 0.0-px drift.
                     run_as_update = must_build || (pose_hash != last_rt_pose_hash_);
                     if (run_as_update) {
                         last_rt_avatar_ = req.avatar;
@@ -1904,6 +1941,7 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 if (run_as_update) {
                     accel_.record_update(cmd, *req.avatar, skinned_vertices_buf_.device_address, req.frame_slot,
                                          req.frame_index, bindless_, false);
+                    ++blas_update_count_;
                 }
             }
         }
@@ -2082,8 +2120,12 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 pc.param0 = 0;
                 vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
                 for (const uint32_t idx : opaque_draw_indices_) {
-                    vkCmdDrawIndexed(cmd, cached_submeshes_[idx].index_count, 1, cached_submeshes_[idx].index_offset, 0,
-                                     0);
+                    const auto& d = cached_submeshes_[idx];
+                    const auto& gm = active_materials_scratch_[d.material_index];
+                    if (!is_shadow_caster_submesh(d, gm)) {
+                        continue;
+                    }
+                    vkCmdDrawIndexed(cmd, d.index_count, 1, d.index_offset, 0, 0);
                 }
                 vkCmdEndRendering(cmd);
                 trans(csm_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2150,12 +2192,9 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
             dvi.denoised_bounce_storage_slot = bounce_denoised_.storage_slot;
             dvi.bounce_width = hw;
             dvi.bounce_height = hh;
-            dvi.history_shadow_sampled_slot =
-                hist_valid ? hb.prev_rt_shadow.sampled_slot : rt_shadow_raw_.sampled_slot;
-            dvi.history_rim_sampled_slot =
-                hist_valid ? hb.prev_rim_occ.sampled_slot : rim_occ_raw_.sampled_slot;
-            dvi.history_bounce_sampled_slot =
-                hist_valid ? hb.prev_bounce.sampled_slot : bounce_half_.sampled_slot;
+            dvi.history_shadow_sampled_slot = hist_valid ? hb.prev_rt_shadow.sampled_slot : rt_shadow_raw_.sampled_slot;
+            dvi.history_rim_sampled_slot = hist_valid ? hb.prev_rim_occ.sampled_slot : rim_occ_raw_.sampled_slot;
+            dvi.history_bounce_sampled_slot = hist_valid ? hb.prev_bounce.sampled_slot : bounce_half_.sampled_slot;
             dvi.gb_normal_sampled_slot = gb_n_.sampled_slot;
             dvi.gb_mv_sampled_slot = gb_mv_.sampled_slot;
             dvi.depth_sampled_slot = depth_sampled_slot_;
@@ -2286,11 +2325,22 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 VkPipeline cur = VK_NULL_HANDLE;
                 for (const uint32_t idx : list) {
                     const auto& d = cached_submeshes_[idx];
-                    VkPipeline want = transparent_bucket
-                                          ? (use_wire ? pso_live2d_blend_wire_ : pso_live2d_blend_)
-                                          : ((d.cull_mode != 0u)
-                                                 ? (use_wire ? pso_live2d_double_sided_wire_ : pso_live2d_double_sided_)
-                                                 : (use_wire ? pso_live2d_opaque_wire_ : pso_live2d_opaque_));
+                    const auto& gm = active_materials_scratch_[d.material_index];
+                    const bool is_add = transparent_bucket && is_additive_submesh(d, gm);
+                    VkPipeline want = VK_NULL_HANDLE;
+                    if (transparent_bucket) {
+                        if (use_wire) {
+                            want = pso_live2d_blend_wire_;
+                        } else if (is_add) {
+                            want = (d.cull_mode != 0u) ? pso_live2d_additive_nocull_ : pso_live2d_additive_cull_;
+                        } else {
+                            want = (d.cull_mode != 0u) ? pso_live2d_blend_ : pso_live2d_blend_cull_;
+                        }
+                    } else {
+                        want = (d.cull_mode != 0u)
+                                   ? (use_wire ? pso_live2d_double_sided_wire_ : pso_live2d_double_sided_)
+                                   : (use_wire ? pso_live2d_opaque_wire_ : pso_live2d_opaque_);
+                    }
                     if (want != cur) {
                         bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want,
                                               transparent_bucket ? "live2d_blend" : "live2d_opaque_or_ds");
@@ -2303,7 +2353,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                     pc.param0 = d.material_index;
                     pc.param1 = d.flags |
                                 ((d.alpha_mode == AETHER_ALPHA_MODE_MASK) ? AETHER_SUBMESH_FLAG_ALPHA_CUTOUT : 0u) |
-                                (transparent_bucket ? AETHER_SUBMESH_FLAG_TRANSPARENT : 0u);
+                                (transparent_bucket ? AETHER_SUBMESH_FLAG_TRANSPARENT : 0u) |
+                                (is_add ? AETHER_SUBMESH_FLAG_ADDITIVE : 0u);
                     vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, d.index_count, 1, d.index_offset, 0, 0);
                 }
@@ -2319,7 +2370,8 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                 bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_outline_hull_, "outline_hull");
                 for (const uint32_t idx : opaque_draw_indices_) {
                     const auto& d = cached_submeshes_[idx];
-                    if (cached_materials_[d.material_index].outline_color_width[3] <= 0.0001f) {
+                    const auto& gm = active_materials_scratch_[d.material_index];
+                    if (!is_outline_enabled_submesh(d, gm)) {
                         continue;
                     }
                     GpuPushConstants pc{};
@@ -2336,7 +2388,9 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
             t_end(rhi::GpuPassId::OutlineHull);
 
             // Pass 8: Sorted Transparent NPR (eye highlights, lashes, translucent garments)
+            t_begin(rhi::GpuPassId::TransparentPass);
             draw_npr_list(transparent_draw_indices_, true);
+            t_end(rhi::GpuPassId::TransparentPass);
             vkCmdEndRendering(cmd);
         }
 
@@ -2556,6 +2610,9 @@ void FrameGraph::record_critical_passes(VkCommandBuffer cmd, const FrameRenderRe
                        VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT);
     t_end(rhi::GpuPassId::OutputEncode);
     t_end(rhi::GpuPassId::FrameTotal);
+    if (record_stage_scope) {
+        timing_.end_scope(cmd, fslot, rhi::GpuPassId::LightingStage);
+    }
 
     if (has_avatar && allow_view_hist) {
         hb.have_prev_view_proj = true;
@@ -2678,9 +2735,10 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     const uint32_t eff_h = effective_output_height();
     const detail::StageRenderRegion sreg =
         is_stage ? detail::compute_stage_render_region(req, eff_w, eff_h, rt_w, rt_h)
-                 : detail::StageRenderRegion{rt_w, rt_h, eff_w, eff_h,
-                                             static_cast<float>(rt_w) / static_cast<float>(std::max(1u, rt_h)),
-                                             1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+                 : detail::StageRenderRegion{
+                       rt_w, rt_h, eff_w, eff_h, static_cast<float>(rt_w) / static_cast<float>(std::max(1u, rt_h)),
+                       1.0f, 1.0f, 1.0f,  1.0f,  1.0f,
+                       1.0f, 1.0f, 1.0f};
     const uint32_t w = sreg.target_w;
     const uint32_t h = sreg.target_h;
     if (is_stage) {
@@ -2729,9 +2787,9 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     float ui_w_f = static_cast<float>(w);
     float ui_h_f = static_cast<float>(h);
     if (!is_stage) {
-        aspect_layout = core::compute_viewport_aspect_layout(
-            static_cast<float>(rt_w), static_cast<float>(rt_h), static_cast<float>(eff_w), static_cast<float>(eff_h),
-            req.viewport_aspect_mode);
+        aspect_layout = core::compute_viewport_aspect_layout(static_cast<float>(rt_w), static_cast<float>(rt_h),
+                                                             static_cast<float>(eff_w), static_cast<float>(eff_h),
+                                                             req.viewport_aspect_mode);
         heat_cam.fovy_rad = aspect_layout.effective_fovy_rad(req.camera.fovy_rad);
         ui_aspect = aspect_layout.frame_aspect;
         ui_w_f = aspect_layout.frame_width();
@@ -2752,13 +2810,27 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     fg.stage_camera_params[1] = heat_cam.ortho_height;
     fg.stage_camera_params[2] = is_stage ? static_cast<float>(static_cast<uint8_t>(req.stage_diag_mode)) : 0.0f;
     fg.stage_camera_params[3] = (is_stage && req.stage_fast_panning) ? 1.0f : 0.0f;
-    const Mat4Vec3 kd = scene_light_dir_to_light(req.rig->lights[0]);
-    fg.lights[0].pos_or_dir[0] = kd.x;
-    fg.lights[0].pos_or_dir[1] = kd.y;
-    fg.lights[0].pos_or_dir[2] = kd.z;
-    fg.lights[0].color_intensity[0] = req.rig->lights[0].color[0] * req.rig->lights[0].intensity;
-    fg.lights[0].color_intensity[1] = req.rig->lights[0].color[1] * req.rig->lights[0].intensity;
-    fg.lights[0].color_intensity[2] = req.rig->lights[0].color[2] * req.rig->lights[0].intensity;
+    const StudioLightSpec* dom_key = req.rig->dominant_key_light();
+    if (dom_key != nullptr) {
+        const Mat4Vec3 kd = studio_light_dir_to_light(*dom_key, {0.0f, 1.32f, 0.0f}, {eye.x, eye.y, eye.z});
+        fg.photometric_params0[0] = kd.x;
+        fg.photometric_params0[1] = kd.y;
+        fg.photometric_params0[2] = kd.z;
+        fg.photometric_params0[3] = 1.0f;
+        fg.photometric_params1[0] = dom_key->tint_rgb[0] * dom_key->intensity_ev100;
+        fg.photometric_params1[1] = dom_key->tint_rgb[1] * dom_key->intensity_ev100;
+        fg.photometric_params1[2] = dom_key->tint_rgb[2] * dom_key->intensity_ev100;
+        fg.photometric_params1[3] = 1.0f;
+    } else {
+        fg.photometric_params0[0] = 0.42f;
+        fg.photometric_params0[1] = 0.56f;
+        fg.photometric_params0[2] = 0.71f;
+        fg.photometric_params0[3] = 0.0f;
+        fg.photometric_params1[0] = 0.0f;
+        fg.photometric_params1[1] = 0.0f;
+        fg.photometric_params1[2] = 0.0f;
+        fg.photometric_params1[3] = 0.0f;
+    }
     std::memcpy(fg_alloc.mapped, &fg, sizeof(fg));
 
     if (!is_stage) {
@@ -2767,8 +2839,8 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     }
 
     // Pass 13A: Studio Viewport Checkerboard + Optional Alt+C Skeleton Heatmap / Lighting Stage Schematic Overlay
-    trans(*dst_vp, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-          VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    trans(*dst_vp, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
     {
         VkRenderingAttachmentInfo col_att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         col_att.imageView = dst_vp->img.view;
@@ -2980,8 +3052,7 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         }
 
         // Pass 13C: Schematic-Only Lighting Stage Overlay (strictly isolated to RenderViewKind::LightingStage)
-        const bool allow_schematic =
-            is_stage && req.show_stage_schematic && (pso_stage_schematic_ != VK_NULL_HANDLE);
+        const bool allow_schematic = is_stage && req.show_stage_schematic && (pso_stage_schematic_ != VK_NULL_HANDLE);
         if (allow_schematic) {
             StageSchematicBuildParams sp{};
             sp.selected_light_idx = req.selected_studio_light_idx;
@@ -2999,8 +3070,12 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
                                 static_cast<size_t>(elem_cnt) * sizeof(GpuStageOverlayElem));
                     // Negative-height viewport anchored at y = h (NOT y = w): any w != h previously shifted the
                     // grid / schematic / frustum overlay by (w - h) px, pushing it out of wide stage canvases.
-                    const VkViewport svp{0.0f, static_cast<float>(std::max(h, 1u)), static_cast<float>(w),
-                                         -static_cast<float>(std::max(h, 1u)), 0.0f, 1.0f};
+                    const VkViewport svp{0.0f,
+                                         static_cast<float>(std::max(h, 1u)),
+                                         static_cast<float>(w),
+                                         -static_cast<float>(std::max(h, 1u)),
+                                         0.0f,
+                                         1.0f};
                     const VkRect2D ssc{{0, 0}, {w, h}};
                     vkCmdSetViewport(cmd, 0, 1, &svp);
                     vkCmdSetScissor(cmd, 0, 1, &ssc);
@@ -3026,8 +3101,8 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
     if (!is_stage && req.encode_stage_broadcast_pip && stage_broadcast_pip_out_.img.handle != VK_NULL_HANDLE) {
         const uint32_t pw = stage_pip_w_;
         const uint32_t ph = stage_pip_h_;
-        trans(stage_broadcast_pip_out_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        trans(stage_broadcast_pip_out_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+              VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
         VkRenderingAttachmentInfo pa{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         pa.imageView = stage_broadcast_pip_out_.img.view;
@@ -3062,41 +3137,6 @@ void FrameGraph::record_ui_passes(VkCommandBuffer cmd, const FrameRenderRequest&
         vkCmdEndRendering(cmd);
         trans(stage_broadcast_pip_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
               VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
-    }
-
-    // Pass 13B: 128x128 Light Orbit Orb Preview
-    if (req.show_orbit_orb && !is_stage) {
-        trans(orbit_orb_out_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-              VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        VkRenderingAttachmentInfo oa{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        oa.imageView = orbit_orb_out_.img.view;
-        oa.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        oa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        oa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        oa.clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-        VkRenderingInfo ori{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        ori.renderArea = {{0, 0}, {kOrbitOrbSize, kOrbitOrbSize}};
-        ori.layerCount = 1;
-        ori.colorAttachmentCount = 1;
-        ori.pColorAttachments = &oa;
-        vkCmdBeginRendering(cmd, &ori);
-        const VkViewport ovp{0.0f, 0.0f, static_cast<float>(kOrbitOrbSize), static_cast<float>(kOrbitOrbSize),
-                             0.0f, 1.0f};
-        const VkRect2D osc{{0, 0}, {kOrbitOrbSize, kOrbitOrbSize}};
-        vkCmdSetViewport(cmd, 0, 1, &ovp);
-        vkCmdSetScissor(cmd, 0, 1, &osc);
-        bind_pipeline_checked(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso_orbit_orb_, "orbit_orb");
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout_global_, 0, 1, &set0, 0, nullptr);
-        GpuPushConstants opc{};
-        opc.frame_globals_bda = fg_alloc.device_address;
-        vkCmdPushConstants(cmd, pipe_layout_global_, VK_SHADER_STAGE_ALL, 0, sizeof(opc), &opc);
-        vkCmdDraw(cmd, 3, 1, 0, 0);
-        vkCmdEndRendering(cmd);
-        trans(orbit_orb_out_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
               VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
     }
@@ -3286,8 +3326,6 @@ FrameGraphOutputs FrameGraph::outputs_for_slot(uint32_t ring_slot) const noexcep
     o.quad_right_view = quad_right_out_.img.view;
     o.stage_broadcast_pip_image = stage_broadcast_pip_out_.img.handle;
     o.stage_broadcast_pip_view = stage_broadcast_pip_out_.img.view;
-    o.orbit_orb_image = orbit_orb_out_.img.handle;
-    o.orbit_orb_view = orbit_orb_out_.img.view;
     o.rt_shadow_raw_image = rt_shadow_raw_.img.handle;
     o.rt_shadow_denoised_image = rt_shadow_denoised_.img.handle;
     o.hdr_scene_image = hdr_scene_.img.handle;

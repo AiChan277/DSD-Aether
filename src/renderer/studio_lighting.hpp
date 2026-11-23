@@ -162,14 +162,14 @@ uint32_t pack_studio_lights_gpu(const LightingRig& rig, const std::array<float, 
  * Generates precomputed 64x64 Heitz (2016) GGX Linearly Transformed Cosines inverse matrix (`M^-1`)
  * and amplitude/Fresnel LUT (`RGBA32F`, 4 floats per texel).
  */
-void generate_heitz_ltc_luts(std::array<float, kLtcLutSize * kLtcLutSize * 4>& out_inv_m,
-                             std::array<float, kLtcLutSize * kLtcLutSize * 4>& out_amp) noexcept;
+void generate_heitz_ltc_luts(std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4>& out_inv_m,
+                             std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4>& out_amp) noexcept;
 
 /**
  * Generates precomputed 256x64 `R32F` ANSI/IES LM-63-19 photometric goniometer beam LUT.
  * Row `0..7` hold calibrated profiles (Softbox, Octa, Strip, Parabolic, Fresnel Spot, Dedo Spot, Leko, Ring).
  */
-void generate_ies_lm63_lut(std::array<float, kIesLutWidth * kIesLutRows>& out_ies_r32f) noexcept;
+void generate_ies_lm63_lut(std::array<float, static_cast<size_t>(kIesLutWidth) * kIesLutRows>& out_ies_r32f) noexcept;
 
 /** Computes analytical 3-band Hillaire (2020) Rayleigh+Mie atmosphere Spherical Harmonics (9 `float4` RGB). */
 void compute_hillaire_sky_sh9(const std::array<float, 3>& sun_dir_ws, const std::array<float, 3>& sun_color_lin,
@@ -207,16 +207,19 @@ struct StudioLightWorldPose {
 void bake_studio_light_world_pose(StudioLightSpec& spec, const std::array<float, 3>& pivot_ws,
                                   const std::array<float, 3>& eye_pos_ws) noexcept;
 
-/** Ensures `rig.studio_lights` is populated (converting legacy `rig.lights` once if needed) and activates studio array mode. */
-void ensure_studio_lights_initialized(LightingRig& rig, const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+/** Ensures `rig.studio_lights` is populated (converting legacy `rig.lights` once if needed) and activates studio array
+ * mode. */
+void ensure_studio_lights_initialized(LightingRig& rig,
+                                      const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
 
 /** Appends a new fixture to `rig.studio_lights` (up to `kMaxStudioLights`), returning its index or `-1` when full. */
 [[nodiscard]] int add_studio_light(LightingRig& rig, StudioFixtureProfile profile,
-                                     const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+                                   const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
 
-/** Appends a passive bounce card or negative fill flag to `rig.studio_lights`, returning its index or `-1` when full. */
+/** Appends a passive bounce card or negative fill flag to `rig.studio_lights`, returning its index or `-1` when full.
+ */
 [[nodiscard]] int add_passive_flag(LightingRig& rig, PassiveFlagMode mode,
-                                     const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
+                                   const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
 
 /** Duplicates `rig.studio_lights[index]` (offset slightly in azimuth), returning the new index or `-1`. */
 [[nodiscard]] int duplicate_studio_light(LightingRig& rig, uint32_t index) noexcept;
@@ -224,7 +227,7 @@ void ensure_studio_lights_initialized(LightingRig& rig, const std::array<float, 
 /** Removes `rig.studio_lights[index]` cleanly without leaving dangling gaps. */
 [[nodiscard]] bool remove_studio_light(LightingRig& rig, uint32_t index) noexcept;
 
-/** 5 built-in complete studio rig presets shipped in `config/lighting_rigs.json`. */
+/** 5 built-in complete studio rig presets shipped as `.alfx` packages in `presets/alfx`. */
 enum class StudioRigPresetId : uint8_t {
     ThreePointBroadcast = 0,
     DramaticRimSplit = 1,

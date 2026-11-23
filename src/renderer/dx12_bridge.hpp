@@ -65,7 +65,9 @@ class Dx12Bridge {
 
     void set_force_cpu_copy(bool force) noexcept { force_cpu_copy_ = force; }
 
-    [[nodiscard]] bool ready() const noexcept { return image_ != VK_NULL_HANDLE && d3d12_ != nullptr && fg_.pipelines_ready(); }
+    [[nodiscard]] bool ready() const noexcept {
+        return image_ != VK_NULL_HANDLE && d3d12_ != nullptr && fg_.pipelines_ready();
+    }
     [[nodiscard]] bool is_avatar_bound(const GpuAvatar* avatar) const noexcept {
         return bound_avatar_ == avatar && fg_.bound_avatar() == avatar;
     }

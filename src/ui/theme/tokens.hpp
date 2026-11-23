@@ -331,6 +331,32 @@ struct PrecisionDarkTokens {
     float wire_thickness_hot{3.8f};
     float wire_shadow_thickness{5.0f};
     float wire_detach_threshold{4.0f};
+
+    // DaVinci Resolve-style Project Manager tokens (Rev 3.1 §5)
+    ImVec4 pm_card_bg = hex_rgba(0x161B24FF);
+    ImVec4 pm_card_hover = hex_rgba(0x1F2633FF);
+    ImVec4 pm_card_selected = hex_rgba(0x1B2D4DFF);
+    ImVec4 pm_sidebar_bg = hex_rgba(0x11141BFF);
+    ImVec4 pm_recovery_bg = hex_rgba(0x2B1E0CFF);
+    ImVec4 pm_recovery_border = hex_rgba(0xF59E0BFF);
+    ImU32 col32_pm_card_bg = hex_col32(0x161B24FF);
+    ImU32 col32_pm_card_hover = hex_col32(0x1F2633FF);
+    ImU32 col32_pm_card_selected = hex_col32(0x1B2D4DFF);
+    ImU32 col32_pm_card_border = hex_col32(0x2A3242FF);
+    ImU32 col32_pm_card_border_sel = hex_col32(0x3B82F6FF);
+    ImU32 col32_pm_thumb_bg = hex_col32(0x0D1017FF);
+    ImU32 col32_pm_pin_badge = hex_col32(0xF59E0BFF);
+    ImU32 col32_pm_format_vrm = hex_col32(0x38BDF8E6);
+    ImU32 col32_pm_format_pmx = hex_col32(0xA855F7E6);
+    ImU32 col32_pm_recovery_bg = hex_col32(0x2B1E0CF2);
+    ImU32 col32_pm_recovery_border = hex_col32(0xF59E0BFF);
+    std::array<ImU32, 5> col32_pm_vault_swatches{
+        hex_col32(0xF8FAFCFF), // Studio Clean Daylight
+        hex_col32(0xFB923CFF), // Anime Sunset Rim
+        hex_col32(0x22D3EEFF), // Cyber Neon Stage
+        hex_col32(0xF472B6FF), // Soft Pastel VRM
+        hex_col32(0xF59E0BFF), // Dramatic Chiaroscuro
+    };
 };
 
 [[nodiscard]] inline PrecisionDarkTokens build_tokens(bool high_contrast) noexcept {
@@ -349,6 +375,7 @@ struct PrecisionDarkTokens {
         t.col32_border_strong = hex_col32(0x697489FF);
         t.col32_node_border = hex_col32(0x4A5262FF);
         t.col32_orb_ring = hex_col32(0x4A5262FF);
+        t.col32_pm_card_border = hex_col32(0x4A5262FF);
     }
     return t;
 }

@@ -31,14 +31,14 @@ struct VisibilityFirstConfig {
     IdleAttractorMode left_arm_idle{IdleAttractorMode::Desk};
     IdleAttractorMode right_arm_idle{IdleAttractorMode::Desk};
     // Natural relaxed idle pose for untracked arms/hands (degrees / radians).
-    float idle_arm_drop_deg{68.0f};     // upper arm below horizontal (a stiff A-pose is ~35-40)
-    float idle_arm_forward_deg{10.0f};  // arms hang slightly in front of the body
-    float idle_elbow_bend_deg{16.0f};   // soft elbow flex
-    float idle_wrist_flex_deg{8.0f};    // relaxed wrist
-    float idle_finger_curl_rad{0.26f};  // base per-joint finger curl
-    float idle_sway_deg{0.45f};         // slow torso sway amplitude (with breathing)
-    bool enable_idle_breathing{true};   // Warudo additive idle breathing (0.22 Hz, 1.2 deg chest, 0.8 deg shoulders)
-    bool enable_hand_ik{false};         // Hard-bypass hand tracking & arm IK; lock clean relaxed standing arm pose
+    float idle_arm_drop_deg{68.0f};    // upper arm below horizontal (a stiff A-pose is ~35-40)
+    float idle_arm_forward_deg{10.0f}; // arms hang slightly in front of the body
+    float idle_elbow_bend_deg{16.0f};  // soft elbow flex
+    float idle_wrist_flex_deg{8.0f};   // relaxed wrist
+    float idle_finger_curl_rad{0.26f}; // base per-joint finger curl
+    float idle_sway_deg{0.45f};        // slow torso sway amplitude (with breathing)
+    bool enable_idle_breathing{true};  // Warudo additive idle breathing (0.22 Hz, 1.2 deg chest, 0.8 deg shoulders)
+    bool enable_hand_ik{false};        // Hard-bypass hand tracking & arm IK; lock clean relaxed standing arm pose
 };
 
 struct FootPlantState {

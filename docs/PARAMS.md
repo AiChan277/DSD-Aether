@@ -1,7 +1,7 @@
 # AETHER-2.5D Parameter Registry (`REQ-UI-010`)
 
 Generated automatically from [`src/ui/params/param_registry.hpp`](../src/ui/params/param_registry.hpp) (`tools/gen_params_doc.py`).
-Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` key, `/aether/param/<id>` OSC endpoint, Command Palette entry, and documentation table is derived from this single source.
+Do not edit manually; every UI Inspector row, `session_state.json` / `.apr` key, `/aether/param/<id>` OSC endpoint, Command Palette entry, and documentation table is derived from this single source.
 
 | ID | Group | Label | Type | Owner | Default | Range | Unit | OSC Endpoint | Flags |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -18,11 +18,6 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `sim.ik_weight` | Physics | IK Blend Weight | `float` | T2 | `1.0` | `[0.0, 1.0]` | — | `/aether/param/sim.ik_weight` | persist, project, osc, graph, undoable |
 | `render.flatness` | Render | Live2D Flatness | `float` | T3 | `0.75` | `[0.0, 1.0]` | — | `/aether/param/render.flatness` | persist, project, osc, graph, undoable |
 | `render.light_scale` | Render | Light Scale | `float` | T3 | `1.0` | `[0.1, 4.0]` | x | `/aether/param/render.light_scale` | persist, project, osc, graph, undoable |
-| `render.key_azimuth_deg` | Render | Key Azimuth | `float` | T3 | `32.0` | `[-180.0, 180.0]` | deg | `/aether/param/render.key_azimuth_deg` | persist, project, osc, graph, undoable |
-| `render.key_elevation_deg` | Render | Key Elevation | `float` | T3 | `26.0` | `[-85.0, 85.0]` | deg | `/aether/param/render.key_elevation_deg` | persist, project, osc, graph, undoable |
-| `render.key_intensity` | Render | Key Intensity | `float` | T3 | `1.00` | `[0.0, 6.0]` | EV | `/aether/param/render.key_intensity` | persist, project, osc, graph, undoable |
-| `render.fill_intensity` | Render | Fill Intensity | `float` | T3 | `0.28` | `[0.0, 4.0]` | EV | `/aether/param/render.fill_intensity` | persist, project, osc, graph, undoable |
-| `render.rim_intensity` | Render | Rim Intensity | `float` | T3 | `0.35` | `[0.0, 6.0]` | EV | `/aether/param/render.rim_intensity` | persist, project, osc, graph, undoable |
 | `render.outline_scale` | Render | Outline Scale | `float` | T3 | `1.0` | `[0.0, 3.0]` | x | `/aether/param/render.outline_scale` | persist, project, osc, graph, undoable |
 | `render.bloom_intensity` | Render | Premul Bloom | `float` | T3 | `0.06` | `[0.0, 1.5]` | — | `/aether/param/render.bloom_intensity` | persist, project, osc, graph, undoable |
 | `render.rt_enabled` | Render | Ray Tracing | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | `/aether/param/render.rt_enabled` | persist, project, osc, undoable |
@@ -49,20 +44,12 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `render.filter_dog_ink` | Render | DoG Ink AA | `float` | T3 | `0.60` | `[0.0, 1.5]` | — | — | persist, project, undoable |
 | `render.filter_paper_warmth` | Render | Anime Paper Warmth | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.filter_paper_warmth_amt` | Render | Warmth Strength | `float` | T3 | `0.25` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.photometric_beam_angle` | Render | Beam Angle | `float` | T3 | `32.0` | `[8.0, 55.0]` | deg | — | persist, project, undoable |
 | `render.eye_catchlight_intensity` | Render | Catchlight Int. | `float` | T3 | `0.85` | `[0.0, 2.0]` | — | — | persist, project, undoable |
 | `render.eye_catchlight_size` | Render | Catchlight Size | `float` | T3 | `1.00` | `[0.25, 2.0]` | — | — | persist, project, undoable |
 | `render.crease_disguise_enabled` | Render | [TESTING] Creases | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.crease_disguise_strength` | Render | Crease Strength | `float` | T3 | `0.70` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.circadian_enabled` | Render | Circadian Lighting | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.circadian_time_min` | Render | Time Override | `int` | T3 | `-1.0` | `[-1.0, 1439.0]` | min | — | persist, project, undoable |
-| `render.softbox_enabled` | Render | Softbox Attach | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.grid_enabled` | Render | Honeycomb Grid | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.grid_angle_deg` | Render | Grid Angle | `float` | T3 | `40.0` | `[15.0, 80.0]` | deg | — | persist, project, undoable |
-| `render.barn_doors_enabled` | Render | 4-Leaf Barn Doors | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.diffusion_enabled` | Render | Diffusion Cloth | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.diffusion_density` | Render | Diffusion Grid | `float` | T3 | `0.65` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `render.gel_enabled` | Render | Color Gel Filter | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.satsuei_light_wrap` | Render | Satsuei Light Wrap | `float` | T3 | `0.22` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.satsuei_halation` | Render | Satsuei Halation | `float` | T3 | `0.18` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `render.satsuei_backscatter` | Render | Thin Backscatter | `float` | T3 | `0.55` | `[0.0, 1.5]` | — | — | persist, project, undoable |
@@ -105,7 +92,7 @@ Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` k
 | `app.high_contrast` | App | High Contrast | `bool` | App | `0.0` | `[0.0, 1.0]` | — | — | persist, app |
 | `app.telemetry_paused` | App | Pause Telemetry | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | runtime |
 | `app.checkerboard_bg` | App | Alpha Checkerboard | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
-| `app.orbit_orb_visible` | App | Light Orbit Orb | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
+| `app.orbit_orb_visible` | App | Quick Key Orb | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | persist, project, undoable |
 | `app.skeleton_heatmap` | App | Confidence Heatmap | `bool` | T3 | `0.0` | `[0.0, 1.0]` | — | — | undoable |
 | `app.viewport_aspect` | App | Viewport Aspect | `enum` | T3 | `0.0` | `[0.0, 3.0]` | — | — | persist, app, undoable |
 | `app.tracking_hud_visible` | App | Tracking HUD | `bool` | T3 | `1.0` | `[0.0, 1.0]` | — | — | persist, app, undoable |

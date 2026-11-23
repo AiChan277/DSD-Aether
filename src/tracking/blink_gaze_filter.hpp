@@ -15,8 +15,8 @@ enum class BlinkPhase : uint8_t {
 struct BlinkGazeInput {
     float ear_left{0.28f};
     float ear_right{0.28f};
-    float gaze_gx_left{0.0f};   // [-1, +1] normalized horizontal iris offset (+ image-right)
-    float gaze_gy_left{0.0f};   // [-1, +1] normalized vertical iris offset (+ looking down)
+    float gaze_gx_left{0.0f}; // [-1, +1] normalized horizontal iris offset (+ image-right)
+    float gaze_gy_left{0.0f}; // [-1, +1] normalized vertical iris offset (+ looking down)
     float gaze_gx_right{0.0f};
     float gaze_gy_right{0.0f};
     float pitch_down_rad{0.0f}; // Positive when head pitches downward (+pitch in LandmarkPoseSolver)
@@ -33,16 +33,16 @@ struct BlinkGazeInput {
 };
 
 struct BlinkGazeOutput {
-    float blink_left{0.0f};     // [0, 1] (0 = wide open, 1 = fully shut)
-    float blink_right{0.0f};    // [0, 1]
-    float open_left{1.0f};      // Normalized pitch-compensated openness before lock/envelope
+    float blink_left{0.0f};  // [0, 1] (0 = wide open, 1 = fully shut)
+    float blink_right{0.0f}; // [0, 1]
+    float open_left{1.0f};   // Normalized pitch-compensated openness before lock/envelope
     float open_right{1.0f};
     float ear_open_base_l{0.28f};
     float ear_open_base_r{0.28f};
     float ear_closed_floor_l{0.09f};
     float ear_closed_floor_r{0.09f};
-    float gaze_gx{0.0f};        // Stabilized bilateral horizontal gaze [-1, +1]
-    float gaze_gy{0.0f};        // Stabilized bilateral vertical gaze [-1, +1] (+ looking down)
+    float gaze_gx{0.0f}; // Stabilized bilateral horizontal gaze [-1, +1]
+    float gaze_gy{0.0f}; // Stabilized bilateral vertical gaze [-1, +1] (+ looking down)
     float eye_squint_left{0.0f};
     float eye_squint_right{0.0f};
     float cheek_raise_left{0.0f};

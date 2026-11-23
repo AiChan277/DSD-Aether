@@ -284,3 +284,100 @@ fn panic_boundary_and_zero_copy_borrow_and_zero_alloc_eval() {
     // SAFETY: Releases ownership of test plan handle.
     unsafe { aether_graph_release(plan) };
 }
+
+#[test]
+fn rev31_graph_json_roundtrip_100x_and_error_handling() {
+    use aether_ffi::AETHER_E_PARSE;
+    use aether_rust_host::{
+        aether_graph_deserialize_json, aether_graph_serialize_json, aether_string_free,
+    };
+    use core::ffi::CStr;
+
+    aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
+    let host_cfg = AetherHostConfig {
+        struct_size: size_of::<AetherHostConfig>() as u32,
+        worker_threads: 1,
+        osc_in_port: 0,
+        osc_out_port: 0,
+        ws_port: 0,
+        flags: 0,
+        plugins_dir_utf8: ptr::null(),
+    };
+    let mut host: AetherHostHandle = ptr::null_mut();
+    // SAFETY: Valid config and writable host output slot on main thread.
+    let rc_create = unsafe { aether_host_create(&host_cfg, &mut host) };
+    assert_eq!(rc_create, AETHER_OK);
+    assert!(!host.is_null());
+
+    // Malformed JSON must fail cleanly with AETHER_E_PARSE without corrupting host state.
+    let bad_json = b"{not-valid-graph-json";
+    // SAFETY: Valid host handle and bounded byte buffer.
+    let bad_rc = unsafe {
+        aether_graph_deserialize_json(host, bad_json.as_ptr().cast::<c_char>(), bad_json.len())
+    };
+    assert_eq!(bad_rc, AETHER_E_PARSE);
+
+    let sample_json = r#"{
+        "schema_version": 1,
+        "nodes": [
+            { "id": 1, "type": "aether.source.npu_pose@1", "position": [10.0, 20.0] },
+            { "id": 2, "type": "aether.output.pose@1", "position": [240.0, 20.0] },
+            { "id": 3, "type": "aether.output.expressions@1", "position": [240.0, 140.0] }
+        ],
+        "edges": [
+            { "id": 10, "from_node": 1, "from_port": "pose", "to_node": 2, "to_port": "pose" },
+            { "id": 11, "from_node": 1, "from_port": "expressions", "to_node": 3, "to_port": "expressions" }
+        ],
+        "groups": [
+            { "id": 20, "title": "Tracking", "position": [0.0, 0.0], "size": [320.0, 220.0], "nodes": [1, 2, 3] }
+        ],
+        "comments": []
+    }"#;
+
+    for iter_idx in 0..100 {
+        // SAFETY: Valid host handle and immutable UTF-8 JSON buffer for this call.
+        let rc_in = unsafe {
+            aether_graph_deserialize_json(
+                host,
+                sample_json.as_ptr().cast::<c_char>(),
+                sample_json.len(),
+            )
+        };
+        assert_eq!(
+            rc_in, AETHER_OK,
+            "deserialize failed on iteration {iter_idx}"
+        );
+
+        let mut out_ptr: *mut c_char = ptr::null_mut();
+        let mut out_len: usize = 0;
+        // SAFETY: Valid host handle and writable output slots.
+        let rc_out = unsafe { aether_graph_serialize_json(host, &mut out_ptr, &mut out_len) };
+        assert_eq!(
+            rc_out, AETHER_OK,
+            "serialize failed on iteration {iter_idx}"
+        );
+        assert!(!out_ptr.is_null());
+        assert!(out_len > 0);
+
+        // SAFETY: `out_ptr` is NUL-terminated UTF-8 owned until `aether_string_free`.
+        let c_bytes = unsafe { CStr::from_ptr(out_ptr) }.to_bytes();
+        assert_eq!(c_bytes.len(), out_len);
+        let parsed: Result<serde_json::Value, _> = serde_json::from_slice(c_bytes);
+        assert!(parsed.is_ok());
+        if let Ok(doc) = parsed {
+            assert_eq!(doc["nodes"].as_array().map_or(0, Vec::len), 3);
+            assert_eq!(doc["edges"].as_array().map_or(0, Vec::len), 2);
+            assert_eq!(doc["groups"].as_array().map_or(0, Vec::len), 1);
+        }
+
+        // SAFETY: Frees CString returned by `aether_graph_serialize_json`.
+        unsafe { aether_string_free(out_ptr) };
+    }
+
+    // SAFETY: Null pointer is a documented no-op.
+    unsafe { aether_string_free(ptr::null_mut()) };
+
+    // SAFETY: Valid live host owned by this test.
+    unsafe { aether_host_destroy(host) };
+    aether_set_thread_role(AETHER_THREAD_ROLE_ANY);
+}

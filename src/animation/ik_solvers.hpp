@@ -88,12 +88,12 @@ struct RestSkeletonMetrics {
  * Shared zero-heap-alloc builder deriving `RestSkeletonMetrics` (humanoid hierarchy, VRM colliders,
  * and authored `SpringBone` chains) directly from loaded `AetherAvatarDesc` binary streams.
  */
-[[nodiscard]] RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
-    const AetherAvatarDesc& desc, const AetherJointDesc* joints, size_t joint_count,
-    const std::array<float, 3>* joint_rest_world_pos, size_t rest_pos_count,
-    const AetherColliderDesc* colliders, size_t collider_count,
-    const AetherSpringJointDesc* springs, size_t spring_count,
-    bool has_split_brow_morphs) noexcept;
+[[nodiscard]] RestSkeletonMetrics
+build_rest_metrics_from_avatar_streams(const AetherAvatarDesc& desc, const AetherJointDesc* joints, size_t joint_count,
+                                       const std::array<float, 3>* joint_rest_world_pos, size_t rest_pos_count,
+                                       const AetherColliderDesc* colliders, size_t collider_count,
+                                       const AetherSpringJointDesc* springs, size_t spring_count,
+                                       bool has_split_brow_morphs) noexcept;
 
 /** Returns `AETHER-TS-001` Appendix C anatomical joint angle bounds (radians) for the humanoid bone. */
 [[nodiscard]] JointLimitEulerRad joint_limit_for_bone(AetherHumanoidBone bone) noexcept;

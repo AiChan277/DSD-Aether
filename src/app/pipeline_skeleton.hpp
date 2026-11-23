@@ -43,8 +43,7 @@ struct SkinningSnapshot {
     uint32_t spring_collider_count{0};
     uint32_t spring_segment_count{0};
     std::array<aether::animation::SpringColliderOverlay, aether::animation::kMaxOverlayColliders> spring_colliders{};
-    std::array<aether::animation::SpringSegmentOverlay, aether::animation::kMaxOverlaySpringSegments>
-        spring_segments{};
+    std::array<aether::animation::SpringSegmentOverlay, aether::animation::kMaxOverlaySpringSegments> spring_segments{};
     std::array<float, 3> hair_velocity_ws{0.0f, 0.0f, 0.0f};
     uint32_t reserved_pad2_{0};
     AetherMaterialOverrideBuffer material_overrides{};

@@ -151,7 +151,8 @@ void GraphicsSettingsModal::draw_gpu_selector_combo(const char* widget_id, bool 
                                                     ParamStore* opt_params) {
     const auto& cur = rhi.gpu_info();
     char preview[192]{};
-    std::snprintf(preview, sizeof(preview), "%s (%s)", cur.device_name.empty() ? tr("Unknown GPU") : cur.device_name.c_str(),
+    std::snprintf(preview, sizeof(preview), "%s (%s)",
+                  cur.device_name.empty() ? tr("Unknown GPU") : cur.device_name.c_str(),
                   cur.is_discrete ? "dGPU" : "iGPU");
 
     ImGui::BeginDisabled(on_air);
@@ -183,8 +184,8 @@ void GraphicsSettingsModal::draw_gpu_selector_combo(const char* widget_id, bool 
                         settings.preferred_gpu_luid.clear();
                     }
                     settings.preferred_gpu_name = ad.device_name;
-                    if (!ad.supports_ray_query || ad.recommended_lighting_mode == 0u || ad.is_intel_igpu ||
-                        ad.is_uma || ad.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+                    if (!ad.supports_ray_query || ad.recommended_lighting_mode == 0u || ad.is_intel_igpu || ad.is_uma ||
+                        ad.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
                         if (opt_params != nullptr) {
                             (void)opt_params->set(ParamId::RenderLightingMode, 0.0);
                             (void)opt_params->set(ParamId::RenderRtEnabled, 0.0);
@@ -241,7 +242,7 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
         const ImVec2 wmin = ImGui::GetWindowPos();
         draw_elevation_shadow(bg_dl, wmin, ImVec2(wmin.x + modal_w, wmin.y + modal_h), t.radius_modal_px);
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape)) {
             keep_open = false;
         }
 
@@ -319,11 +320,13 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                     draw_gpu_selector_combo("##GraphicsGpuSelector", on_air, rhi, render_view, settings, actions,
                                             out_settings_dirty, &params);
                     if (cur_gpu.is_discrete) {
-                        ImGui::TextColored(t.text_tertiary, "%s",
-                                           tr("Dedicated discrete GPU active (supports hardware ray tracing & Tensor/Shader cores)."));
+                        ImGui::TextColored(
+                            t.text_tertiary, "%s",
+                            tr("Dedicated discrete GPU active (supports hardware ray tracing & Tensor/Shader cores)."));
                     } else {
                         ImGui::TextColored(t.status_warn, "%s",
-                                           tr("Integrated GPU active — great for battery/iGPU testing; switch to dGPU for full RT speed."));
+                                           tr("Integrated GPU active — great for battery/iGPU testing; switch to dGPU "
+                                              "for full RT speed."));
                     }
                     ImGui::Spacing();
 
@@ -339,7 +342,8 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                             draw_property_row(ParamId::RenderAaMode, params, undo, fonts, row_actions);
                         if (draw_property_row(ParamId::RenderBackend, params, undo, fonts, row_actions, false,
                                               on_air)) {
-                            actions.viewport.render_backend = static_cast<uint8_t>(params.get_int(ParamId::RenderBackend));
+                            actions.viewport.render_backend =
+                                static_cast<uint8_t>(params.get_int(ParamId::RenderBackend));
                             out_settings_dirty = true;
                         }
                         end_property_table();
@@ -347,84 +351,17 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                     ImGui::EndTabItem();
                 }
 
-                if (ImGui::BeginTabItem(tr("2D Illustration Style"), nullptr,
+                if (ImGui::BeginTabItem(tr("Ray Tracing & Denoiser"), nullptr,
                                         active_tab_ == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
                     active_tab_ = 1;
                     ImGui::Spacing();
-                    if (begin_property_table("##gfx_live2d")) {
-                        if (draw_property_row(ParamId::RenderLightingFixture, params, undo, fonts, row_actions)) {
-                            const int fix_idx = std::clamp(params.get_int(ParamId::RenderLightingFixture), 0, 5);
-                            renderer::LightingRig tmp = renderer::LightingRig::default_three_point();
-                            renderer::apply_lighting_fixture_preset(
-                                tmp, static_cast<renderer::LightingFixturePreset>(fix_idx),
-                                fix_idx == 1 ? 32.0f : (fix_idx == 2 ? 18.0f : -1.0f));
-                            (void)params.set(ParamId::RenderKeyAzimuthDeg, tmp.lights[0].orbit_azimuth_deg);
-                            (void)params.set(ParamId::RenderKeyElevationDeg, tmp.lights[0].orbit_elevation_deg);
-                            (void)params.set(ParamId::RenderKeyIntensity, tmp.lights[0].intensity);
-                            (void)params.set(ParamId::RenderFillIntensity, tmp.lights[1].intensity);
-                            (void)params.set(ParamId::RenderRimIntensity, tmp.lights[2].intensity);
-                            (void)params.set(ParamId::RenderPhotometricBeamAngleDeg, tmp.photometric_beam_angle_deg);
-                            actions.viewport.lighting_dirty = true;
-                        }
-                        static constexpr ParamId kStyleRows[] = {
-                            ParamId::RenderPhotometricBeamAngleDeg,
-                            ParamId::RenderEyeCatchlightIntensity,
-                            ParamId::RenderEyeCatchlightSize,
-                            ParamId::RenderCreaseDisguiseEnabled,
-                            ParamId::RenderCreaseDisguiseStrength,
-                            ParamId::RenderFlatness,
-                            ParamId::RenderFaceNormalFlatten,
-                            ParamId::RenderNeckSeamBlend,
-                            ParamId::RenderCelBandSharpness,
-                            ParamId::RenderShadowWarmCool,
-                            ParamId::RenderIndirectBleedStrength,
-                            ParamId::RenderRimDepthOffsetPx,
-                            ParamId::RenderOutlineScale,
-                            ParamId::RenderIroTsukeStrength,
-                            ParamId::RenderCreaseStrength,
-                            ParamId::RenderHairHighlight,
-                            ParamId::RenderRimStepStrength,
-                            ParamId::RenderBloomIntensity,
-                            ParamId::RenderLightScale,
-                            ParamId::Render2DFilterPro,
-                            ParamId::RenderFilterKuwaharaStrength,
-                            ParamId::RenderFilterDogInkBoost,
-                            ParamId::RenderFilterPaperWarmth,
-                            ParamId::RenderFilterPaperWarmthStrength,
-                        };
-                        bool any = false;
-                        for (const ParamId pid : kStyleRows) {
-                            any |= draw_property_row(pid, params, undo, fonts, row_actions);
-                        }
-                        if (any) {
-                            actions.viewport.lighting_dirty = true;
-                        }
-                        end_property_table();
-                    }
-                    ImGui::EndTabItem();
-                }
-
-                if (ImGui::BeginTabItem(tr("Lighting, Circadian & RT"), nullptr,
-                                        active_tab_ == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
-                    active_tab_ = 2;
-                    ImGui::Spacing();
                     const bool dx11_blocked = (render_view.render_backend == 1U);
                     const bool rt_blocked = !render_view.rt_supported || dx11_blocked;
-                    const char* rt_reason = !render_view.rt_supported
-                                                ? tr("Ray query / DXR unsupported on active GPU (using Traditional)")
-                                                : (dx11_blocked ? tr("Ray tracing unavailable on DirectX 11") : nullptr);
+                    const char* rt_reason =
+                        !render_view.rt_supported
+                            ? tr("Ray query / DXR unsupported on active GPU (using Traditional)")
+                            : (dx11_blocked ? tr("Ray tracing unavailable on DirectX 11") : nullptr);
                     if (begin_property_table("##gfx_rt")) {
-                        if (draw_property_row(ParamId::RenderLightingMode, params, undo, fonts, row_actions, false,
-                                              false)) {
-                            const int lm = params.get_int(ParamId::RenderLightingMode);
-                            if (lm > 0 && rt_blocked) {
-                                (void)params.set(ParamId::RenderLightingMode, 0.0);
-                            }
-                            (void)params.set(ParamId::RenderRtEnabled,
-                                             params.get_int(ParamId::RenderLightingMode) > 0 ? 1.0 : 0.0);
-                            actions.viewport.lighting_dirty = true;
-                            out_settings_dirty = true;
-                        }
                         if (draw_property_row(ParamId::RenderRtEnabled, params, undo, fonts, row_actions, false,
                                               rt_blocked, rt_reason)) {
                             const bool on = params.get_bool(ParamId::RenderRtEnabled);
@@ -433,18 +370,6 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                             } else if (params.get_int(ParamId::RenderLightingMode) == 0) {
                                 (void)params.set(ParamId::RenderLightingMode, 1.0);
                             }
-                            actions.viewport.lighting_dirty = true;
-                            out_settings_dirty = true;
-                        }
-                        if (draw_property_row(ParamId::RenderCircadianEnabled, params, undo, fonts, row_actions)) {
-                            actions.viewport.lighting_dirty = true;
-                            out_settings_dirty = true;
-                        }
-                        if (draw_property_row(ParamId::RenderCircadianTimezone, params, undo, fonts, row_actions)) {
-                            actions.viewport.lighting_dirty = true;
-                            out_settings_dirty = true;
-                        }
-                        if (draw_property_row(ParamId::RenderCircadianTimeMinutes, params, undo, fonts, row_actions)) {
                             actions.viewport.lighting_dirty = true;
                             out_settings_dirty = true;
                         }
@@ -460,31 +385,6 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                     }
 
                     ImGui::Spacing();
-                    if (params.get_bool(ParamId::RenderCircadianEnabled)) {
-                        const int ov_min = params.get_int(ParamId::RenderCircadianTimeMinutes);
-                        const float hr = (ov_min >= 0) ? (static_cast<float>(ov_min) / 60.0f)
-                                                       : render_view.circadian_hour_24;
-                        const uint8_t ph =
-                            (ov_min >= 0)
-                                ? ((hr >= 5.0f && hr < 7.0f)     ? 1u
-                                   : (hr >= 7.0f && hr < 15.5f)  ? 2u
-                                   : (hr >= 15.5f && hr < 18.0f) ? 3u
-                                                                 : 0u)
-                                : render_view.circadian_phase;
-                        static constexpr const char* kPhaseNames[4] = {
-                            "Night Studio (Monitor + Moonlight)",
-                            "Dawn",
-                            "Daytime",
-                            "Golden Hour Sunset",
-                        };
-                        const int hh = static_cast<int>(hr) % 24;
-                        const int mm = std::clamp(static_cast<int>((hr - static_cast<float>(hh)) * 60.0f), 0, 59);
-                        char cbuf[160]{};
-                        std::snprintf(cbuf, sizeof(cbuf), "%02d:%02d · %s (Key %.0fK)", hh, mm,
-                                      kPhaseNames[std::min<uint8_t>(ph, 3u)],
-                                      static_cast<double>(render_view.circadian_key_kelvin));
-                        draw_status_badge(fonts, tr("Solar Mood"), cbuf, t.status_ok);
-                    }
                     draw_status_badge(fonts, tr("Active Denoiser"), render_view.denoiser_active_name,
                                       render_view.denoiser_fallback_triggered ? t.status_warn : t.status_ok);
                     if (render_view.denoiser_fallback_triggered && render_view.denoiser_fallback_reason[0] != '\0') {
@@ -493,15 +393,15 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
                     }
                     ImGui::Spacing();
                     if (render_view.timing_valid) {
-                        char pass_buf[192]{};
-                        std::snprintf(pass_buf, sizeof(pass_buf),
-                                      "RT %.2f ms · Denoise %.2f ms (p95 %.2f) · NPR %.2f ms · Post %.2f ms · Encode %.2f ms",
-                                      static_cast<double>(render_view.rt_gpu_ms),
-                                      static_cast<double>(render_view.denoise_gpu_ms),
-                                      static_cast<double>(render_view.denoise_p95_120f_ms),
-                                      static_cast<double>(render_view.npr_gpu_ms),
-                                      static_cast<double>(render_view.post_gpu_ms),
-                                      static_cast<double>(render_view.encode_gpu_ms));
+                        char pass_buf[224]{};
+                        std::snprintf(
+                            pass_buf, sizeof(pass_buf),
+                            "Skin/Pre %.2f · RT %.2f · Denoise %.2f (p95 %.2f) · NPR %.2f · Post %.2f · Encode %.2f ms",
+                            static_cast<double>(render_view.skin_prepass_gpu_ms),
+                            static_cast<double>(render_view.rt_gpu_ms), static_cast<double>(render_view.denoise_gpu_ms),
+                            static_cast<double>(render_view.denoise_p95_120f_ms),
+                            static_cast<double>(render_view.npr_gpu_ms), static_cast<double>(render_view.post_gpu_ms),
+                            static_cast<double>(render_view.encode_gpu_ms));
                         draw_status_badge(fonts, tr("Pass Breakdown"), pass_buf, t.text_primary);
                     }
                     ImGui::EndTabItem();
@@ -515,24 +415,9 @@ void GraphicsSettingsModal::draw(bool on_air, const rhi::RhiDevice& rhi, const D
         ImGui::Separator();
         if (ImGui::Button(tr("Reset Render Defaults"))) {
             static constexpr ParamId kResetIds[] = {
-                ParamId::RenderTargetFps,          ParamId::RenderVsync,
-                ParamId::RenderBackgroundEco,      ParamId::RenderResolutionScalePct,
-                ParamId::RenderAaMode,             ParamId::RenderLightingMode,
-                ParamId::RenderFlatness,           ParamId::RenderFaceNormalFlatten,
-                ParamId::RenderNeckSeamBlend,      ParamId::RenderCelBandSharpness,
-                ParamId::RenderShadowWarmCool,
-                ParamId::RenderIndirectBleedStrength, ParamId::RenderRimDepthOffsetPx,
-                ParamId::RenderOutlineScale,       ParamId::RenderIroTsukeStrength,
-                ParamId::RenderCreaseStrength,     ParamId::RenderHairHighlight,
-                ParamId::RenderRimStepStrength,    ParamId::RenderBloomIntensity,
-                ParamId::RenderRtEnabled,          ParamId::Render2DFilterPro,
-                ParamId::RenderFilterKuwaharaStrength, ParamId::RenderFilterDogInkBoost,
-                ParamId::RenderLightingFixture,    ParamId::RenderPhotometricBeamAngleDeg,
-                ParamId::RenderEyeCatchlightIntensity, ParamId::RenderEyeCatchlightSize,
-                ParamId::RenderCreaseDisguiseEnabled,  ParamId::RenderCreaseDisguiseStrength,
-                ParamId::RenderFilterPaperWarmth,  ParamId::RenderFilterPaperWarmthStrength,
-                ParamId::RenderCircadianEnabled,   ParamId::RenderCircadianTimezone,
-                ParamId::RenderCircadianTimeMinutes,
+                ParamId::RenderTargetFps,          ParamId::RenderVsync,     ParamId::RenderBackgroundEco,
+                ParamId::RenderResolutionScalePct, ParamId::RenderAaMode,    ParamId::RenderRtEnabled,
+                ParamId::RenderDenoiser,           ParamId::RenderDebugView,
             };
             for (const ParamId pid : kResetIds) {
                 const double def_v = param_spec(pid).default_val;

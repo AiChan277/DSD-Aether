@@ -1,7 +1,7 @@
 # AETHER-2.5D Architecture Reference
 
-- **Specification**: `AETHER-TS-001 v1.0`
-- **Current Release**: `a1.0.3B` — Phases 1–6 Complete + DX11/DX12, Photometric Studio Lighting, Lighting Workspace, Native PMX 2.0/2.1, & WiX v5 MSI Installer
+- **Specification**: `AETHER-TS-001 v1.0` & `Rev 3.1 Architecture Specification`
+- **Current Release**: `a1.0.4B` — Phases 1–6 Complete + DX11/DX12, Single Lighting Authority (`.alfx`), DaVinci-Style `.apr` Project Manager, Live VRM–PMX Parity Shaders, & WiX v5 MSI Installer
 
 ## Thread & Channel Topology (§2.2, §4.1)
 

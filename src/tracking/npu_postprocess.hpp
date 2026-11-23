@@ -68,7 +68,6 @@ class alignas(64) NpuPostProcessor {
   private:
     std::array<float, 3> last_safe_head_euler_{};
     bool has_prev_{false};
-    uint8_t _pad[3]{};
 };
 
 #if defined(_MSC_VER)

@@ -1,9 +1,20 @@
 #include "core/log.hpp"
 #include "rhi/rhi_device.hpp"
+#include "rhi/rhi_swapchain.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdio>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
 
 TEST_CASE("Vulkan 1.3 RHI initializes with sync validation active and zero hazards", "[rhi][validation]") {
     aether::rhi::RhiDeviceConfig cfg{};
@@ -119,4 +130,32 @@ TEST_CASE("Vulkan 1.3 RHI initializes with sync validation active and zero hazar
 
     rhi->destroy();
     delete rhi;
+}
+
+TEST_CASE("Rev 3.1 RhiSwapchain handles 0x0 minimized resize with zero Vulkan errors", "[rhi][swapchain][rev31]") {
+#if defined(_WIN32)
+    aether::rhi::RhiDeviceConfig cfg{};
+    cfg.enable_validation = true;
+    cfg.require_validation = true;
+    cfg.headless = false;
+    auto dev_res = aether::rhi::RhiDevice::create(cfg);
+    REQUIRE(dev_res.has_value());
+    aether::rhi::RhiDevice* rhi = dev_res.value();
+
+    HINSTANCE hinst = ::GetModuleHandleW(nullptr);
+    HWND hwnd = ::CreateWindowExW(0, L"STATIC", L"aether_swap_min_test", WS_OVERLAPPEDWINDOW, 0, 0, 320, 200, nullptr,
+                                  nullptr, hinst, nullptr);
+    REQUIRE(hwnd != nullptr);
+
+    aether::rhi::RhiSwapchain sw{};
+    REQUIRE(sw.init(*rhi, hinst, hwnd, 320u, 200u).has_value());
+    REQUIRE(sw.resize(0u, 0u).has_value());
+    REQUIRE(sw.resize(400u, 240u).has_value());
+    CHECK(rhi->validation_error_count() == 0);
+
+    sw.destroy();
+    ::DestroyWindow(hwnd);
+    rhi->destroy();
+    delete rhi;
+#endif
 }

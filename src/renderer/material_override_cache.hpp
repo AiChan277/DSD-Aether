@@ -34,17 +34,16 @@ namespace aether::renderer {
 ///
 /// Disconnecting an override node (or passing an empty `overrides` buffer) immediately
 /// restores `out_materials` to `base_materials` and `out_grades` to identity.
-void apply_material_overrides_non_destructive(
-    std::span<const AetherNprMaterial> base_materials,
-    std::string_view avatar_strings,
-    const AetherMaterialOverrideBuffer& overrides,
-    std::vector<AetherNprMaterial>& out_materials,
-    std::vector<GpuMaterialGrade>& out_grades) noexcept;
+void apply_material_overrides_non_destructive(std::span<const AetherNprMaterial> base_materials,
+                                              std::string_view avatar_strings,
+                                              const AetherMaterialOverrideBuffer& overrides,
+                                              std::vector<AetherNprMaterial>& out_materials,
+                                              std::vector<GpuMaterialGrade>& out_grades);
 
 /// Lock-free async texture asset & live Spout2 override cache (`HR-01`, `HR-02`).
 /// Uses zero `std::mutex` / `condition_variable` / `Sleep` primitives.
 class MaterialOverrideCache {
-public:
+  public:
     static constexpr size_t kMaxCachedTextures = 32U;
 
     enum class SlotState : uint32_t {
@@ -81,9 +80,7 @@ public:
     /// Registers a file path or Spout2 sender name for asynchronous background decode
     /// (called from UI / graph update, never blocks render or simulation thread).
     /// Returns the deterministic 64-bit `AetherTextureHandle`.
-    uint64_t register_texture_source(std::string_view path_or_spout_name,
-                                     bool is_srgb,
-                                     bool is_spout) noexcept;
+    uint64_t register_texture_source(std::string_view path_or_spout_name, bool is_srgb, bool is_spout) noexcept;
 
     /// Polls completed background decodes and uploads them to GPU bindless slots on the render thread.
     void poll_uploads() noexcept;
@@ -91,8 +88,8 @@ public:
     /// Looks up the uploaded GPU image for `handle`, or `nullptr` if still loading / unbound.
     [[nodiscard]] const rhi::RhiImage* find_uploaded_image(uint64_t handle) const noexcept;
 
-private:
-    void worker_loop() noexcept;
+  private:
+    void worker_loop();
 
     rhi::RhiDevice* rhi_{nullptr};
     std::array<DecodedSlot, kMaxCachedTextures> slots_{};
@@ -100,4 +97,4 @@ private:
     std::thread worker_;
 };
 
-}  // namespace aether::renderer
+} // namespace aether::renderer

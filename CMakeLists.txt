@@ -20,7 +20,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR NOT EXISTS "${CMAKE_TOOLCHAIN_FILE}")
     endif()
 endif()
 
-project(AetherStudio VERSION 1.0.3 LANGUAGES C CXX)
+project(AetherStudio VERSION 1.0.4 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -159,13 +159,15 @@ function(aether_stage_ort_runtime target_name dir_key)
     add_dependencies(${target_name} "${stage_target}")
 endfunction()
 
+find_package(nlohmann_json CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
+
 if(AETHER_WITH_TRACY)
     find_package(Tracy CONFIG REQUIRED)
 endif()
 
 if(BUILD_TESTING)
     find_package(Catch2 CONFIG REQUIRED)
-    find_package(nlohmann_json CONFIG REQUIRED)
 endif()
 
 # Shared compiler/linker policy helper for all first-party Aether C++ targets.

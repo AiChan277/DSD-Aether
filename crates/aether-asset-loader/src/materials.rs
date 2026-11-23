@@ -96,6 +96,27 @@ pub fn convert_material(
     if raw.has_vrm_mtoon {
         flags |= AETHER_MAT_FLAG_HAS_EXT_VRM;
     }
+    if raw.alpha_mode == aether_ffi::AETHER_ALPHA_MODE_ADDITIVE {
+        flags |= aether_ffi::AETHER_MAT_FLAG_ADDITIVE;
+    }
+    if !raw.cast_shadow {
+        flags |= aether_ffi::AETHER_MAT_FLAG_NO_SHADOW_CAST;
+    }
+    if !raw.edge_enabled {
+        flags |= aether_ffi::AETHER_MAT_FLAG_NO_OUTLINE;
+    }
+    if raw.is_pmx {
+        flags |= aether_ffi::AETHER_MAT_FLAG_IS_PMX;
+        if matches!(
+            raw.alpha_mode,
+            AETHER_ALPHA_MODE_BLEND | aether_ffi::AETHER_ALPHA_MODE_ADDITIVE
+        ) {
+            flags |= aether_ffi::AETHER_MAT_FLAG_STRICT_DRAW_ORDER;
+        }
+    }
+    if raw.alpha_mode == AETHER_ALPHA_MODE_MASK {
+        flags |= aether_ffi::AETHER_MAT_FLAG_ALPHA_CUTOUT;
+    }
     if let Some(profile) = raw.shader_profile {
         flags |= AETHER_MAT_FLAG_HAS_PROFILE | ((profile & 0x7) << AETHER_MAT_FLAG_PROFILE_SHIFT);
         if profile == AETHER_MAT_PROFILE_EYE_CAUSTIC {
@@ -202,6 +223,9 @@ pub fn classify_submesh_flags(
     match mat_alpha_mode {
         AETHER_ALPHA_MODE_MASK => flags |= AETHER_SUBMESH_FLAG_ALPHA_CUTOUT,
         AETHER_ALPHA_MODE_BLEND => flags |= AETHER_SUBMESH_FLAG_TRANSPARENT,
+        aether_ffi::AETHER_ALPHA_MODE_ADDITIVE => {
+            flags |= AETHER_SUBMESH_FLAG_TRANSPARENT | aether_ffi::AETHER_SUBMESH_FLAG_ADDITIVE;
+        }
         _ => flags |= AETHER_SUBMESH_FLAG_OPAQUE,
     }
     flags

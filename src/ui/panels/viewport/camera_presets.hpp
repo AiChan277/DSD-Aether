@@ -36,10 +36,10 @@ inline constexpr size_t kBuiltinFramingPresetCount = 6;
  * Computes a bone-relative camera framing preset from humanoid bone world-rest heights
  * (`hips_y`, `chest_y`, `head_y`) and active `AvatarRoot` offset/scale.
  */
-[[nodiscard]] CameraFramingPreset compute_builtin_framing_preset(
-    int32_t index, float hips_y, float chest_y, float head_y,
-    const std::array<float, 3>& avatar_pos = {0.0f, 0.0f, 0.0f}, float avatar_scale = 1.0f,
-    float viewport_aspect = 16.0f / 9.0f) noexcept;
+[[nodiscard]] CameraFramingPreset
+compute_builtin_framing_preset(int32_t index, float hips_y, float chest_y, float head_y,
+                               const std::array<float, 3>& avatar_pos = {0.0f, 0.0f, 0.0f}, float avatar_scale = 1.0f,
+                               float viewport_aspect = 16.0f / 9.0f);
 
 /**
  * Manages user-saved custom camera + AvatarRoot presets stored in `config/camera_presets.json`.

@@ -43,7 +43,8 @@ class StudioWorkspace {
     StudioWorkspace();
 
     void init(const RuntimePaths& paths, const HardwareInventory& hw, float dpi_scale,
-              const char* initial_avatar_path = nullptr, bool allow_disk_config = true);
+              const char* initial_avatar_path = nullptr, bool allow_disk_config = true,
+              core::SessionManager* session_mgr = nullptr);
 
     void shutdown();
 
@@ -53,6 +54,11 @@ class StudioWorkspace {
     void drain_logs() noexcept;
 
     void set_host_status(const StudioHostStatus& status) noexcept { host_status_ = status; }
+    void set_state_store(aether::StudioStateStore* store) noexcept {
+        state_store_ = store;
+        reset_dirty_tracking();
+    }
+    void reset_dirty_tracking() noexcept;
     void set_graph_json_from_host(const std::string& json_utf8);
     void sync_plugins(std::span<const LoadedPluginVm> plugins);
     void sync_scene_items(std::span<const OutlinerBoneInfo> bones, std::span<const OutlinerMaterialInfo> materials,
@@ -140,6 +146,10 @@ class StudioWorkspace {
 
     UiSelection selection_{};
     StudioHostStatus host_status_{};
+    aether::StudioStateStore* state_store_{nullptr};
+    aether::core::SessionManager* session_mgr_{nullptr};
+    std::array<double, kParamCount> dirty_param_snapshot_{};
+    uint64_t dirty_param_epoch_{0};
 
     OutlinerPanel outliner_panel_{};
     ViewportPanel viewport_panel_{};

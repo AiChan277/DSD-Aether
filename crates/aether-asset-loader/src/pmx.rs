@@ -129,7 +129,9 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
     check_bone_count(doc.bones.len())?;
     check_morph_count(doc.morphs.len())?;
     if doc.materials.len() > MAX_MATERIALS || doc.texture_paths.len() > MAX_MATERIALS {
-        return Err(LoaderError::LimitExceeded("PMX material/texture count > 1024"));
+        return Err(LoaderError::LimitExceeded(
+            "PMX material/texture count > 1024",
+        ));
     }
 
     let mut vertices = Vec::with_capacity(doc.vertices.len());
@@ -171,17 +173,16 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
     let tex_count = doc.texture_paths.len();
     let mut textures = Vec::with_capacity(tex_count);
     for (idx, cleaned) in doc.texture_paths.iter().enumerate() {
-        let path = base_dir.join(cleaned);
+        let resolved = resolve_pmx_texture_path(base_dir, cleaned);
         textures.push(RawTextureDesc {
             name: if cleaned.is_empty() {
                 format!("pmx_tex_{idx}")
             } else {
                 cleaned.clone()
             },
-            source: if path.is_file() {
-                RawTextureSource::ExternalFile(path)
-            } else {
-                RawTextureSource::Missing
+            source: match resolved {
+                Some(path) => RawTextureSource::ExternalFile(path),
+                None => RawTextureSource::Missing,
             },
             width: 1,
             height: 1,
@@ -249,7 +250,7 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             outline_screen_space: false,
             emissive,
             matcap_color: [1.0, 1.0, 1.0],
-            matcap_add_mix: if pm.sphere_mode == 2 { 0.0 } else { 1.0 },
+            matcap_add_mix: if pm.sphere_mode == 2 { 1.0 } else { 0.0 },
             matcap_strength: if pm.sphere_mode == 0 { 0.0 } else { 0.6 },
             gi_equalization: 0.15,
             shading_shift: -0.05,
@@ -265,7 +266,10 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             double_sided: (pm.draw_flags & 0x01) != 0,
             unlit: false,
             has_vrm_mtoon: false,
-            render_queue_offset: 0,
+            cast_shadow: (pm.draw_flags & 0x04) != 0,
+            edge_enabled: (pm.draw_flags & 0x10) != 0,
+            is_pmx: true,
+            render_queue_offset: m_idx as i32,
             flatten_override: None,
             tex_base: to_u32(pm.tex_idx),
             tex_shade: if pm.toon_flag == 0 {
@@ -549,11 +553,7 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         {
             let b_idx = rb.bone_index as usize;
             let w = world_pos[b_idx];
-            let off = [
-                rb.pos_m[0] - w[0],
-                rb.pos_m[1] - w[1],
-                rb.pos_m[2] - w[2],
-            ];
+            let off = [rb.pos_m[0] - w[0], rb.pos_m[1] - w[1], rb.pos_m[2] - w[2]];
             let radius = rb.size_m[0].max(0.01);
             colliders.push(RawCollider {
                 joint_index: b_idx,
@@ -660,6 +660,14 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         }
     }
 
+    finalize_pmx_material_alpha_tiers(
+        &mut materials,
+        &submeshes,
+        &vertices,
+        &textures,
+        &doc.morphs,
+    );
+
     Ok(ParsedAvatar {
         source_format: AETHER_SOURCE_FORMAT_PMX,
         base_dir: base_dir.to_path_buf(),
@@ -692,6 +700,325 @@ fn parse_pmx(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             constraints_6dof,
         }),
     })
+}
+
+/// Resolves a PMX/PMD relative texture path against `base_dir`, normalizing UTF-16 BOMs,
+/// slashes, relative prefixes, and case-insensitive directory entries.
+fn resolve_pmx_texture_path(base_dir: &Path, raw_rel: &str) -> Option<std::path::PathBuf> {
+    let cleaned = raw_rel
+        .trim()
+        .trim_start_matches('\u{FEFF}')
+        .trim_end_matches('\0')
+        .replace('\\', "/");
+    if cleaned.is_empty() {
+        return None;
+    }
+    let rel = cleaned.trim_start_matches("./");
+    let direct = base_dir.join(rel);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    // Component-by-component case-insensitive filesystem walk inside base_dir.
+    let mut cur = base_dir.to_path_buf();
+    let mut walked_ok = true;
+    for comp in rel.split('/').filter(|c| !c.is_empty() && *c != ".") {
+        if comp == ".." {
+            return None;
+        }
+        let exact = cur.join(comp);
+        if exact.exists() {
+            cur = exact;
+            continue;
+        }
+        let target_low = comp.to_ascii_lowercase();
+        let mut matched = None;
+        if let Ok(entries) = std::fs::read_dir(&cur) {
+            for ent in entries.flatten() {
+                if let Some(fname) = ent.file_name().to_str()
+                    && fname.to_ascii_lowercase() == target_low
+                {
+                    matched = Some(ent.path());
+                    break;
+                }
+            }
+        }
+        if let Some(m) = matched {
+            cur = m;
+        } else {
+            walked_ok = false;
+            break;
+        }
+    }
+    if walked_ok && cur.is_file() {
+        return Some(cur);
+    }
+
+    // Basename fallback in base_dir and common MMD texture subfolders.
+    let file_name = rel.rsplit('/').next()?.trim();
+    if file_name.is_empty() {
+        return None;
+    }
+    let fname_low = file_name.to_ascii_lowercase();
+    for sub in [
+        "", "tex", "Tex", "textures", "Textures", "texture", "Texture",
+    ] {
+        let dir = if sub.is_empty() {
+            base_dir.to_path_buf()
+        } else {
+            base_dir.join(sub)
+        };
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for ent in entries.flatten() {
+                let p = ent.path();
+                if p.is_file()
+                    && p.file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.to_ascii_lowercase() == fname_low)
+                {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn finalize_pmx_material_alpha_tiers(
+    materials: &mut [RawMaterial],
+    submeshes: &[RawSubmesh],
+    vertices: &[RawVertex],
+    textures: &[RawTextureDesc],
+    morphs: &[aether_asset_pmx::PmxMorph],
+) {
+    let mut morph_affects_alpha = vec![false; materials.len()];
+    for pm in morphs {
+        if let PmxMorphData::Material(offs) = &pm.data {
+            for mo in offs {
+                if mo.material_index >= 0 && (mo.material_index as usize) < materials.len() {
+                    let changes_alpha = (mo.op_mode == 0 && mo.diffuse[3] < 0.99)
+                        || (mo.op_mode != 0 && mo.diffuse[3].abs() > 0.01);
+                    if changes_alpha {
+                        morph_affects_alpha[mo.material_index as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut decoded_cache: std::collections::HashMap<u32, Option<(u32, u32, Vec<u8>)>> =
+        std::collections::HashMap::new();
+
+    for (m_idx, raw) in materials.iter_mut().enumerate() {
+        let Some(tex_idx) = raw.tex_base else {
+            if morph_affects_alpha[m_idx] || raw.base_color[3] < 0.99 {
+                raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_BLEND;
+            }
+            continue;
+        };
+        let Some(td) = textures.get(tex_idx as usize) else {
+            if morph_affects_alpha[m_idx] || raw.base_color[3] < 0.99 {
+                raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_BLEND;
+            }
+            continue;
+        };
+        let mname_low = raw.name.to_ascii_lowercase();
+
+        if Path::new(&td.name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("spa"))
+        {
+            raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_ADDITIVE;
+            raw.unlit = true;
+            raw.cast_shadow = false;
+            continue;
+        }
+
+        let decoded = decoded_cache.entry(tex_idx).or_insert_with(|| {
+            if let RawTextureSource::ExternalFile(path) = &td.source {
+                crate::textures::decode_image_file_rgba(path, true)
+                    .ok()
+                    .map(|(w, h, _fmt, px)| (w, h, px))
+            } else {
+                None
+            }
+        });
+
+        let Some((w, h, px)) = decoded.as_ref() else {
+            if morph_affects_alpha[m_idx] || raw.base_color[3] < 0.99 {
+                raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_BLEND;
+            }
+            continue;
+        };
+        if *w == 0 || *h == 0 || px.len() < (*w as usize) * (*h as usize) * 4 {
+            continue;
+        }
+
+        // Collect UV samples specifically covered by this material's submeshes so shared
+        // atlases classify per-material UV islands accurately rather than leaking alpha across parts.
+        let mut sample_coords: Vec<(u32, u32)> = Vec::new();
+        let mut u_min = 1.0f32;
+        let mut v_min = 1.0f32;
+        let mut u_max = 0.0f32;
+        let mut v_max = 0.0f32;
+        let mut any_uv = false;
+        let wi = *w as usize;
+        let hi = *h as usize;
+
+        for sm in submeshes {
+            if sm.material_index != m_idx as u32 {
+                continue;
+            }
+            let tri_step = (sm.indices.len() / 3).div_ceil(1024).max(1);
+            for tri in sm.indices.chunks_exact(3).step_by(tri_step) {
+                let uvs = [
+                    vertices[tri[0] as usize].uv0,
+                    vertices[tri[1] as usize].uv0,
+                    vertices[tri[2] as usize].uv0,
+                ];
+                for uv in uvs {
+                    let u = uv[0].rem_euclid(1.0);
+                    let v = uv[1].rem_euclid(1.0);
+                    u_min = u_min.min(u);
+                    v_min = v_min.min(v);
+                    u_max = u_max.max(u);
+                    v_max = v_max.max(v);
+                    any_uv = true;
+                }
+                let bary = [
+                    [1.0f32, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.5, 0.5, 0.0],
+                    [0.0, 0.5, 0.5],
+                    [0.5, 0.0, 0.5],
+                    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+                ];
+                for b in bary {
+                    let u =
+                        (uvs[0][0] * b[0] + uvs[1][0] * b[1] + uvs[2][0] * b[2]).rem_euclid(1.0);
+                    let v =
+                        (uvs[0][1] * b[0] + uvs[1][1] * b[1] + uvs[2][1] * b[2]).rem_euclid(1.0);
+                    let tx = ((u * (wi as f32 - 1.0)).round() as usize).min(wi - 1);
+                    let ty = ((v * (hi as f32 - 1.0)).round() as usize).min(hi - 1);
+                    sample_coords.push((tx as u32, ty as u32));
+                }
+            }
+        }
+
+        if any_uv && u_max > u_min && v_max > v_min {
+            let x0 = ((u_min * (wi as f32)).floor() as usize).min(wi - 1);
+            let y0 = ((v_min * (hi as f32)).floor() as usize).min(hi - 1);
+            let x1 = ((u_max * (wi as f32)).ceil() as usize).clamp(x0 + 1, wi);
+            let y1 = ((v_max * (hi as f32)).ceil() as usize).clamp(y0 + 1, hi);
+            let bw = x1 - x0;
+            let bh = y1 - y0;
+            let area = bw.saturating_mul(bh);
+            let step = ((area as f32 / 8192.0).sqrt().ceil() as usize).max(1);
+            for y in (y0..y1).step_by(step) {
+                for x in (x0..x1).step_by(step) {
+                    sample_coords.push((x as u32, y as u32));
+                }
+            }
+        } else if sample_coords.is_empty() {
+            let step = (((wi * hi) as f32 / 8192.0).sqrt().ceil() as usize).max(1);
+            for y in (0..hi).step_by(step) {
+                for x in (0..wi).step_by(step) {
+                    sample_coords.push((x as u32, y as u32));
+                }
+            }
+        }
+
+        let mut total = 0u32;
+        let mut zero_alpha = 0u32;
+        let mut semi_alpha = 0u32;
+        let mut black_bg_opaque = 0u32;
+        let mut bright_glow = 0u32;
+        for (tx, ty) in sample_coords {
+            let o = ((ty as usize) * wi + (tx as usize)) * 4;
+            let r = px[o];
+            let g = px[o + 1];
+            let b = px[o + 2];
+            let a = px[o + 3];
+            total += 1;
+            if a <= 10 {
+                zero_alpha += 1;
+            } else if a < 245 {
+                semi_alpha += 1;
+            } else {
+                let max_c = r.max(g).max(b);
+                if max_c <= 18 {
+                    black_bg_opaque += 1;
+                } else if max_c >= 85 {
+                    bright_glow += 1;
+                }
+            }
+        }
+        if total == 0 {
+            continue;
+        }
+
+        let inv = 1.0f32 / (total as f32);
+        let zero_frac = (zero_alpha as f32) * inv;
+        let semi_frac = (semi_alpha as f32) * inv;
+        let black_frac = (black_bg_opaque as f32) * inv;
+        let glow_frac = (bright_glow as f32) * inv;
+
+        let additive_name = mname_low.contains("highlight")
+            || mname_low.contains("hikari")
+            || mname_low.contains("kira")
+            || mname_low.contains("sparkle")
+            || mname_low.contains("additive")
+            || mname_low.contains("glow")
+            || mname_low.contains("flair")
+            || mname_low.contains("flare")
+            || raw.name.contains("光");
+        let opaque_garment_name = mname_low.contains("hair")
+            || mname_low.contains("suit")
+            || mname_low.contains("coat")
+            || mname_low.contains("shoe")
+            || mname_low.contains("boot")
+            || mname_low.contains("pants")
+            || mname_low.contains("skin")
+            || mname_low.contains("iris")
+            || mname_low.contains("sclera");
+        let blend_name = mname_low.contains("blush")
+            || mname_low.contains("cheek")
+            || mname_low.contains("tear")
+            || mname_low.contains("glass")
+            || mname_low.contains("lens")
+            || mname_low.contains("veil")
+            || mname_low.contains("translucent")
+            || raw.name.contains("照")
+            || raw.name.contains("頬");
+
+        if (additive_name && (black_frac >= 0.35 || semi_frac > 0.05) && zero_frac < 0.25)
+            || (zero_frac < 0.02
+                && black_frac >= 0.45
+                && glow_frac >= 0.005
+                && semi_frac < 0.08
+                && (!raw.cast_shadow || additive_name || !opaque_garment_name))
+        {
+            raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_ADDITIVE;
+            raw.unlit = true;
+            raw.cast_shadow = false;
+        } else if morph_affects_alpha[m_idx]
+            || raw.base_color[3] < 0.99
+            || semi_frac >= 0.08
+            || (blend_name && (zero_frac + semi_frac) >= 0.005)
+        {
+            raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_BLEND;
+        } else if (zero_frac + semi_frac) >= 0.005 {
+            raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_MASK;
+            raw.alpha_cutoff = if mname_low.contains("lash") || mname_low.contains("hair") {
+                0.35
+            } else {
+                0.5
+            };
+        } else {
+            raw.alpha_mode = aether_ffi::AETHER_ALPHA_MODE_OPAQUE;
+        }
+    }
 }
 
 fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> {
@@ -784,13 +1111,12 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
                 continue;
             }
             let t_idx = textures.len() as u32;
-            let path = base_dir.join(&trimmed);
+            let resolved = resolve_pmx_texture_path(base_dir, &trimmed);
             textures.push(RawTextureDesc {
                 name: trimmed,
-                source: if path.is_file() {
-                    RawTextureSource::ExternalFile(path)
-                } else {
-                    RawTextureSource::Missing
+                source: match resolved {
+                    Some(path) => RawTextureSource::ExternalFile(path),
+                    None => RawTextureSource::Missing,
                 },
                 width: 1,
                 height: 1,
@@ -833,12 +1159,19 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
             shading_toony: 0.85,
             uv_scroll: [0.0, 0.0],
             uv_rotation: 0.0,
-            alpha_mode: AETHER_ALPHA_MODE_OPAQUE,
+            alpha_mode: if diffuse[3] < 0.99 {
+                aether_ffi::AETHER_ALPHA_MODE_BLEND
+            } else {
+                AETHER_ALPHA_MODE_OPAQUE
+            },
             alpha_cutoff: 0.5,
             double_sided: false,
             unlit: false,
             has_vrm_mtoon: false,
-            render_queue_offset: 0,
+            cast_shadow: true,
+            edge_enabled: edge_flag != 0,
+            is_pmx: true,
+            render_queue_offset: m_idx as i32,
             flatten_override: None,
             tex_base,
             tex_shade: None,
@@ -966,6 +1299,8 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         }
     }
 
+    finalize_pmx_material_alpha_tiers(&mut materials, &submeshes, &vertices, &textures, &[]);
+
     Ok(ParsedAvatar {
         source_format: AETHER_SOURCE_FORMAT_PMD,
         base_dir: base_dir.to_path_buf(),
@@ -987,4 +1322,188 @@ fn parse_pmd(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, LoaderError> 
         textures,
         pmx_aux: None,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod rev31_pmx_tests {
+    use super::*;
+
+    fn write_pmx_utf16_str(buf: &mut Vec<u8>, s: &str) {
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        buf.extend_from_slice(&((utf16.len() * 2) as i32).to_le_bytes());
+        for u in utf16 {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
+    }
+
+    fn write_tga_rgba(path: &Path, w: u16, h: u16, px_fn: impl Fn(u16, u16) -> [u8; 4]) {
+        let mut tga = Vec::with_capacity(18 + usize::from(w) * usize::from(h) * 4);
+        tga.extend_from_slice(&[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        tga.extend_from_slice(&w.to_le_bytes());
+        tga.extend_from_slice(&h.to_le_bytes());
+        tga.push(32); // 32-bit BGRA
+        tga.push(0x28); // top-left origin + 8 alpha bits
+        for y in 0..h {
+            for x in 0..w {
+                let [r, g, b, a] = px_fn(x, y);
+                tga.extend_from_slice(&[b, g, r, a]);
+            }
+        }
+        std::fs::write(path, tga).unwrap();
+    }
+
+    #[test]
+    fn pmx_4tier_transparency_case_insensitive_and_sphere_mix() {
+        let dir = std::env::temp_dir().join("aether_rev31_pmx_4tier_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("TexSub")).unwrap();
+
+        // 0: opaque.tga (all a=255)
+        write_tga_rgba(&dir.join("TexSub/Opaque.tga"), 4, 4, |_, _| {
+            [220, 180, 160, 255]
+        });
+        // 1: lash_cutout.tga (binary alpha: half a=0, half a=255)
+        write_tga_rgba(&dir.join("TexSub/Lash_Cutout.tga"), 4, 4, |x, _| {
+            if x < 2 {
+                [30, 25, 30, 0]
+            } else {
+                [30, 25, 30, 255]
+            }
+        });
+        // 2: veil_blend.tga (smooth semi-transparent gradient a=128)
+        write_tga_rgba(&dir.join("TexSub/Veil_Blend.tga"), 4, 4, |_, _| {
+            [200, 220, 255, 128]
+        });
+        // 3: eye_kira.spa (black background + bright glow center)
+        write_tga_rgba(&dir.join("TexSub/Eye_Kira.spa"), 4, 4, |x, y| {
+            if x == 1 && y == 1 {
+                [255, 250, 240, 255]
+            } else {
+                [0, 0, 0, 255]
+            }
+        });
+        // 4: hair_sph.sph (sphere multiply map)
+        write_tga_rgba(&dir.join("TexSub/Hair_Sph.sph"), 4, 4, |_, _| {
+            [200, 180, 160, 255]
+        });
+
+        let mut pmx = Vec::new();
+        pmx.extend_from_slice(b"PMX ");
+        pmx.extend_from_slice(&2.0f32.to_le_bytes());
+        // globals: count=8, [utf16=0, uv_cnt=0, vtx=1, tex=1, mat=1, bone=1, morph=1, rb=1]
+        pmx.extend_from_slice(&[8, 0, 0, 1, 1, 1, 1, 1, 1]);
+        write_pmx_utf16_str(&mut pmx, "TestModel");
+        write_pmx_utf16_str(&mut pmx, "TestModelEn");
+        write_pmx_utf16_str(&mut pmx, "");
+        write_pmx_utf16_str(&mut pmx, "");
+
+        // 12 vertices (4 quads/tris, 3 verts each)
+        pmx.extend_from_slice(&12i32.to_le_bytes());
+        for i in 0..12 {
+            let tri = (i / 3) as f32;
+            let k = (i % 3) as f32;
+            let uv = match i % 3 {
+                0 => [0.0f32, 0.0],
+                1 => [1.0, 0.0],
+                _ => [0.5, 1.0],
+            };
+            pmx.extend_from_slice(&[tri + k * 0.2, 0.0, 0.0].map(f32::to_le_bytes).concat());
+            pmx.extend_from_slice(&[0.0f32, 0.0, 1.0].map(f32::to_le_bytes).concat());
+            pmx.extend_from_slice(&uv.map(f32::to_le_bytes).concat());
+            pmx.push(0); // BDEF1
+            pmx.push(0); // bone 0
+            pmx.extend_from_slice(&1.0f32.to_le_bytes()); // edge_scale
+        }
+        // 12 indices (4 tris)
+        pmx.extend_from_slice(&12i32.to_le_bytes());
+        for i in 0u8..12 {
+            pmx.push(i);
+        }
+        // 5 textures with wrong case & backslash to test UTF-16 + case-insensitive resolver
+        pmx.extend_from_slice(&5i32.to_le_bytes());
+        write_pmx_utf16_str(&mut pmx, "\\texsub\\opaque.TGA");
+        write_pmx_utf16_str(&mut pmx, ".\\TEXSUB\\LASH_CUTOUT.tga");
+        write_pmx_utf16_str(&mut pmx, "texsub\\veil_blend.tga");
+        write_pmx_utf16_str(&mut pmx, "TexSub\\eye_kira.spa");
+        write_pmx_utf16_str(&mut pmx, "texsub/hair_sph.sph");
+
+        // 4 materials:
+        // 0: opaque body (cast_shadow=1, edge=1, sphere=.sph mode 1)
+        // 1: cutout lash (cast_shadow=0, edge=0)
+        // 2: blend veil (cast_shadow=0, edge=0)
+        // 3: additive .spa card (cast_shadow=0, edge=0, sphere=.spa mode 2)
+        pmx.extend_from_slice(&4i32.to_le_bytes());
+        let specs = [
+            ("body_opaque", 0u8, 4u8, 0x10u8 | 0x04u8, 1u8),
+            ("lash_cutout", 1u8, 4u8, 0x01u8, 0u8),
+            ("veil_blend", 2u8, 4u8, 0x01u8, 0u8),
+            ("highlight_card", 3u8, 3u8, 0x01u8, 2u8),
+        ];
+        for (name, tex_i, sph_i, flags, sph_mode) in specs {
+            write_pmx_utf16_str(&mut pmx, name);
+            write_pmx_utf16_str(&mut pmx, name);
+            pmx.extend_from_slice(&[1.0f32, 1.0, 1.0, 1.0].map(f32::to_le_bytes).concat());
+            pmx.extend_from_slice(&[0.2f32, 0.2, 0.2].map(f32::to_le_bytes).concat());
+            pmx.extend_from_slice(&8.0f32.to_le_bytes());
+            pmx.extend_from_slice(&[0.5f32, 0.5, 0.5].map(f32::to_le_bytes).concat());
+            pmx.push(flags);
+            pmx.extend_from_slice(&[0.0f32, 0.0, 0.0, 1.0].map(f32::to_le_bytes).concat());
+            pmx.extend_from_slice(&1.0f32.to_le_bytes());
+            pmx.push(tex_i);
+            pmx.push(sph_i);
+            pmx.push(sph_mode);
+            pmx.push(1); // builtin toon
+            pmx.push(0);
+            write_pmx_utf16_str(&mut pmx, "");
+            pmx.extend_from_slice(&3i32.to_le_bytes());
+        }
+        // 1 root bone
+        pmx.extend_from_slice(&1i32.to_le_bytes());
+        write_pmx_utf16_str(&mut pmx, "センター");
+        write_pmx_utf16_str(&mut pmx, "center");
+        pmx.extend_from_slice(&[0.0f32; 3].map(f32::to_le_bytes).concat());
+        pmx.push(0xFF); // parent -1
+        pmx.extend_from_slice(&0i32.to_le_bytes());
+        pmx.extend_from_slice(&0u16.to_le_bytes());
+        pmx.extend_from_slice(&[0.0f32; 3].map(f32::to_le_bytes).concat());
+        // 0 morphs, 0 frames, 0 RBs, 0 joints
+        for _ in 0..4 {
+            pmx.extend_from_slice(&0i32.to_le_bytes());
+        }
+
+        let parsed = parse_pmx(&pmx, &dir).unwrap();
+        assert_eq!(parsed.materials.len(), 4);
+        assert_eq!(parsed.materials[0].alpha_mode, AETHER_ALPHA_MODE_OPAQUE);
+        assert!(parsed.materials[0].cast_shadow);
+        assert!(parsed.materials[0].edge_enabled);
+        assert!((parsed.materials[0].matcap_add_mix - 0.0).abs() < 1e-4);
+
+        assert_eq!(
+            parsed.materials[1].alpha_mode,
+            aether_ffi::AETHER_ALPHA_MODE_MASK
+        );
+        assert!(!parsed.materials[1].cast_shadow);
+        assert!(!parsed.materials[1].edge_enabled);
+
+        assert_eq!(
+            parsed.materials[2].alpha_mode,
+            aether_ffi::AETHER_ALPHA_MODE_BLEND
+        );
+        assert_eq!(
+            parsed.materials[3].alpha_mode,
+            aether_ffi::AETHER_ALPHA_MODE_ADDITIVE
+        );
+        assert!((parsed.materials[3].matcap_add_mix - 1.0).abs() < 1e-4);
+
+        for (i, t) in parsed.textures.iter().enumerate() {
+            assert!(
+                matches!(t.source, RawTextureSource::ExternalFile(_)),
+                "texture {i} ({}) failed case-insensitive resolution",
+                t.name
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

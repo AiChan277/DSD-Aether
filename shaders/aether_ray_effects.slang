@@ -9,12 +9,7 @@ RaytracingAccelerationStructure g_Tlas : register(t0, space1);
 static const float kPi = 3.14159265;
 static const float kTwoPi = 6.28318531;
 
-float3 compute_world_light_dir(GpuLight l, float3 world_pos) {
-    if (l.pos_or_dir.w > 0.5) {
-        return normalize_safe(l.pos_or_dir.xyz - world_pos, float3(0.0, 0.0, 1.0));
-    }
-    return normalize_safe(l.pos_or_dir.xyz, float3(0.0, 0.0, 1.0));
-}
+// Legacy compute_world_light_dir(GpuLight) removed (Rev 3.1 Single Lighting Authority)
 
 void build_basis(float3 n, out float3 t, out float3 b) {
     float3 up = (abs(n.z) < 0.999) ? float3(0.0, 0.0, 1.0) : float3(1.0, 0.0, 0.0);
@@ -64,7 +59,7 @@ bool passes_rt_alpha_test(uint tri_id, float2 bary) {
     }
     uint4 meta = AETHER_LOAD(uint4, g_Pc.draw_data_bda, tri_id);
     GpuMaterial hmat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, meta.w);
-    if ((hmat.extra_slots[3] == 0u) && (hmat.toon_params.w <= 0.001)) {
+    if ((hmat.extra_slots[2] & (1u << 21u)) == 0u && hmat.extra_slots[3] != 1u) {
         return true;
     }
     GpuSkinnedVertex v0 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.x);
@@ -214,51 +209,63 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float vis_accum = 0.0;
 
     uint studio_count = (fg.studio_lights_bda != 0ul) ? min(fg.studio_slots0.w, 16u) : 0u;
-    uint light_count = min(fg.state_u32.y, 4u);
     float3 primary_key_dir = float3(0.35, 0.55, 0.75);
-    float3 primary_key_col = float3(1.0, 0.96, 0.92);
+    float3 primary_key_col = float3(0.0, 0.0, 0.0);
+    float3 rim_dir_acc = float3(-0.35, 0.45, -0.82);
+    float3 fill_col_acc = float3(0.0, 0.0, 0.0);
+    uint dom_idx = 0xFFFFFFFFu;
     if (studio_count > 0u) {
-        StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, 0u);
-        float d_tmp, m_tmp;
-        eval_studio_light_modifiers(ksl, fg, world_pos, primary_key_dir, d_tmp, m_tmp);
-        primary_key_col = ksl.color_rgb_linear * ksl.intensity_ev100;
-    } else if (light_count > 0u) {
-        primary_key_dir = compute_world_light_dir(fg.lights[0], world_pos);
-        primary_key_col = fg.lights[0].color_intensity.rgb;
+        uint pref = fg.studio_aux_u32.x;
+        if (pref < studio_count) {
+            StudioLightGPU psl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, pref);
+            if ((psl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u &&
+                (psl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) == 0u) {
+                dom_idx = pref;
+            }
+        }
+        for (uint ki = 0u; ki < studio_count; ++ki) {
+            StudioLightGPU ksl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, ki);
+            if ((ksl.flags_and_type & STUDIO_FLAG_ENABLED) == 0u ||
+                (ksl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u) {
+                continue;
+            }
+            if (dom_idx == 0xFFFFFFFFu) {
+                dom_idx = ki;
+            }
+            if (ki == dom_idx) {
+                float d_tmp, m_tmp;
+                eval_studio_light_modifiers(ksl, fg, world_pos, primary_key_dir, d_tmp, m_tmp);
+                primary_key_col = ksl.color_rgb_linear * ksl.intensity_ev100;
+            } else {
+                float3 l_tmp;
+                float d_tmp, m_tmp;
+                eval_studio_light_modifiers(ksl, fg, world_pos, l_tmp, d_tmp, m_tmp);
+                fill_col_acc += ksl.color_rgb_linear * (ksl.intensity_ev100 * 0.5);
+                if (dot(l_tmp, primary_key_dir) < 0.0) {
+                    rim_dir_acc = l_tmp;
+                }
+            }
+        }
     }
 
-    uint active_loop_n = (studio_count > 0u) ? min(studio_count, 4u) : light_count;
-    for (uint li = 0u; li < active_loop_n; ++li) {
+    for (uint li = 0u; li < studio_count; ++li) {
+        StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, li);
+        bool enabled = (sl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u;
+        bool is_passive = (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u;
+        bool cast_rt = enabled && !is_passive && ((sl.flags_and_type & STUDIO_FLAG_CAST_SHADOW) != 0u);
+        if (!cast_rt) {
+            continue;
+        }
         float3 ldir = primary_key_dir;
-        float lw = 1.0;
-        float cone_r = 0.06;
-        bool cast_rt = false;
-
-        if (studio_count > 0u) {
-            StudioLightGPU sl = AETHER_LOAD(StudioLightGPU, fg.studio_lights_bda, li);
-            bool enabled = (sl.flags_and_type & STUDIO_FLAG_ENABLED) != 0u;
-            bool is_passive = (sl.flags_and_type & (STUDIO_FLAG_NEG_FILL | STUDIO_FLAG_BOUNCE_CARD)) != 0u;
-            cast_rt = enabled && !is_passive && ((sl.flags_and_type & STUDIO_FLAG_CAST_SHADOW) != 0u);
-            float dist_l, mod_a;
-            eval_studio_light_modifiers(sl, fg, world_pos, ldir, dist_l, mod_a);
-            float area_rad = atan2(0.5 * max(sl.size_xy_radius.x, sl.size_xy_radius.y), max(dist_l, 0.5));
-            bool softbox_on = (sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u;
-            cone_r = softbox_on ? clamp(area_rad * sl.shadow_bias_scale, 0.025, 0.28)
-                                : clamp(0.012 * sl.shadow_bias_scale, 0.005, 0.04);
-            lw = max(luminance(sl.color_rgb_linear) * sl.intensity_ev100 * mod_a, 0.05);
-            if (!cast_rt || mod_a <= 0.01 || (li > 0u && dot(ldir, primary_key_dir) < -0.25)) {
-                continue;
-            }
-        } else {
-            GpuLight l = fg.lights[li];
-            bool enabled = (l.role_and_flags.y & 1u) != 0u;
-            cast_rt = (l.role_and_flags.y & 2u) != 0u;
-            if (!enabled || !cast_rt || l.role_and_flags.x == 2u) {
-                continue;
-            }
-            ldir = compute_world_light_dir(l, world_pos);
-            lw = max(luminance(l.color_intensity.rgb), 0.1);
-            cone_r = max(l.direction_radius.w, 0.0045);
+        float dist_l, mod_a;
+        eval_studio_light_modifiers(sl, fg, world_pos, ldir, dist_l, mod_a);
+        float area_rad = atan2(0.5 * max(sl.size_xy_radius.x, sl.size_xy_radius.y), max(dist_l, 0.5));
+        bool softbox_on = (sl.flags_and_type & STUDIO_FLAG_SOFTBOX_ON) != 0u;
+        float cone_r = softbox_on ? clamp(area_rad * sl.shadow_bias_scale, 0.025, 0.28)
+                                  : clamp(0.012 * sl.shadow_bias_scale, 0.005, 0.04);
+        float lw = max(luminance(sl.color_rgb_linear) * sl.intensity_ev100 * mod_a, 0.05);
+        if (mod_a <= 0.01 || (li != dom_idx && dot(ldir, primary_key_dir) < -0.25)) {
+            continue;
         }
 
         // Disney SIGGRAPH 2019 Shadow Terminator factor on geometric vs shading normals
@@ -323,10 +330,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float rim_vis = 1.0;
     float rim_t = 1.0;
     if (fresnel > 0.2) {
-        float3 rim_dir = float3(-0.35, 0.45, -0.82);
-        if (light_count > 2u && (fg.lights[2].role_and_flags.y & 1u) != 0u) {
-            rim_dir = compute_world_light_dir(fg.lights[2], world_pos);
-        }
+        float3 rim_dir = rim_dir_acc;
         float3 j_rim = sample_cone(normalize(rim_dir), 0.05, j1, j0);
         RayDesc rr = {};
         rr.Origin = ray_origin;
@@ -417,9 +421,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         uint2 hcoord = min(tid.xy >> 1u, uint2(hw - 1u, hh - 1u));
         uint hidx = hcoord.y * hw + hcoord.x;
 
-        float3 fill_col = (light_count > 1u && (fg.lights[1].role_and_flags.y & 1u) != 0u)
-                              ? fg.lights[1].color_intensity.rgb
-                              : float3(0.45, 0.56, 0.78);
+        float3 fill_col = fill_col_acc;
         float3 sample_rad = float3(0.0, 0.0, 0.0);
         float3 sample_hit_p = world_pos + world_n * 0.25;
         float3 sample_hit_n = -world_n;

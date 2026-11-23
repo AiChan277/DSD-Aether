@@ -1,0 +1,410 @@
+{
+  "environment_and_circadian": {
+    "ambient_floor": 0.3400000035762787,
+    "bg_rgba": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "circadian_enabled": false,
+    "circadian_time_minutes": -1,
+    "circadian_timezone": 0,
+    "environment_sky_strength": 0.2800000011920929,
+    "ground_bounce_strength": 0.15000000596046448
+  },
+  "format": "ALFX",
+  "lighting_rig": {
+    "circadian_sun_slot_id": -1,
+    "dominant_key_light_id": 0,
+    "lights": [
+      {
+        "aperture_and_modifiers": {
+          "barn_door_cuts_deg": [
+            38.0,
+            38.0,
+            42.0,
+            42.0
+          ],
+          "barn_doors_enabled": false,
+          "coaxial_lock": true,
+          "diffusion_density": 0.699999988079071,
+          "diffusion_enabled": true,
+          "gel": 0,
+          "gel_enabled": false,
+          "gobo": 0,
+          "grid_angle_deg": 40.0,
+          "grid_enabled": false,
+          "height_or_inner_m": 0.18000000715255737,
+          "ies_profile": 7,
+          "softbox_enabled": false,
+          "spot_inner_deg": 46.0,
+          "spot_outer_deg": 84.0,
+          "width_or_outer_m": 0.25,
+          "window_portal": false
+        },
+        "cast_shadow": false,
+        "enabled": true,
+        "fixture": 9,
+        "fixture_type": "Broadcast_Ring",
+        "id": "light_00",
+        "name": "Coaxial Beauty Ring",
+        "passive_flag": 0,
+        "passive_type": "None",
+        "photometry": {
+          "catchlight_weight": 1.2000000476837158,
+          "channel_mask": 15,
+          "channels": {
+            "body": true,
+            "eye_spec": true,
+            "face": true,
+            "hair": true
+          },
+          "exposure_stops": 0.0,
+          "green_magenta_tint": 0.0,
+          "intensity_ev100": 0.7400000095367432,
+          "kelvin_cct": 5600.0,
+          "linear_tint_rgb": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "shadow_bias_scale": 1.0
+        },
+        "slot_index": 0,
+        "solo": false,
+        "transform": {
+          "aim_lock": true,
+          "aim_target_mode": "AvatarHead",
+          "azimuth_deg": 0.0,
+          "distance_m": 1.600000023841858,
+          "elevation_deg": 6.0,
+          "position_ws": [
+            1.0499999523162842,
+            1.9500000476837158,
+            1.5
+          ],
+          "roll_deg": 0.0,
+          "target_ws": [
+            0.0,
+            1.3200000524520874,
+            0.0
+          ],
+          "use_orbit_polar": true
+        }
+      },
+      {
+        "aperture_and_modifiers": {
+          "barn_door_cuts_deg": [
+            38.0,
+            38.0,
+            42.0,
+            42.0
+          ],
+          "barn_doors_enabled": false,
+          "coaxial_lock": false,
+          "diffusion_density": 1.0,
+          "diffusion_enabled": true,
+          "gel": 0,
+          "gel_enabled": false,
+          "gobo": 0,
+          "grid_angle_deg": 40.0,
+          "grid_enabled": false,
+          "height_or_inner_m": 1.100000023841858,
+          "ies_profile": 1,
+          "softbox_enabled": true,
+          "spot_inner_deg": 55.0,
+          "spot_outer_deg": 88.0,
+          "width_or_outer_m": 1.100000023841858,
+          "window_portal": false
+        },
+        "cast_shadow": true,
+        "enabled": true,
+        "fixture": 1,
+        "fixture_type": "Octabox",
+        "id": "light_01",
+        "name": "Overhead Octabox",
+        "passive_flag": 0,
+        "passive_type": "None",
+        "photometry": {
+          "catchlight_weight": 1.0,
+          "channel_mask": 15,
+          "channels": {
+            "body": true,
+            "eye_spec": true,
+            "face": true,
+            "hair": true
+          },
+          "exposure_stops": 0.0,
+          "green_magenta_tint": 0.0,
+          "intensity_ev100": 0.8600000143051147,
+          "kelvin_cct": 5600.0,
+          "linear_tint_rgb": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "shadow_bias_scale": 1.0
+        },
+        "slot_index": 1,
+        "solo": false,
+        "transform": {
+          "aim_lock": true,
+          "aim_target_mode": "AvatarHead",
+          "azimuth_deg": 12.0,
+          "distance_m": 2.049999952316284,
+          "elevation_deg": 42.0,
+          "position_ws": [
+            1.0499999523162842,
+            1.9500000476837158,
+            1.5
+          ],
+          "roll_deg": 0.0,
+          "target_ws": [
+            0.0,
+            1.3200000524520874,
+            0.0
+          ],
+          "use_orbit_polar": true
+        }
+      },
+      {
+        "aperture_and_modifiers": {
+          "barn_door_cuts_deg": [
+            38.0,
+            38.0,
+            42.0,
+            42.0
+          ],
+          "barn_doors_enabled": false,
+          "coaxial_lock": false,
+          "diffusion_density": 0.7200000286102295,
+          "diffusion_enabled": true,
+          "gel": 0,
+          "gel_enabled": false,
+          "gobo": 0,
+          "grid_angle_deg": 40.0,
+          "grid_enabled": false,
+          "height_or_inner_m": 0.550000011920929,
+          "ies_profile": 0,
+          "softbox_enabled": true,
+          "spot_inner_deg": 52.0,
+          "spot_outer_deg": 84.0,
+          "width_or_outer_m": 0.800000011920929,
+          "window_portal": false
+        },
+        "cast_shadow": false,
+        "enabled": true,
+        "fixture": 0,
+        "fixture_type": "RectSoftbox",
+        "id": "light_02",
+        "name": "White Chin Bounce",
+        "passive_flag": 2,
+        "passive_type": "BounceWhite",
+        "photometry": {
+          "catchlight_weight": 0.0,
+          "channel_mask": 15,
+          "channels": {
+            "body": true,
+            "eye_spec": true,
+            "face": true,
+            "hair": true
+          },
+          "exposure_stops": 0.0,
+          "green_magenta_tint": 0.0,
+          "intensity_ev100": 0.0,
+          "kelvin_cct": 5600.0,
+          "linear_tint_rgb": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "shadow_bias_scale": 1.0
+        },
+        "slot_index": 2,
+        "solo": false,
+        "transform": {
+          "aim_lock": true,
+          "aim_target_mode": "AvatarHead",
+          "azimuth_deg": 0.0,
+          "distance_m": 1.25,
+          "elevation_deg": -22.0,
+          "position_ws": [
+            1.0499999523162842,
+            1.9500000476837158,
+            1.5
+          ],
+          "roll_deg": 0.0,
+          "target_ws": [
+            0.0,
+            1.3200000524520874,
+            0.0
+          ],
+          "use_orbit_polar": true
+        }
+      },
+      {
+        "aperture_and_modifiers": {
+          "barn_door_cuts_deg": [
+            38.0,
+            38.0,
+            42.0,
+            42.0
+          ],
+          "barn_doors_enabled": false,
+          "coaxial_lock": false,
+          "diffusion_density": 0.6499999761581421,
+          "diffusion_enabled": true,
+          "gel": 0,
+          "gel_enabled": false,
+          "gobo": 0,
+          "grid_angle_deg": 30.0,
+          "grid_enabled": true,
+          "height_or_inner_m": 1.2000000476837158,
+          "ies_profile": 2,
+          "softbox_enabled": true,
+          "spot_inner_deg": 36.0,
+          "spot_outer_deg": 68.0,
+          "width_or_outer_m": 0.30000001192092896,
+          "window_portal": false
+        },
+        "cast_shadow": false,
+        "enabled": true,
+        "fixture": 2,
+        "fixture_type": "Stripbox",
+        "id": "light_03",
+        "name": "Soft Hair Halo",
+        "passive_flag": 0,
+        "passive_type": "None",
+        "photometry": {
+          "catchlight_weight": 1.0,
+          "channel_mask": 15,
+          "channels": {
+            "body": true,
+            "eye_spec": true,
+            "face": true,
+            "hair": true
+          },
+          "exposure_stops": 0.0,
+          "green_magenta_tint": 0.0,
+          "intensity_ev100": 0.44999998807907104,
+          "kelvin_cct": 6000.0,
+          "linear_tint_rgb": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "shadow_bias_scale": 1.0
+        },
+        "slot_index": 3,
+        "solo": false,
+        "transform": {
+          "aim_lock": true,
+          "aim_target_mode": "AvatarHead",
+          "azimuth_deg": 165.0,
+          "distance_m": 1.9500000476837158,
+          "elevation_deg": 38.0,
+          "position_ws": [
+            1.0499999523162842,
+            1.9500000476837158,
+            1.5
+          ],
+          "roll_deg": 0.0,
+          "target_ws": [
+            0.0,
+            1.3200000524520874,
+            0.0
+          ],
+          "use_orbit_polar": true
+        }
+      }
+    ],
+    "multi_light_soft_knee_threshold": 0.8500000238418579,
+    "studio_light_count": 4
+  },
+  "meta": {
+    "app_version": "1.0.4",
+    "author": "AETHER Studio",
+    "created_utc": "2026-11-20T00:00:00Z",
+    "description": "High-key beauty coaxial ring + overhead octabox + white chin bounce for VRM",
+    "name": "Soft Pastel VRM",
+    "preview_palette_hex": [
+      "#FFDDE8",
+      "#BCE3FF",
+      "#2A2433"
+    ],
+    "tags": [
+      "pastel",
+      "vrm",
+      "beauty",
+      "high-key"
+    ]
+  },
+  "satsuei_post_fx": {
+    "bloom_intensity": 0.05999999865889549,
+    "bloom_threshold": 1.0499999523162842,
+    "dog_ink_boost": 0.6499999761581421,
+    "enable_2d_filter_pro": true,
+    "enable_paper_warmth": false,
+    "painterly_flatten_strength": 0.550000011920929,
+    "paper_warmth_strength": 0.20000000298023224,
+    "satsuei": {
+      "backscatter_strength": 0.550000011920929,
+      "halation_strength": 0.18000000715255737,
+      "halation_threshold": 0.949999988079071,
+      "light_wrap_strength": 0.23999999463558197
+    },
+    "split_grading": {
+      "avatar_contrast": 0.9800000190734863,
+      "avatar_ev_bias": 0.0,
+      "avatar_saturation": 1.0499999523162842,
+      "avatar_warmth": 0.0,
+      "bg_contrast": 1.0199999809265137,
+      "bg_exposure": 1.0,
+      "bg_saturation": 0.9599999785423279,
+      "master_grade_strength": 1.0
+    },
+    "tone_mode": 1
+  },
+  "schema_version": "1.0.1",
+  "shading_and_rt_pt": {
+    "bounce_strength": 0.3499999940395355,
+    "bounce_t_max": 0.25,
+    "cel_band_sharpness": 0.02500000037252903,
+    "crease_disguise_enabled": false,
+    "crease_disguise_strength": 0.699999988079071,
+    "crease_strength": 0.75,
+    "crease_threshold_deg": 35.0,
+    "eye_catchlight_intensity": 0.8500000238418579,
+    "eye_catchlight_size": 1.0,
+    "face_normal_flatten": 0.8500000238418579,
+    "global_live2d_flatness": 0.8399999737739563,
+    "hair_highlight_intensity": 0.6499999761581421,
+    "hair_shadow_offset_px": 6.0,
+    "hair_shadow_strength": 0.6000000238418579,
+    "indirect_bleed_strength": 0.75,
+    "iro_tsuke_strength": 0.8500000238418579,
+    "lighting_mode": 1,
+    "neck_seam_blend": 1.0,
+    "outline_width_scale": 1.0,
+    "rim_depth_offset_px": 3.0,
+    "rim_step_strength": 0.41999998688697815,
+    "rim_t_max": 0.44999998807907104,
+    "sdf_feather": 0.07999999821186066,
+    "shadow_warm_cool_shift": 0.75,
+    "toon_ramp_shift": -0.05000000074505806,
+    "toon_ramp_toony": 0.8500000238418579,
+    "vrm_mmd_parity": {
+      "auto_toon_harmonizer_enabled": true,
+      "face_internal_edge_suppress_cm": 1.7999999523162842,
+      "pmx_alpha_bleed_padding": true,
+      "pmx_strict_material_draw_order": true,
+      "unified_surface_group_crease": true,
+      "vrm_auto_edge_scale_enabled": true,
+      "vrm_cel_crispness_boost": 0.8799999952316284,
+      "vrm_hair_angel_ring_boost": 0.75,
+      "vrm_pre_cel_clarity_strength": 0.25,
+      "vrm_shadow_chroma_lift": 0.25999999046325684
+    }
+  }
+}

@@ -66,6 +66,7 @@ constexpr std::array<NodeSpec, 20> kBuiltinNodePaletteSpecs = {{
 
 bool is_action_blocked_on_air(PaletteCommandTag tag) noexcept {
     switch (tag) {
+    case PaletteCommandTag::OpenProjectManager:
     case PaletteCommandTag::ProjectNew:
     case PaletteCommandTag::ProjectOpen:
     case PaletteCommandTag::OpenRecentFile:
@@ -233,7 +234,7 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
         keymap.chord(ActionId::ToggleRayTracing).c_str());
     add(PaletteCategory::Actions, PaletteCommandTag::ToggleHeatmap, "act.heatmap", "Toggle Joint Confidence Heatmap",
         keymap.chord(ActionId::ViewportHeatmap).c_str());
-    add(PaletteCategory::Actions, PaletteCommandTag::ToggleOrbitOrb, "act.orb", "Toggle Light Orbit Orb",
+    add(PaletteCategory::Actions, PaletteCommandTag::ToggleOrbitOrb, "act.orb", "Toggle Quick Key Orb",
         keymap.chord(ActionId::ViewportOrbitOrb).c_str());
     add(PaletteCategory::Actions, PaletteCommandTag::ToggleTrackingHud, "act.hud", "Toggle Tracking HUD Overlay", "");
     add(PaletteCategory::Actions, PaletteCommandTag::ToggleHandTracking, "act.hands",
@@ -270,7 +271,7 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenPreferences, "panel.prefs",
         "Open Studio Preferences & Keymap...", keymap.chord(ActionId::Preferences).c_str());
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenGraphicsSettings, "panel.graphics",
-        "Open Graphics, GPU & Live2D Settings...", "");
+        "Open Graphics & Display Settings...", "");
     add(PaletteCategory::PanelsAndSettings, PaletteCommandTag::OpenShortcuts, "panel.keys", "Show Keyboard Shortcuts",
         keymap.chord(ActionId::ShortcutOverlay).c_str());
 
@@ -278,16 +279,22 @@ void CommandPalette::rebuild_entries(const KeymapRegistry& keymap, std::span<con
         add(PaletteCategory::Nodes, PaletteCommandTag::AddNodeByType, n.type_id, n.label, "", n.type_id);
     }
 
+    add(PaletteCategory::Files, PaletteCommandTag::OpenProjectManager, "file.project_manager",
+        "File: Project Manager...", keymap.chord(ActionId::OpenProjectManager).c_str());
     add(PaletteCategory::Files, PaletteCommandTag::ProjectNew, "file.new", "File: New Studio Project",
         keymap.chord(ActionId::ProjectNew).c_str());
-    add(PaletteCategory::Files, PaletteCommandTag::ProjectOpen, "file.open", "File: Open Project (.aether / .json)...",
+    add(PaletteCategory::Files, PaletteCommandTag::ProjectOpen, "file.open", "File: Open Project (.apr / .aether)...",
         keymap.chord(ActionId::ProjectOpen).c_str());
     add(PaletteCategory::Files, PaletteCommandTag::ProjectSave, "file.save", "File: Save Project",
         keymap.chord(ActionId::ProjectSave).c_str());
     add(PaletteCategory::Files, PaletteCommandTag::ProjectSaveAs, "file.save_as", "File: Save Project As...",
         keymap.chord(ActionId::ProjectSaveAs).c_str());
     add(PaletteCategory::Files, PaletteCommandTag::ImportAvatar, "file.import_avatar",
-        "File: Load Avatar (.vrm / .fbx / .pmx)...", "");
+        "File: Load Avatar (.vrm / .fbx / .pmx)...", keymap.chord(ActionId::ImportAvatar).c_str());
+    add(PaletteCategory::Files, PaletteCommandTag::ExportAlfx, "file.export_alfx",
+        "Lighting: Export Look / Effects (.alfx)...", keymap.chord(ActionId::ExportAlfx).c_str());
+    add(PaletteCategory::Files, PaletteCommandTag::ImportAlfx, "file.import_alfx",
+        "Lighting: Import Look / Effects (.alfx)...", keymap.chord(ActionId::ImportAlfx).c_str());
 
     for (size_t i = 0; i < recent_files.size() && i < 6; ++i) {
         std::array<char, 40> id{};
@@ -404,7 +411,7 @@ PaletteInvokeResult CommandPalette::draw(const KeymapRegistry& /*keymap*/, bool 
         ImGui::PopStyleColor();
 
         // Filter category strip (Tab cycles scope cleanly)
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Tab)) {
             if (active_category_filter_ == 255) {
                 active_category_filter_ = 0;
             } else if (active_category_filter_ < 3) {
@@ -415,13 +422,13 @@ PaletteInvokeResult CommandPalette::draw(const KeymapRegistry& /*keymap*/, bool 
             selected_row_ = 0;
             refilter();
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape)) {
             close();
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && !filtered_.empty()) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_DownArrow) && !filtered_.empty()) {
             selected_row_ = (selected_row_ + 1) % static_cast<int32_t>(filtered_.size());
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && !filtered_.empty()) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_UpArrow) && !filtered_.empty()) {
             const int32_t n = static_cast<int32_t>(filtered_.size());
             selected_row_ = (selected_row_ - 1 + n) % n;
         }
@@ -455,7 +462,8 @@ PaletteInvokeResult CommandPalette::draw(const KeymapRegistry& /*keymap*/, bool 
 
         ImGui::Separator();
 
-        bool enter_invoke = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+        bool enter_invoke = KeymapRegistry::is_raw_key_pressed(ImGuiKey_Enter) ||
+                            KeymapRegistry::is_raw_key_pressed(ImGuiKey_KeypadEnter);
         const float list_h =
             std::min(340.0f * scale,
                      std::max(60.0f * scale, static_cast<float>(filtered_.size()) * 28.0f * scale + 12.0f * scale));
@@ -594,7 +602,7 @@ void PreferencesModal::draw(bool on_air, ParamStore& params, UndoStack& undo, Ke
         const ImVec2 wmin = ImGui::GetWindowPos();
         draw_elevation_shadow(bg_dl, wmin, ImVec2(wmin.x + modal_w, wmin.y + modal_h), t.radius_modal_px);
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && editing_action_ < 0) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape) && editing_action_ < 0) {
             keep_open = false;
         }
 
@@ -616,10 +624,8 @@ void PreferencesModal::draw(bool on_air, ParamStore& params, UndoStack& undo, Ke
                     draw_property_row(ParamId::TrackingExposureLock, params, undo, fonts, row_actions);
                 out_settings_dirty |=
                     draw_property_row(ParamId::TrackingSyntheticCamera, params, undo, fonts, row_actions);
-                out_settings_dirty |=
-                    draw_property_row(ParamId::TrackingAudioAssist, params, undo, fonts, row_actions);
-                out_settings_dirty |=
-                    draw_property_row(ParamId::TrackingMicGain, params, undo, fonts, row_actions);
+                out_settings_dirty |= draw_property_row(ParamId::TrackingAudioAssist, params, undo, fonts, row_actions);
+                out_settings_dirty |= draw_property_row(ParamId::TrackingMicGain, params, undo, fonts, row_actions);
                 out_settings_dirty |=
                     draw_property_row(ParamId::TrackingMicNoiseGate, params, undo, fonts, row_actions);
                 ImGui::Separator();
@@ -784,7 +790,7 @@ void ShortcutOverlayModal::draw(const KeymapRegistry& keymap, const UiFontSet& f
     bool keep_open = open_;
     if (ImGui::Begin(tr("Keyboard Shortcuts"), &keep_open,
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape)) {
             keep_open = false;
         }
         const auto& specs = KeymapRegistry::all_specs();

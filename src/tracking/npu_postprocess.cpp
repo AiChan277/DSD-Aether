@@ -269,7 +269,8 @@ NpuPostProcessDiagnostics NpuPostProcessor::process(AetherTrackingFrame& frame,
             const std::array<float, 3> final_chin{head_adj[0] + final_off[0], head_adj[1] + final_off[1],
                                                   head_adj[2] + final_off[2]};
             std::array<float, 3> scratch_c{};
-            const float chin_res = std::max(0.0f, r_collar - dist_point_to_segment(final_chin, collar_bot, collar_top, scratch_c));
+            const float chin_res =
+                std::max(0.0f, r_collar - dist_point_to_segment(final_chin, collar_bot, collar_top, scratch_c));
             diag.residual_penetration_m = std::max(diag.residual_penetration_m, chin_res);
         }
         frame.joint_positions_ws[AETHER_BONE_HEAD][0] = head_adj[0];

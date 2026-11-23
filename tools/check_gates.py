@@ -144,6 +144,29 @@ def main() -> int:
     failures.extend(check_rust_locks())
     failures.extend(check_dependency_allowlist())
 
+    legacy_light_re = re.compile(r"\bLegacyLightParams\b")
+    for base in (REPO_ROOT / "src", REPO_ROOT / "shaders"):
+        if not base.exists():
+            continue
+        for p in base.rglob("*"):
+            if p.suffix in {".hpp", ".h", ".cpp", ".slang", ".hlsl"}:
+                txt = p.read_text(encoding="utf-8", errors="ignore")
+                if legacy_light_re.search(txt):
+                    failures.append(
+                        f"{p.relative_to(REPO_ROOT).as_posix()}: Rev 3.1 forbidden LegacyLightParams symbol"
+                    )
+
+    key_pressed_re = re.compile(r"\bImGui::IsKeyPressed\s*\(")
+    allowed_key_files = {(REPO_ROOT / "src" / "ui" / "params" / "project_settings.cpp").resolve()}
+    for p in iter_cpp_files([REPO_ROOT / "src" / "ui"]):
+        if p.resolve() in allowed_key_files:
+            continue
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        if key_pressed_re.search(txt):
+            failures.append(
+                f"{p.relative_to(REPO_ROOT).as_posix()}: Rev 3.1 direct ImGui::IsKeyPressed outside KeymapRegistry"
+            )
+
     if failures:
         for f in failures:
             print(f"FAIL: {f}", file=sys.stderr)
@@ -151,7 +174,7 @@ def main() -> int:
 
     print(
         f"Gates passed cleanly: checked {len(all_src_cpp)} C++ files, Rust crates, "
-        f"UI token isolation, and dependency allowlist."
+        f"UI token isolation, Rev 3.1 lighting/keymap hygiene, and dependency allowlist."
     )
     return 0
 

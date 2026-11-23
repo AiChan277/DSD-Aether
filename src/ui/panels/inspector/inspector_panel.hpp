@@ -9,14 +9,17 @@
 
 namespace aether::ui {
 
+class NodeCanvas;
 class ViewportPanel;
 
 /**
- * Z3 Properties Inspector (`§12.4`, `§12.5`, `§12.12`, broadcast overhaul §1 BUG-05/06).
- * Default dock width 325 px * dpi. Every collapsible section is a DaVinci Resolve-style 2-column
- * property table (label / full-width control) rendered via single-source `draw_property_row(ParamId)`
- * with scrubbable sliders, amber reset dots, tooltips, context menus, and inline validation errors.
- * Status readouts render as wrapping bordered badges so long values never overflow the panel.
+ * Z3 Properties Inspector (`§12.4`, `§12.5`, `§12.12`, Rev 3.1 §1.3).
+ * Default dock width 325 px * dpi. Strictly contextual per `StudioMode` and selected entity:
+ *   - `Live Studio`: Selected entity only (Avatar Transform & Physics; Camera SmoothDamp & Custom
+ *     Presets without duplicating viewport framing/aspect; Active Lighting & FX (.alfx) selector
+ *     card linking to Lighting tab; Tracking & Pipeline; Output & Audio-DSP).
+ *   - `Rigging`: Bone info, humanoid mapping, SpringBone physics, and safety colliders.
+ *   - `Nodes`: Selected node inspector (pins, mute/bypass, node-specific settings, recompile).
  */
 class InspectorPanel {
   public:
@@ -30,7 +33,8 @@ class InspectorPanel {
               const StudioHostStatus& host_status, std::span<const LoadedPluginVm> plugins,
               const UiSelection& selection, ParamStore& params, UndoStack& undo, AppSettings& settings,
               bool& settings_dirty, const UiFontSet& fonts, PropertyRowActions& row_actions, StudioActions& actions,
-              ViewportPanel* viewport_for_presets = nullptr);
+              ViewportPanel* viewport_for_presets = nullptr, std::span<OutlinerBoneInfo> bones = {},
+              std::span<OutlinerMaterialInfo> materials = {}, NodeCanvas* node_canvas = nullptr);
 
   private:
     bool focus_output_pending_{false};

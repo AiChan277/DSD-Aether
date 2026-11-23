@@ -15,6 +15,7 @@
 #include "output/spout_output.hpp"
 #include "output/vcam_transport.hpp"
 #include "renderer/asset_upload/asset_job.hpp"
+#include "renderer/asset_upload/vrm_parity_prep.hpp"
 #include "renderer/circadian_lighting.hpp"
 #include "renderer/dx12_bridge.hpp"
 #include "renderer/dx12_frame_graph.hpp"
@@ -241,8 +242,8 @@ TEST_CASE("Task 1: DirectX 12 parity vs Vulkan & strict anti-flip orientation on
     REQUIRE(vk_npr.bind_avatar(avatar.get()).has_value());
 
     aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
-    rig.lights[0].orbit_azimuth_deg = 52.0f;
-    rig.lights[0].orbit_elevation_deg = 32.0f;
+    rig.studio_lights[0].orbit_azimuth_deg = 52.0f;
+    rig.studio_lights[0].orbit_elevation_deg = 32.0f;
     rig.lighting_mode = 1u;
 
     auto cam = aether::renderer::fit_camera_to_avatar(*avatar);
@@ -257,7 +258,6 @@ TEST_CASE("Task 1: DirectX 12 parity vs Vulkan & strict anti-flip orientation on
         req.lighting_mode = 1u;
         req.rt_enabled = rhi->rt_supported();
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.frame_index = fidx;
         req.completed_frame_index = (fidx >= 2u) ? fidx - 2u : 0u;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
@@ -370,7 +370,6 @@ TEST_CASE("Task 1: DirectX 12 parity vs Vulkan & strict anti-flip orientation on
         req.lighting_mode = 1u;
         req.rt_enabled = true;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.frame_index = f;
         req.completed_frame_index = f - 2u;
         req.frame_slot = static_cast<uint32_t>(f % aether::rhi::RhiSwapchain::kFramesInFlight);
@@ -675,9 +674,13 @@ TEST_CASE("Task 7: Circadian Solar-Time Lighting timezones, 24h continuity & Nig
     CHECK(std::abs(wrap_a.key_azimuth_deg - wrap_b.key_azimuth_deg) < 0.5f);
 
     LightingRig rig = LightingRig::default_three_point();
+    const float orig_rim_ev = rig.studio_lights[2].intensity_ev100;
     apply_circadian_to_rig(golden, rig);
-    CHECK(std::abs(rig.lights[0].intensity - golden.key_intensity) < 1e-4f);
-    CHECK(std::abs(rig.lights[2].intensity - golden.rim_intensity) < 1e-4f);
+    CHECK(rig.circadian_sun_slot_id == 0);
+    CHECK(rig.studio_lights[0].fixture == StudioFixtureProfile::NaturalSunCieSky);
+    CHECK(std::abs(rig.studio_lights[0].intensity_ev100 - golden.key_intensity) < 1e-4f);
+    CHECK(std::abs(rig.studio_lights[0].orbit_azimuth_deg - golden.key_azimuth_deg) < 1e-4f);
+    CHECK(std::abs(rig.studio_lights[2].intensity_ev100 - orig_rim_ev) < 1e-4f);
 }
 
 TEST_CASE("Task 8: NPU Safe-Zone Box C^1 tanh compression, pitch glitch clamping & predictive capsule anti-clip",
@@ -900,7 +903,6 @@ TEST_CASE("DX12 Bridge mid-way avatar swap to larger vertex count keeps renderin
                 req.lighting_mode = rig.lighting_mode;
                 req.rt_enabled = (rig.lighting_mode > 0u);
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.frame_index = fidx;
                 req.completed_frame_index = (fidx >= 2u) ? fidx - 2u : 0u;
                 req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
@@ -1013,8 +1015,8 @@ double oklab_delta_e(const OklabColor& x, const OklabColor& y) noexcept {
 
 std::filesystem::path find_downloads_vrm_by_prefix(const std::string& prefix) {
     const std::string up = read_env_var("USERPROFILE");
-    std::filesystem::path dl = up.empty() ? std::filesystem::path(R"(C:\Users\LEGION\Downloads)")
-                                          : (std::filesystem::path(up) / "Downloads");
+    std::filesystem::path dl =
+        up.empty() ? std::filesystem::path(R"(C:\Users\LEGION\Downloads)") : (std::filesystem::path(up) / "Downloads");
     std::error_code ec;
     if (!std::filesystem::is_directory(dl, ec)) {
         return {};
@@ -1090,18 +1092,19 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
         REQUIRE(avatar != nullptr);
 
         std::printf("\n===========================================================================\n");
-        std::printf("[NECK_PROBE:%s] File: %s (verts=%u, mats=%zu, submeshes=%zu) face_ref=(%.3f,%.3f,%.3f,valid=%.0f)\n",
-                    tag, vrm_path.filename().string().c_str(), avatar->requirements.vertex_count,
-                    avatar->materials.size(), avatar->submeshes.size(), avatar->face_skin_ref_linear[0],
-                    avatar->face_skin_ref_linear[1], avatar->face_skin_ref_linear[2], avatar->face_skin_ref_linear[3]);
+        std::printf(
+            "[NECK_PROBE:%s] File: %s (verts=%u, mats=%zu, submeshes=%zu) face_ref=(%.3f,%.3f,%.3f,valid=%.0f)\n", tag,
+            vrm_path.filename().string().c_str(), avatar->requirements.vertex_count, avatar->materials.size(),
+            avatar->submeshes.size(), avatar->face_skin_ref_linear[0], avatar->face_skin_ref_linear[1],
+            avatar->face_skin_ref_linear[2], avatar->face_skin_ref_linear[3]);
 
         // Print exact C++ material classification table
         std::vector<uint32_t> dummy_tex(avatar->textures.size(), 1u);
         std::vector<aether::renderer::GpuMaterial> gmats;
         std::vector<aether::renderer::GpuSubmeshDraw> gsubs;
         std::vector<uint32_t> opq, cut, trn;
-        aether::renderer::detail::populate_materials_and_submeshes(*avatar, dummy_tex, 0u, UINT32_MAX, gmats, gsubs, opq,
-                                                                   cut, trn);
+        aether::renderer::detail::populate_materials_and_submeshes(*avatar, dummy_tex, 0u, UINT32_MAX, gmats, gsubs,
+                                                                   opq, cut, trn);
         for (size_t mi = 0; mi < avatar->materials.size(); ++mi) {
             const auto& m = avatar->materials[mi];
             const auto& gm = gmats[mi];
@@ -1118,11 +1121,12 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
             const bool is_body_atlas = (pf & (1u << 13u)) != 0u;
             if (is_face || is_body_atlas || mname.find("SKIN") != std::string::npos ||
                 mname.find("Face") != std::string::npos || mname.find("Body") != std::string::npos) {
-                std::printf("  Mat[%zu] '%s': rt_class=%u is_face=%d body_skin_atlas=%d mat_flags=0x%04X sm_flags=0x%02X | "
-                            "lit=(%.2f,%.2f,%.2f) shade=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f\n",
-                            mi, mname.c_str(), rt_class, is_face ? 1 : 0, is_body_atlas ? 1 : 0, pf, sm_f, gm.lit_color[0],
-                            gm.lit_color[1], gm.lit_color[2], gm.shade_color[0], gm.shade_color[1], gm.shade_color[2],
-                            gm.emission_and_shift[3], gm.toon_params[0]);
+                std::printf(
+                    "  Mat[%zu] '%s': rt_class=%u is_face=%d body_skin_atlas=%d mat_flags=0x%04X sm_flags=0x%02X | "
+                    "lit=(%.2f,%.2f,%.2f) shade=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f\n",
+                    mi, mname.c_str(), rt_class, is_face ? 1 : 0, is_body_atlas ? 1 : 0, pf, sm_f, gm.lit_color[0],
+                    gm.lit_color[1], gm.lit_color[2], gm.shade_color[0], gm.shade_color[1], gm.shade_color[2],
+                    gm.emission_and_shift[3], gm.toon_params[0]);
             }
         }
 
@@ -1141,9 +1145,10 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
         REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
 
         aether::renderer::LightingRig rig = aether::renderer::LightingRig::default_three_point();
-        aether::renderer::apply_lighting_fixture_preset(rig, aether::renderer::LightingFixturePreset::ArriSkyPanelS60C);
-        rig.lights[0].orbit_azimuth_deg = 32.0f;
-        rig.lights[0].orbit_elevation_deg = 26.0f;
+        aether::renderer::configure_fixture_defaults(rig.studio_lights[0],
+                                                     aether::renderer::StudioFixtureProfile::ArriSkyPanel);
+        rig.studio_lights[0].orbit_azimuth_deg = 32.0f;
+        rig.studio_lights[0].orbit_elevation_deg = 26.0f;
         const auto cam = make_neck_closeup_camera(*avatar);
 
         // Compute world key light direction L_key (az=32 deg, el=26 deg)
@@ -1164,14 +1169,13 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
                 req.rt_enabled = (mode > 0u) && rhi->rt_supported();
                 req.debug_view = dv;
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.frame_index = s + 1u;
                 req.completed_frame_index = (s >= 2u) ? (s - 1u) : 0u;
                 req.frame_slot = s % aether::rhi::RhiSwapchain::kFramesInFlight;
                 REQUIRE(vk_npr.render_headless_frame(req));
             }
-            auto rb = vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image,
-                                                          VK_IMAGE_LAYOUT_GENERAL, kPW, kPH);
+            auto rb = vk_npr.graph().readback_image_rgba8(vk_npr.graph().outputs().bgra8_image, VK_IMAGE_LAYOUT_GENERAL,
+                                                          kPW, kPH);
             REQUIRE(rb.has_value());
             return rb.value();
         };
@@ -1187,7 +1191,6 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
                 req.rt_enabled = (mode > 0u) && d3d12->dxr_supported();
                 req.debug_view = dv;
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.frame_index = s + 1u;
                 req.frame_slot = s % aether::rhi::kD3D12FrameCount;
                 REQUIRE(dx_fg.render_frame(req, true).has_value());
@@ -1325,10 +1328,9 @@ TEST_CASE("Forensic Probe: Jaw-to-Neck Seam Quantification (DX12 & Vulkan x Trad
         const auto off_dx_pt = render_dx_view(2u, aether::renderer::ShadingDebugView::Final, 4u);
         const size_t ic = (static_cast<size_t>(y_chin) * kPW + cx) * 4u;
         const size_t in = (static_cast<size_t>(y_neck) * kPW + cx) * 4u;
-        const double off_dL_pct =
-            std::abs(rgb_u8_to_oklab(off_dx_pt[ic], off_dx_pt[ic + 1u], off_dx_pt[ic + 2u]).L -
-                     rgb_u8_to_oklab(off_dx_pt[in], off_dx_pt[in + 1u], off_dx_pt[in + 2u]).L) *
-            100.0;
+        const double off_dL_pct = std::abs(rgb_u8_to_oklab(off_dx_pt[ic], off_dx_pt[ic + 1u], off_dx_pt[ic + 2u]).L -
+                                           rgb_u8_to_oklab(off_dx_pt[in], off_dx_pt[in + 1u], off_dx_pt[in + 2u]).L) *
+                                  100.0;
         std::printf("  [Slider=0.0 check] DX12 2.5D_PT raw VRM dL*=%.2f%%\n", off_dL_pct);
         CHECK(off_dL_pct > 10.0);
         rig.neck_seam_blend = 1.0f;
@@ -1393,7 +1395,6 @@ TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gr
 
     // Place 6 huge front softboxes + barn doors + honeycomb directly in front of the avatar
     LightingRig rig = LightingRig::default_three_point();
-    rig.use_studio_lights = true;
     rig.studio_light_count = 6;
     for (uint32_t i = 0; i < 6u; ++i) {
         configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
@@ -1431,7 +1432,6 @@ TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gr
         req.lighting_mode = mode;
         req.rt_enabled = (mode > 0u) && d3d12->dxr_supported();
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.frame_index = fidx;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::kD3D12FrameCount);
         REQUIRE(dx_fg.render_frame(req, true).has_value());
@@ -1474,7 +1474,8 @@ TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gr
     INFO("DX12 Stage schematic diff pixels vs clean Broadcast: " << stage_diff_px);
     CHECK(stage_diff_px > 600u);
 
-    // 4. Clay (18% Gray) drops chromatic spread on saturated coral surface, False Color renders EL-Zone stops, OrthoTop works
+    // 4. Clay (18% Gray) drops chromatic spread on saturated coral surface, False Color renders EL-Zone stops, OrthoTop
+    // works
     run_dx(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Clay, false, 1u, 2u, stage_clay_rgba,
            stage_clay_bgra);
     run_dx(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::FalseColor, false, 1u, 3u, stage_fc_rgba,
@@ -1490,17 +1491,18 @@ TEST_CASE("Phase 2 DX12 Dual-Viewport Zero Schematic Leakage, Ortho, Clay 18% Gr
     const int clay_chroma =
         std::abs(static_cast<int>(stage_clay_rgba[center_i]) - static_cast<int>(stage_clay_rgba[center_i + 2]));
     INFO("DX12 Center Lit RGB=(" << int(bcast_rgba_0[center_i]) << "," << int(bcast_rgba_0[center_i + 1]) << ","
-                                 << int(bcast_rgba_0[center_i + 2]) << ") Clay RGB=("
-                                 << int(stage_clay_rgba[center_i]) << "," << int(stage_clay_rgba[center_i + 1]) << ","
-                                 << int(stage_clay_rgba[center_i + 2]) << ") FC RGB=("
-                                 << int(stage_fc_rgba[center_i]) << "," << int(stage_fc_rgba[center_i + 1]) << ","
-                                 << int(stage_fc_rgba[center_i + 2]) << ")");
+                                 << int(bcast_rgba_0[center_i + 2]) << ") Clay RGB=(" << int(stage_clay_rgba[center_i])
+                                 << "," << int(stage_clay_rgba[center_i + 1]) << ","
+                                 << int(stage_clay_rgba[center_i + 2]) << ") FC RGB=(" << int(stage_fc_rgba[center_i])
+                                 << "," << int(stage_fc_rgba[center_i + 1]) << "," << int(stage_fc_rgba[center_i + 2])
+                                 << ")");
     CHECK(lit_chroma > 60);
     CHECK(clay_chroma <= 35);
     CHECK(clay_chroma * 3 < lit_chroma);
     CHECK(std::memcmp(stage_fc_rgba.data(), stage_clay_rgba.data(), stage_fc_rgba.size()) != 0);
 
-    // 5. After Stage Clay / Ortho / False Color frames, returning to BroadcastView keeps Broadcast temporal bank untouched!
+    // 5. After Stage Clay / Ortho / False Color frames, returning to BroadcastView keeps Broadcast temporal bank
+    // untouched!
     run_dx(RenderViewKind::Broadcast, bcast_cam, StageDiagnosticMode::Lit, false, 0u, 1u, bcast_after_rgba,
            bcast_after_bgra);
     CHECK(std::memcmp(bcast_rgba_0.data(), bcast_after_rgba.data(), bcast_rgba_0.size()) == 0);
@@ -1564,14 +1566,15 @@ TEST_CASE("Phase 2 Visual Capture on 8590.vrm: Clean Broadcast vs Stage Persp / 
         req.lighting_mode = 1;
         req.rt_enabled = rhi->rt_supported();
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.frame_index = fidx;
         req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
         REQUIRE(renderer.render_headless_frame(req).has_value());
         const auto outs = renderer.graph().outputs();
-        const VkImage target_vp = (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
-        auto px = renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kSnapW, kSnapH);
+        const VkImage target_vp =
+            (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
+        auto px =
+            renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kSnapW, kSnapH);
         REQUIRE(px.has_value());
         const auto dir = snapshot_out_dir();
         std::filesystem::create_directories(dir);
@@ -1615,7 +1618,6 @@ TEST_CASE("Phase 2 Visual Capture on 8590.vrm: Clean Broadcast vs Stage Persp / 
             req.lighting_mode = 1;
             req.rt_enabled = rhi->rt_supported();
             req.show_checkerboard = false;
-            req.show_orbit_orb = false;
             req.frame_index = fidx;
             req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
             req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
@@ -1702,10 +1704,8 @@ TEST_CASE("LightingStageView DirectX 12 1:1 Pixel Aspect Ratio Across Wide/Tall 
     REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.lights[0].color[0] = 1.0f;
-    rig.lights[0].color[1] = 1.0f;
-    rig.lights[0].color[2] = 1.0f;
-    rig.lights[0].intensity = 1.8f;
+    rig.studio_lights[0].tint_rgb = {1.0f, 1.0f, 1.0f};
+    rig.studio_lights[0].intensity_ev100 = 1.8f;
     rig.bloom_intensity = 0.0f;
     rig.satsuei.halation_strength = 0.0f;
     rig.satsuei.light_wrap_strength = 0.0f;
@@ -1735,7 +1735,6 @@ TEST_CASE("LightingStageView DirectX 12 1:1 Pixel Aspect Ratio Across Wide/Tall 
         req.aa_mode = 0u;
         req.outline_width_scale = 0.0f;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = false;
         req.frame_index = fidx;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::kD3D12FrameCount);
@@ -1792,4 +1791,428 @@ TEST_CASE("LightingStageView DirectX 12 1:1 Pixel Aspect Ratio Across Wide/Tall 
     avatar->destroy();
     d3d12->destroy();
     rhi->destroy();
+}
+
+TEST_CASE("Rev 3.1 DX12 Zero-Light Isolation Proof (Single Lighting Authority)", "[dx12][lighting][zero_light]") {
+    using namespace aether::renderer;
+    aether::rhi::RhiDeviceConfig vcfg{};
+    vcfg.enable_validation = false;
+    vcfg.require_validation = false;
+    vcfg.headless = true;
+    auto vk_res = aether::rhi::RhiDevice::create(vcfg);
+    if (!vk_res) {
+        SUCCEED("Skipped DX12 Zero-Light proof: RhiDevice unavailable");
+        return;
+    }
+    auto vrhi = std::unique_ptr<aether::rhi::RhiDevice>(vk_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = vrhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = vrhi->gpu_info().luid;
+    auto d3d_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d_res) {
+        vrhi->destroy();
+        SUCCEED("Skipped DX12 Zero-Light proof: D3D12 unavailable");
+        return;
+    }
+    auto d3d12 = std::unique_ptr<aether::rhi::D3D12Device>(d3d_res.value());
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.85f, 0.72f, 0.65f);
+    mat.toon_params[0] = 0.0f;
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.55f, 0.70f, 0.0f}, p1[3] = {0.55f, 0.70f, 0.0f}, p2[3] = {0.55f, 1.85f, 0.0f},
+                p3[3] = {-0.55f, 1.85f, 0.0f}, n[3] = {0.0f, 0.0f, 1.0f}, t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.85f, 0.72f, 0.65f, 0u, AETHER_SUBMESH_FLAG_OPAQUE);
+    auto av_res = aether::test::upload_synthetic_avatar(*vrhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kZeroW = 128u;
+    constexpr uint32_t kZeroH = 128u;
+    Dx12FrameGraph dx_fg;
+    REQUIRE(dx_fg.init(*d3d12, kZeroW, kZeroH, 4096u, true).has_value());
+    REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    for (uint32_t i = 0; i < rig.studio_light_count; ++i) {
+        rig.studio_lights[i].enabled = false;
+    }
+    rig.ambient_floor = 0.0f;
+    rig.environment_sky_strength = 0.0f;
+    rig.ground_bounce_strength = 0.0f;
+    rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    for (uint8_t mode = 0u; mode <= 1u; ++mode) {
+        FrameRenderRequest req{};
+        req.avatar = avatar.get();
+        req.rig = &rig;
+        req.camera = PreviewCamera{0.0f, 1.30f, 0.0f, 0.0f, 0.0f, 2.2f, 0.65f};
+        req.frame_index = mode + 1u;
+        req.frame_slot = mode;
+        req.lighting_mode = mode;
+        req.rt_enabled = (mode > 0u);
+        req.show_checkerboard = false;
+        req.debug_view = ShadingDebugView::Final;
+        REQUIRE(dx_fg.render_frame(req, true).has_value());
+        std::vector<uint8_t> rgba(static_cast<size_t>(kZeroW) * kZeroH * 4u, 0u);
+        REQUIRE(dx_fg.readback_rgba8(rgba));
+        uint8_t max_rgb = 0u;
+        for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+            max_rgb = std::max({max_rgb, rgba[i + 0], rgba[i + 1], rgba[i + 2]});
+        }
+        INFO("DX12 Zero-Light mode=" << static_cast<int>(mode) << " max_rgb=" << static_cast<int>(max_rgb));
+        CHECK(max_rgb == 0u);
+    }
+
+    dx_fg.destroy();
+    avatar->destroy();
+    d3d12->destroy();
+    vrhi->destroy();
+}
+
+TEST_CASE("Rev 3.1 DX12 Additive Overlay & VRM Parity Proof", "[dx12][pmx][rev31]") {
+    using namespace aether::renderer;
+    aether::rhi::RhiDeviceConfig vcfg{};
+    vcfg.enable_validation = false;
+    vcfg.require_validation = false;
+    vcfg.headless = true;
+    auto vk_res = aether::rhi::RhiDevice::create(vcfg);
+    if (!vk_res) {
+        SUCCEED("Skipped DX12 Additive Overlay proof: RhiDevice unavailable");
+        return;
+    }
+    auto vrhi = std::unique_ptr<aether::rhi::RhiDevice>(vk_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = vrhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = vrhi->gpu_info().luid;
+    auto d3d_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d_res) {
+        vrhi->destroy();
+        SUCCEED("Skipped DX12 Additive Overlay proof: D3D12 unavailable");
+        return;
+    }
+    auto d3d12 = std::unique_ptr<aether::rhi::D3D12Device>(d3d_res.value());
+
+    aether::test::SyntheticMeshSpec spec{};
+    spec.materials.push_back(aether::test::make_basic_npr_material(0.25f, 0.25f, 0.28f));
+    auto mat_add = aether::test::make_basic_npr_material(1.0f, 1.0f, 1.0f, 1.0f, AETHER_MAT_FLAG_ADDITIVE);
+    mat_add.alpha_mode = AETHER_ALPHA_MODE_ADDITIVE;
+    mat_add.tex_base = 0u;
+    spec.materials.push_back(mat_add);
+
+    AetherTextureDesc td{};
+    td.width = 8u;
+    td.height = 8u;
+    td.format = AETHER_TEX_FORMAT_RGBA8_UNORM;
+    td.usage_flags = AETHER_TEX_USAGE_COLOR;
+    td.pixel_size = 8u * 8u * 4u;
+    spec.tex_descs.push_back(td);
+    spec.tex_pixels.resize(td.pixel_size, 0u);
+    for (uint32_t y = 0; y < 8u; ++y) {
+        for (uint32_t x = 0; x < 8u; ++x) {
+            const size_t o = static_cast<size_t>(y * 8u + x) * 4u;
+            const bool center = (x >= 3u && x <= 4u && y >= 3u && y <= 4u);
+            spec.tex_pixels[o + 0] = spec.tex_pixels[o + 1] = spec.tex_pixels[o + 2] = center ? 255u : 0u;
+            spec.tex_pixels[o + 3] = 255u;
+        }
+    }
+
+    const float p0[3] = {-0.55f, 0.70f, 0.0f}, p1[3] = {0.55f, 0.70f, 0.0f}, p2[3] = {0.55f, 1.85f, 0.0f},
+                p3[3] = {-0.55f, 1.85f, 0.0f}, n[3] = {0.0f, 0.0f, 1.0f}, t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.25f, 0.25f, 0.28f, 0u, AETHER_SUBMESH_FLAG_OPAQUE);
+    const float q0[3] = {-0.40f, 0.85f, 0.02f}, q1[3] = {0.40f, 0.85f, 0.02f}, q2[3] = {0.40f, 1.65f, 0.02f},
+                q3[3] = {-0.40f, 1.65f, 0.02f};
+    aether::test::append_quad(spec, q0, q1, q2, q3, n, t, 1.0f, 1.0f, 1.0f, 1u,
+                              AETHER_SUBMESH_FLAG_TRANSPARENT | AETHER_SUBMESH_FLAG_ADDITIVE);
+
+    auto av_res = aether::test::upload_synthetic_avatar(*vrhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+    avatar->desc.source_format = AETHER_SOURCE_FORMAT_VRM1;
+    (void)prepare_vrm_and_pmx_parity(*avatar, true);
+
+    constexpr uint32_t kAddW = 128u;
+    constexpr uint32_t kAddH = 128u;
+    Dx12FrameGraph dx_fg;
+    REQUIRE(dx_fg.init(*d3d12, kAddW, kAddH, 4096u, true).has_value());
+    REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.studio_lights[0].orbit_azimuth_deg = 48.0f;
+    rig.studio_lights[0].orbit_elevation_deg = 22.0f;
+    rig.studio_lights[0].intensity_ev100 = 1.15f;
+    rig.studio_lights[1].enabled = false;
+    rig.studio_lights[2].enabled = false;
+    rig.ambient_floor = 0.14f;
+    rig.environment_sky_strength = 0.14f;
+    rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    FrameRenderRequest req{};
+    req.avatar = avatar.get();
+    req.rig = &rig;
+    req.camera = PreviewCamera{0.0f, 1.28f, 0.0f, 0.0f, 0.0f, 2.2f, 0.65f};
+    req.frame_index = 1u;
+    req.frame_slot = 0u;
+    req.lighting_mode = 0u;
+    req.rt_enabled = false;
+    req.debug_view = ShadingDebugView::Final;
+    REQUIRE(dx_fg.render_frame(req, true).has_value());
+
+    std::vector<uint8_t> rgba(static_cast<size_t>(kAddW) * kAddH * 4u, 0u);
+    REQUIRE(dx_fg.readback_rgba8(rgba));
+    auto lum_at = [&](uint32_t x, uint32_t y) {
+        const size_t o = (static_cast<size_t>(y) * kAddW + x) * 4u;
+        return static_cast<int>(rgba[o]) + static_cast<int>(rgba[o + 1]) + static_cast<int>(rgba[o + 2]);
+    };
+    CHECK(lum_at(22u, 64u) > 20);
+    CHECK(lum_at(34u, 36u) >= (lum_at(22u, 64u) * 85) / 100);
+    CHECK(lum_at(64u, 64u) > lum_at(34u, 36u) + 60);
+
+    dx_fg.destroy();
+    avatar->destroy();
+    d3d12->destroy();
+    vrhi->destroy();
+}
+
+TEST_CASE("Rev 3.1 Empirical Test #6: Hardware DX12 ID3D12QueryHeap Timestamps, TransparentPass & prev_depth History",
+          "[dx12][rev31][timing]") {
+    using namespace aether::renderer;
+    aether::rhi::RhiDeviceConfig vcfg{};
+    vcfg.enable_validation = false;
+    vcfg.require_validation = false;
+    vcfg.headless = true;
+    auto vk_res = aether::rhi::RhiDevice::create(vcfg);
+    if (!vk_res) {
+        SUCCEED("Skipped Empirical Test #6: RhiDevice unavailable");
+        return;
+    }
+    auto vrhi = std::unique_ptr<aether::rhi::RhiDevice>(vk_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = vrhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = vrhi->gpu_info().luid;
+    auto d3d_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d_res) {
+        vrhi->destroy();
+        SUCCEED("Skipped Empirical Test #6: D3D12 unavailable");
+        return;
+    }
+    auto d3d12 = std::unique_ptr<aether::rhi::D3D12Device>(d3d_res.value());
+
+    constexpr uint32_t kTimeW = 128u;
+    constexpr uint32_t kTimeH = 128u;
+    aether::test::SyntheticMeshSpec spec{};
+    spec.materials.push_back(aether::test::make_basic_npr_material(0.7f, 0.6f, 0.8f));
+    auto tr_mat = aether::test::make_basic_npr_material(0.9f, 0.9f, 0.9f, 0.45f);
+    tr_mat.alpha_mode = AETHER_ALPHA_MODE_BLEND;
+    spec.materials.push_back(tr_mat);
+    const float p0[3] = {-0.4f, 0.8f, 0.0f}, p1[3] = {0.4f, 0.8f, 0.0f}, p2[3] = {0.4f, 1.7f, 0.0f},
+                p3[3] = {-0.4f, 1.7f, 0.0f}, n[3] = {0.0f, 0.0f, 1.0f}, t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.7f, 0.6f, 0.8f, 0u, AETHER_SUBMESH_FLAG_OPAQUE);
+    const float q0[3] = {-0.3f, 0.9f, 0.05f}, q1[3] = {0.3f, 0.9f, 0.05f}, q2[3] = {0.3f, 1.6f, 0.05f},
+                q3[3] = {-0.3f, 1.6f, 0.05f};
+    aether::test::append_quad(spec, q0, q1, q2, q3, n, t, 0.9f, 0.9f, 0.9f, 1u, AETHER_SUBMESH_FLAG_TRANSPARENT);
+
+    auto av_res = aether::test::upload_synthetic_avatar(*vrhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    Dx12FrameGraph dx_fg;
+    REQUIRE(dx_fg.init(*d3d12, kTimeW, kTimeH, 4096u, true).has_value());
+    REQUIRE(dx_fg.hardware_timestamps_supported());
+    REQUIRE(dx_fg.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    FrameRenderRequest req{};
+    req.avatar = avatar.get();
+    req.rig = &rig;
+    req.camera = PreviewCamera{0.0f, 1.25f, 0.0f, 0.1f, 0.05f, 2.0f, 0.65f};
+    req.lighting_mode = 0u;
+    req.rt_enabled = false;
+    req.debug_view = ShadingDebugView::Final;
+
+    for (uint64_t f = 0; f < 4u; ++f) {
+        req.frame_index = f;
+        req.frame_slot = static_cast<uint32_t>(f % aether::rhi::kD3D12FrameCount);
+        if (f == 2u) {
+            dx_fg.invalidate_temporal_history();
+        }
+        REQUIRE(dx_fg.render_frame(req, true).has_value());
+    }
+
+    const auto& snap = dx_fg.timing_snapshot();
+    REQUIRE(snap.valid);
+    CHECK(snap.gpu_total_ms > 0.0f);
+    CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Prepass)] >= 0.0f);
+    CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Live2dNpr)] >= 0.0f);
+    CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::TransparentPass)] >= 0.0f);
+    CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::OutputEncode)] >= 0.0f);
+    CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::FrameTotal)] >= 0.0f);
+
+    REQUIRE(dx_fg.bind_avatar(nullptr).has_value());
+    CHECK(dx_fg.bound_avatar() == nullptr);
+
+    dx_fg.destroy();
+    avatar->destroy();
+    d3d12->destroy();
+    vrhi->destroy();
+}
+
+TEST_CASE("Empirical Test #3: DX12 VRM vs PMX Toon Parity Audit & Live Parity Shader Parameters",
+          "[dx12][rev31][empirical][parity]") {
+    using namespace aether::renderer;
+
+    aether::rhi::RhiDeviceConfig vcfg{};
+    vcfg.enable_validation = false;
+    vcfg.require_validation = false;
+    vcfg.headless = true;
+    auto vrhi_res = aether::rhi::RhiDevice::create(vcfg);
+    if (!vrhi_res) {
+        SUCCEED("Skipped DX12 Parity test: Vulkan upload helper unavailable");
+        return;
+    }
+    std::unique_ptr<aether::rhi::RhiDevice> vrhi(vrhi_res.value());
+
+    aether::rhi::D3D12DeviceConfig dcfg{};
+    dcfg.enable_debug_layer = false;
+    dcfg.use_preferred_luid = vrhi->gpu_info().luid_valid;
+    dcfg.preferred_luid = vrhi->gpu_info().luid;
+    auto d3d_res = aether::rhi::D3D12Device::create(dcfg);
+    if (!d3d_res) {
+        vrhi->destroy();
+        SUCCEED("Skipped DX12 Parity test: D3D12 device unavailable");
+        return;
+    }
+    std::unique_ptr<aether::rhi::D3D12Device> d3d12(d3d_res.value());
+
+    auto make_dx_avatar = [&](bool is_pmx) -> std::unique_ptr<GpuAvatar> {
+        aether::test::SyntheticMeshSpec spec{};
+        auto face_m =
+            aether::test::make_basic_npr_material(0.92f, 0.78f, 0.72f, 1.0f, AETHER_MAT_FLAG_RECEIVES_HAIR_SHADOW);
+        if (is_pmx) {
+            face_m.flags |= AETHER_MAT_FLAG_IS_PMX;
+            face_m.shade_color_gi[0] = 0.74f;
+            face_m.shade_color_gi[1] = 0.56f;
+            face_m.shade_color_gi[2] = 0.52f;
+        } else {
+            face_m.shade_color_gi[0] = face_m.base_color[0];
+            face_m.shade_color_gi[1] = face_m.base_color[1];
+            face_m.shade_color_gi[2] = face_m.base_color[2];
+        }
+        face_m.outline_width = 0.0f;
+
+        auto cloth_m =
+            aether::test::make_basic_npr_material(0.38f, 0.44f, 0.76f, 1.0f, is_pmx ? AETHER_MAT_FLAG_IS_PMX : 0u);
+        if (is_pmx) {
+            cloth_m.shade_color_gi[0] = 0.22f;
+            cloth_m.shade_color_gi[1] = 0.27f;
+            cloth_m.shade_color_gi[2] = 0.58f;
+        } else {
+            cloth_m.shade_color_gi[0] = cloth_m.base_color[0];
+            cloth_m.shade_color_gi[1] = cloth_m.base_color[1];
+            cloth_m.shade_color_gi[2] = cloth_m.base_color[2];
+        }
+        cloth_m.outline_width = 0.0f;
+        spec.materials = {face_m, cloth_m};
+
+        const float tf[3] = {1.0f, 0.0f, 0.0f};
+        const float f0[3] = {-0.18f, 1.24f, 0.08f}, f1[3] = {0.18f, 1.24f, 0.08f}, f2[3] = {0.18f, 1.44f, 0.08f},
+                    f3[3] = {-0.18f, 1.44f, 0.08f}, nf[3] = {0.20f, 0.08f, 0.97f};
+        aether::test::append_quad(spec, f0, f1, f2, f3, nf, tf, 0.92f, 0.78f, 0.72f, 0u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE | AETHER_SUBMESH_FLAG_FACE);
+        const float cl0[3] = {-0.48f, 0.86f, 0.04f}, cl1[3] = {-0.04f, 0.86f, 0.04f}, cl2[3] = {-0.04f, 1.20f, 0.04f},
+                    cl3[3] = {-0.48f, 1.20f, 0.04f}, nl[3] = {0.48f, 0.25f, 0.84f};
+        aether::test::append_quad(spec, cl0, cl1, cl2, cl3, nl, tf, 0.38f, 0.44f, 0.76f, 1u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE);
+        const float cs0[3] = {0.04f, 0.86f, 0.04f}, cs1[3] = {0.48f, 0.86f, 0.04f}, cs2[3] = {0.48f, 1.20f, 0.04f},
+                    cs3[3] = {0.04f, 1.20f, 0.04f}, ns[3] = {-0.85f, -0.15f, 0.50f};
+        aether::test::append_quad(spec, cs0, cs1, cs2, cs3, ns, tf, 0.38f, 0.44f, 0.76f, 1u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE);
+
+        auto res = aether::test::upload_synthetic_avatar(*vrhi, spec);
+        REQUIRE(res.has_value());
+        auto av = std::move(res.value());
+        av->desc.source_format = is_pmx ? AETHER_SOURCE_FORMAT_PMX : AETHER_SOURCE_FORMAT_VRM1;
+        av->pmx_aux_header.is_pmx = is_pmx ? 1u : 0u;
+        (void)prepare_vrm_and_pmx_parity(*av, true);
+        return av;
+    };
+
+    auto vrm = make_dx_avatar(false);
+    auto pmx = make_dx_avatar(true);
+
+    constexpr uint32_t kParityW = 160u;
+    constexpr uint32_t kParityH = 160u;
+    Dx12FrameGraph dx_fg;
+    REQUIRE(dx_fg.init(*d3d12, kParityW, kParityH, 4096u, true).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.studio_lights[0].orbit_azimuth_deg = 48.0f;
+    rig.studio_lights[0].orbit_elevation_deg = 22.0f;
+    rig.studio_lights[0].intensity_ev100 = 1.15f;
+    rig.studio_lights[1].enabled = false;
+    rig.studio_lights[2].enabled = false;
+    rig.ambient_floor = 0.14f;
+    rig.environment_sky_strength = 0.14f;
+    rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    auto render_dx = [&](GpuAvatar* av, uint64_t f) {
+        REQUIRE(dx_fg.bind_avatar(av).has_value());
+        FrameRenderRequest req{};
+        req.avatar = av;
+        req.rig = &rig;
+        req.camera = PreviewCamera{0.0f, 1.26f, 0.0f, 0.0f, 0.0f, 1.85f, 0.65f};
+        req.frame_index = f;
+        req.frame_slot = static_cast<uint32_t>(f % aether::rhi::kD3D12FrameCount);
+        req.lighting_mode = 0u;
+        req.rt_enabled = false;
+        req.debug_view = ShadingDebugView::Final;
+        REQUIRE(dx_fg.render_frame(req, true).has_value());
+        const auto& snap = dx_fg.timing_snapshot();
+        CHECK(snap.valid);
+        std::vector<uint8_t> rgba(static_cast<size_t>(kParityW) * kParityH * 4u, 0u);
+        REQUIRE(dx_fg.readback_rgba8(rgba));
+        return rgba;
+    };
+
+    const auto img_vrm = render_dx(vrm.get(), 1u);
+    const auto img_pmx = render_dx(pmx.get(), 2u);
+    auto patch_luma = [&](const std::vector<uint8_t>& img, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
+        double sum = 0.0;
+        uint32_t cnt = 0u;
+        for (uint32_t y = y0; y <= y1 && y < kParityH; ++y) {
+            for (uint32_t x = x0; x <= x1 && x < kParityW; ++x) {
+                const size_t o = (static_cast<size_t>(y) * kParityW + x) * 4u;
+                sum += 0.2126 * img[o] + 0.7152 * img[o + 1] + 0.0722 * img[o + 2];
+                ++cnt;
+            }
+        }
+        return cnt > 0u ? (sum / static_cast<double>(cnt)) : 0.0;
+    };
+    const double vrm_lit = patch_luma(img_vrm, 36u, 96u, 62u, 114u);
+    const double vrm_shd = patch_luma(img_vrm, 98u, 96u, 124u, 114u);
+    const double pmx_lit = patch_luma(img_pmx, 36u, 96u, 62u, 114u);
+    const double pmx_shd = patch_luma(img_pmx, 98u, 96u, 124u, 114u);
+    REQUIRE(vrm_lit > vrm_shd + 8.0);
+    REQUIRE(pmx_lit > pmx_shd + 8.0);
+    const double vrm_ratio = vrm_lit / std::max(1.0, vrm_shd);
+    const double pmx_ratio = pmx_lit / std::max(1.0, pmx_shd);
+    CHECK(std::abs(vrm_ratio - pmx_ratio) / std::max(0.01, pmx_ratio) <= 0.10);
+
+    dx_fg.destroy();
+    vrm->destroy();
+    pmx->destroy();
+    d3d12->destroy();
+    vrhi->destroy();
 }

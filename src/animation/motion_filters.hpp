@@ -37,8 +37,7 @@ namespace aether::animation {
     return out;
 }
 
-[[nodiscard]] inline Vec3 smooth_damp(Vec3 current, Vec3 target, Vec3& velocity, float smooth_time,
-                                      float dt) noexcept {
+[[nodiscard]] inline Vec3 smooth_damp(Vec3 current, Vec3 target, Vec3& velocity, float smooth_time, float dt) noexcept {
     return {
         smooth_damp(current.x, target.x, velocity.x, smooth_time, dt),
         smooth_damp(current.y, target.y, velocity.y, smooth_time, dt),

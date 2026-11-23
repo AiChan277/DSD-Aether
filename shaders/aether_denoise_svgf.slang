@@ -31,6 +31,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     uint gb_mv_slot = 0u;
     uint gb_mat_slot = 0u;
     uint depth_slot = 0u;
+    uint prev_n_slot = 0u;
+    uint prev_d_slot = 0u;
     float3 center_n = float3(0.0, 0.0, 1.0);
     float center_d = 0.5;
     uint center_m = 0u;
@@ -49,6 +51,8 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         gb_mv_slot = fg.gbuffer_ids[0].y;
         gb_mat_slot = fg.gbuffer_ids[0].z;
         depth_slot = fg.gbuffer_extra_ids[0].x;
+        prev_d_slot = fg.gbuffer_extra_ids[1].z;
+        prev_n_slot = fg.gbuffer_extra_ids[1].w;
         is_path_trace = ((fg.state_u32.w & 0xC00u) == 0x800u);
         fast_pan = (fg.stage_camera_params.w > 0.5);
         vp_size = max(fg.viewport_size.xy, float2(1.0, 1.0));
@@ -140,8 +144,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             float alpha = is_path_trace ? pt_alpha : base_alpha;
             if (has_fg && px_speed > 0.25) {
                 int2 prev_gp = clamp(int2(prev_uv * vp_size), int2(0, 0), max_gp);
-                float3 prev_n = oct_decode(aether_load(gb_n_slot, prev_gp).xy);
-                float prev_d = aether_load(depth_slot, prev_gp).x;
+                uint disoccl_n_slot = (prev_n_slot != 0u && prev_n_slot != 0xFFFFFFFFu) ? prev_n_slot : gb_n_slot;
+                uint disoccl_d_slot = (prev_d_slot != 0u && prev_d_slot != 0xFFFFFFFFu) ? prev_d_slot : depth_slot;
+                float3 prev_n = oct_decode(aether_load(disoccl_n_slot, prev_gp).xy);
+                float prev_d = aether_load(disoccl_d_slot, prev_gp).x;
                 uint prev_m = aether_uload(gb_mat_slot, prev_gp).x & 0x7FFFu;
                 if (dot(center_n, prev_n) < 0.72 || abs(center_d - prev_d) > 0.025 || center_m != prev_m) {
                     alpha = max(alpha, 0.45);

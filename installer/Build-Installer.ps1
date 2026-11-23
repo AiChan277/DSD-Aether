@@ -19,8 +19,8 @@
 param(
     [string]$ReleaseBuildDir = "build/windows-release",
     [string]$VcamX86BuildDir = "build/vcam-x86/Release",
-    [string]$Version = "1.0.3",
-    [string]$ReleaseTag = "a1.0.3B",
+    [string]$Version = "1.0.4",
+    [string]$ReleaseTag = "a1.0.4B",
     [string]$CrtRedistRoot = "",
     # Optional: SHA-1 thumbprint of a code-signing certificate in Cert:\CurrentUser\My (OV/EV or Azure Trusted Signing).
     [string]$CertThumbprint = "",
@@ -87,7 +87,7 @@ Get-ChildItem $appDir -Filter *.dll | Copy-Item -Destination $stage
 foreach ($f in $crtFiles) { Copy-Item (Join-Path $crtX64 $f) $stage }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $stage "models"), (Join-Path $stage "assets\fonts"),
-    (Join-Path $stage "config") | Out-Null
+    (Join-Path $stage "config"), (Join-Path $stage "presets\alfx") | Out-Null
 $manifest = Join-Path $repoRoot "models\manifest.toml"
 Copy-Item $manifest (Join-Path $stage "models")
 # Only ship the model files the manifest references.
@@ -100,6 +100,7 @@ foreach ($m in $modelFiles) {
 }
 Copy-Item (Join-Path $repoRoot "assets\fonts\*") (Join-Path $stage "assets\fonts")
 Copy-Item (Join-Path $repoRoot "config\*.json") (Join-Path $stage "config")
+Copy-Item (Join-Path $repoRoot "presets\alfx\*.alfx") (Join-Path $stage "presets\alfx")
 Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $stage "LICENSE.txt")
 Copy-Item (Join-Path $repoRoot "README.md") (Join-Path $stage "README.md")
 

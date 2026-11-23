@@ -90,9 +90,7 @@ class TrackingEngine {
     [[nodiscard]] bool hand_tracking_enabled() const noexcept {
         return hand_tracking_enabled_.load(std::memory_order_acquire);
     }
-    void set_movement_bounds_config(const NpuMovementBoundsConfig& cfg) noexcept {
-        bounds_config_buf_.publish(cfg);
-    }
+    void set_movement_bounds_config(const NpuMovementBoundsConfig& cfg) noexcept { bounds_config_buf_.publish(cfg); }
     [[nodiscard]] AetherStatus switch_camera_source(std::unique_ptr<ICameraSource> next_source) noexcept;
 
     [[nodiscard]] TrackingStatsSnapshot snapshot_stats() const;

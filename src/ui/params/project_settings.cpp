@@ -20,82 +20,7 @@
 namespace aether::ui {
 namespace {
 
-constexpr std::array<KeyBindingSpec, KeymapRegistry::kActionCount> kKeySpecs = {{
-    {ActionId::OpenPalette, "global.palette", "Command Palette", KeyScope::Global, "Ctrl+K", false},
-    {ActionId::ModeLiveStudio, "global.mode_live", "Mode: Live Studio", KeyScope::Global, "Ctrl+Shift+1", false},
-    {ActionId::ModeRigging, "global.mode_rigging", "Mode: Rigging", KeyScope::Global, "Ctrl+Shift+2", false},
-    {ActionId::ModeLighting, "global.mode_lighting", "Mode: Lighting", KeyScope::Global, "Ctrl+Shift+3", false},
-    {ActionId::ModeNodes, "global.mode_nodes", "Mode: Nodes", KeyScope::Global, "Ctrl+Shift+4", false},
-    {ActionId::ProjectNew, "file.new", "New Project", KeyScope::Global, "Ctrl+N", false},
-    {ActionId::ProjectOpen, "file.open", "Open Project...", KeyScope::Global, "Ctrl+O", false},
-    {ActionId::ProjectSave, "file.save", "Save Project", KeyScope::Global, "Ctrl+S", false},
-    {ActionId::ProjectSaveAs, "file.save_as", "Save Project As...", KeyScope::Global, "Ctrl+Shift+S", false},
-    {ActionId::ImportAvatar, "file.import_avatar", "Import Avatar...", KeyScope::Global, "Ctrl+I", false},
-    {ActionId::Undo, "edit.undo", "Undo", KeyScope::Global, "Ctrl+Z", false},
-    {ActionId::Redo, "edit.redo", "Redo", KeyScope::Global, "Ctrl+Y", false},
-    {ActionId::Preferences, "app.preferences", "Preferences...", KeyScope::Global, "Ctrl+,", false},
-    {ActionId::ShortcutOverlay, "app.shortcuts", "Keyboard Shortcuts", KeyScope::Global, "Ctrl+/", false},
-    {ActionId::ToggleOnAir, "live.on_air", "Toggle ON AIR", KeyScope::Global, "Ctrl+Shift+L", false},
-    {ActionId::PauseTracking, "tracking.pause", "Pause Tracking", KeyScope::Global, "Ctrl+P", false},
-    {ActionId::CalibrateNeutral, "tracking.calibrate", "Calibrate Neutral", KeyScope::Global, "Ctrl+Shift+K", false},
-    {ActionId::ToggleRayTracing, "render.toggle_rt", "Toggle Ray Tracing", KeyScope::Global, "Ctrl+Shift+R", false},
-    {ActionId::MaximizeHoveredPanel, "workspace.maximize", "Maximize Hovered Panel", KeyScope::Global, "Shift+Space",
-     false},
-    {ActionId::Expression1, "expr.slot_1", "Trigger Expression 1 (Joy)", KeyScope::Global, "F1", true},
-    {ActionId::Expression2, "expr.slot_2", "Trigger Expression 2 (Surprised)", KeyScope::Global, "F2", true},
-    {ActionId::Expression3, "expr.slot_3", "Trigger Expression 3 (Sorrow)", KeyScope::Global, "F3", true},
-    {ActionId::Expression4, "expr.slot_4", "Trigger Expression 4 (Angry)", KeyScope::Global, "F4", true},
-    {ActionId::Expression5, "expr.slot_5", "Trigger Expression 5 (Fun)", KeyScope::Global, "F5", true},
-    {ActionId::Expression6, "expr.slot_6", "Trigger Expression 6 (Wink L)", KeyScope::Global, "F6", true},
-    {ActionId::Expression7, "expr.slot_7", "Trigger Expression 7 (Wink R)", KeyScope::Global, "F7", true},
-    {ActionId::Expression8, "expr.slot_8", "Trigger Expression 8 (Relaxed)", KeyScope::Global, "F8", true},
-
-    {ActionId::ViewportHeatmap, "viewport.heatmap", "Toggle Confidence Heatmap", KeyScope::Viewport, "Alt+C", false},
-    {ActionId::ViewportOrbitOrb, "viewport.orbit_orb", "Show Light Orbit Orb", KeyScope::Viewport, "Alt+L", false},
-    {ActionId::ViewportFrameHead, "viewport.frame_head", "Frame Head", KeyScope::Viewport, "F", false},
-    {ActionId::ViewportFrameBody, "viewport.frame_body", "Frame Full Body", KeyScope::Viewport, "Shift+F", false},
-    {ActionId::ViewportCam1, "viewport.cam_1", "Recall Camera 1", KeyScope::Viewport, "1", false},
-    {ActionId::ViewportCam2, "viewport.cam_2", "Recall Camera 2", KeyScope::Viewport, "2", false},
-    {ActionId::ViewportCam3, "viewport.cam_3", "Recall Camera 3", KeyScope::Viewport, "3", false},
-    {ActionId::ViewportCam4, "viewport.cam_4", "Recall Camera 4", KeyScope::Viewport, "4", false},
-    {ActionId::ViewportCam5, "viewport.cam_5", "Recall Camera 5", KeyScope::Viewport, "5", false},
-    {ActionId::ViewportStoreCam1, "viewport.store_cam_1", "Store Camera 1", KeyScope::Viewport, "Ctrl+Alt+1", false},
-    {ActionId::ViewportStoreCam2, "viewport.store_cam_2", "Store Camera 2", KeyScope::Viewport, "Ctrl+Alt+2", false},
-    {ActionId::ViewportStoreCam3, "viewport.store_cam_3", "Store Camera 3", KeyScope::Viewport, "Ctrl+Alt+3", false},
-    {ActionId::ViewportStoreCam4, "viewport.store_cam_4", "Store Camera 4", KeyScope::Viewport, "Ctrl+Alt+4", false},
-    {ActionId::ViewportStoreCam5, "viewport.store_cam_5", "Store Camera 5", KeyScope::Viewport, "Ctrl+Alt+5", false},
-    {ActionId::ViewportPreset1, "viewport.preset_1", "Framing Preset: Bust / Streamer", KeyScope::Global, "Ctrl+1", false},
-    {ActionId::ViewportPreset2, "viewport.preset_2", "Framing Preset: Face Close-Up", KeyScope::Global, "Ctrl+2", false},
-    {ActionId::ViewportPreset3, "viewport.preset_3", "Framing Preset: Waist-Up", KeyScope::Global, "Ctrl+3", false},
-    {ActionId::ViewportPreset4, "viewport.preset_4", "Framing Preset: Full Body", KeyScope::Global, "Ctrl+4", false},
-    {ActionId::ViewportPreset5, "viewport.preset_5", "Framing Preset: Stream Corner (Right)", KeyScope::Global, "Ctrl+5", false},
-    {ActionId::ViewportPreset6, "viewport.preset_6", "Framing Preset: Stream Corner (Left)", KeyScope::Global, "Ctrl+6", false},
-    {ActionId::GizmoSelect, "viewport.gizmo_select", "Select Tool", KeyScope::Viewport, "Q", false},
-    {ActionId::GizmoMove, "viewport.gizmo_move", "Move Tool", KeyScope::Viewport, "W", false},
-    {ActionId::GizmoRotate, "viewport.gizmo_rotate", "Rotate Tool", KeyScope::Viewport, "E", false},
-    {ActionId::GizmoScale, "viewport.gizmo_scale", "Scale Tool", KeyScope::Viewport, "R", false},
-    {ActionId::GizmoLocalWorld, "viewport.gizmo_space", "Toggle Local/World", KeyScope::Viewport, "X", false},
-    {ActionId::ViewportGrid, "viewport.grid", "Toggle Grid", KeyScope::Viewport, "G", false},
-
-    {ActionId::GraphAddNode, "graph.add_node", "Add Node Menu", KeyScope::NodeGraph, "Tab", false},
-    {ActionId::GraphDuplicate, "graph.duplicate", "Duplicate Selection", KeyScope::NodeGraph, "Ctrl+D", false},
-    {ActionId::GraphDelete, "graph.delete", "Delete Selection", KeyScope::NodeGraph, "Del", false},
-    {ActionId::GraphFrame, "graph.frame", "Frame Graph", KeyScope::NodeGraph, "F", false},
-    {ActionId::GraphComment, "graph.comment", "Wrap in Comment Box", KeyScope::NodeGraph, "Ctrl+G", false},
-    {ActionId::GraphBypass, "graph.bypass", "Toggle Bypass Selected", KeyScope::NodeGraph, "Ctrl+B", false},
-    {ActionId::GraphRecompile, "graph.recompile", "Recompile Graph Now", KeyScope::NodeGraph, "Ctrl+Enter", false},
-
-    {ActionId::OutlinerRename, "outliner.rename", "Rename Item", KeyScope::Outliner, "Shift+F2", false},
-    {ActionId::OutlinerFilter, "outliner.filter", "Filter Outliner", KeyScope::Outliner, "Ctrl+F", false},
-    {ActionId::OutlinerHide, "outliner.hide", "Hide Selected", KeyScope::Outliner, "H", false},
-    {ActionId::OutlinerUnhideAll, "outliner.unhide_all", "Unhide All", KeyScope::Outliner, "Alt+H", false},
-    {ActionId::OutlinerDelete, "outliner.delete", "Delete Selected", KeyScope::Outliner, "Del", false},
-
-    {ActionId::LightingQuadView, "lighting.quad_view", "Lighting: Toggle Quad View", KeyScope::Global, "Ctrl+Alt+Q",
-     false},
-    {ActionId::LightingPilotLight, "lighting.pilot_light", "Lighting: Pilot Selected Light", KeyScope::Global,
-     "Ctrl+Alt+P", false},
-}};
+inline constexpr const std::array<KeyBindingSpec, KeymapRegistry::kActionCount>& kKeySpecs = core::kCanonicalActions;
 
 std::string trim_copy(std::string_view sv) {
     size_t start = 0;
@@ -437,8 +362,14 @@ const char* KeymapRegistry::scope_name(KeyScope scope) noexcept {
         return "Node Graph";
     case KeyScope::Outliner:
         return "Outliner";
+    case KeyScope::Lighting:
+        return "Lighting";
     }
     return "Global";
+}
+
+bool KeymapRegistry::is_raw_key_pressed(ImGuiKey key, bool repeat) noexcept {
+    return ImGui::GetCurrentContext() != nullptr && ImGui::IsKeyPressed(key, repeat);
 }
 
 void AppSettings::record_recent_project(std::string_view path) {
@@ -456,13 +387,13 @@ void AppSettings::record_recent_project(std::string_view path) {
 std::filesystem::path default_config_dir() {
 #if defined(_WIN32)
     wchar_t buf[1024]{};
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, static_cast<DWORD>(std::size(buf)));
+    const DWORD n = GetEnvironmentVariableW(L"APPDATA", buf, static_cast<DWORD>(std::size(buf)));
     if (n > 0 && n < std::size(buf)) {
-        return std::filesystem::path(buf) / L"Aether2.5D";
+        return std::filesystem::path(buf) / L"AETHER-2.5D-Studio";
     }
 #endif
     std::error_code ec;
-    return std::filesystem::temp_directory_path(ec) / "Aether2.5D";
+    return std::filesystem::temp_directory_path(ec) / "AETHER-2.5D-Studio";
 }
 
 bool atomic_write_text_file(const std::filesystem::path& target, std::string_view utf8_content) {
@@ -605,6 +536,67 @@ bool save_app_settings_toml(const std::filesystem::path& path, const AppSettings
         oss << "item_" << i << " = " << quote_toml_str(settings.recent_projects[i]) << "\n";
     }
     return atomic_write_text_file(path, oss.str());
+}
+
+void load_app_settings_from_session(const core::SessionState& session, AppSettings& settings, ParamStore& params) {
+    settings.wizard_completed = session.wizard_completed;
+    settings.hw_inventory_hash = session.hw_inventory_hash;
+    settings.preferred_camera_link = session.preferred_camera_link;
+    settings.preferred_mic_id = session.preferred_mic_id;
+    settings.preferred_gpu_luid = session.preferred_gpu_luid;
+    settings.preferred_gpu_name = session.preferred_gpu_name;
+    settings.active_project_path = session.last_opened_project_path;
+    if (!session.ws_auth_token.empty()) {
+        settings.ws_auth_token = session.ws_auth_token;
+    }
+    settings.telemetry_show_substats = session.telemetry_show_substats;
+    settings.settings_revision = std::max(session.settings_revision, AppSettings::kCurrentRevision);
+    settings.recent_projects.clear();
+    for (const auto& rec : session.recent_projects) {
+        if (!rec.path.empty()) {
+            settings.recent_projects.push_back(rec.path);
+        }
+    }
+
+    for (const auto& [key, val] : session.app_params) {
+        if (const ParamSpec* spec = find_param_by_id(key)) {
+            if ((spec->flags & PARAM_FLAG_APP_SCOPE) != 0u) {
+                (void)params.set(spec->pid, val);
+            }
+        }
+    }
+    if (session.app_params.find("render.backend") == session.app_params.end()) {
+        const int b = (session.render_backend == "dx11") ? 1 : ((session.render_backend == "dx12") ? 2 : 0);
+        (void)params.set(ParamId::RenderBackend, static_cast<double>(b));
+    }
+    if (session.settings_revision < 2u && params.get_int(ParamId::TrackingEpMode) == 4) {
+        (void)params.set(ParamId::TrackingEpMode, 0.0);
+    }
+}
+
+void save_app_settings_to_session(const AppSettings& settings, const ParamStore& params, core::SessionState& session) {
+    session.wizard_completed = settings.wizard_completed;
+    session.hw_inventory_hash = settings.hw_inventory_hash;
+    session.preferred_camera_link = settings.preferred_camera_link;
+    session.preferred_mic_id = settings.preferred_mic_id;
+    session.preferred_gpu_luid = settings.preferred_gpu_luid;
+    session.preferred_gpu_name = settings.preferred_gpu_name;
+    if (!settings.active_project_path.empty()) {
+        session.last_opened_project_path = settings.active_project_path;
+    }
+    session.ws_auth_token = settings.ws_auth_token;
+    session.telemetry_show_substats = settings.telemetry_show_substats;
+    session.settings_revision = AppSettings::kCurrentRevision;
+
+    for (const ParamSpec& spec : all_param_specs()) {
+        if ((spec.flags & (PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE)) != (PARAM_FLAG_PERSIST | PARAM_FLAG_APP_SCOPE)) {
+            continue;
+        }
+        session.app_params[std::string(spec.id)] = params.get(spec.pid);
+    }
+    const int backend = params.get_int(ParamId::RenderBackend);
+    session.render_backend = (backend == 1) ? "dx11" : ((backend == 2) ? "dx12" : "vulkan");
+    session.lighting_tier = static_cast<uint8_t>(std::clamp(params.get_int(ParamId::RenderLightingMode), 0, 2));
 }
 
 } // namespace aether::ui

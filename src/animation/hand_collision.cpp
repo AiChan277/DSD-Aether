@@ -93,8 +93,7 @@ void BodySelfCollisionField::build_from_fk(const std::array<Vec3, AETHER_HUMANOI
         const Vec3 r_elbow = world_pos[AETHER_BONE_RIGHT_LOWER_ARM];
         const Vec3 r_wrist = world_pos[AETHER_BONE_RIGHT_HAND];
         const Vec3 r_dir = normalize_safe(r_wrist - r_elbow, {-1.0f, 0.0f, 0.0f});
-        add_capsule(r_elbow + r_dir * 0.02f, r_wrist + r_dir * 0.05f, kForearmRadiusM,
-                    CollisionCapsuleKind::RightArm);
+        add_capsule(r_elbow + r_dir * 0.02f, r_wrist + r_dir * 0.05f, kForearmRadiusM, CollisionCapsuleKind::RightArm);
     }
 }
 

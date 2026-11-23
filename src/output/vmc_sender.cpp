@@ -106,15 +106,12 @@ void OscMessageWriter::begin(const char* address, const char* type_tags) noexcep
     ok_ = (buf_ != nullptr);
     put_padded_string(address);
     char tags[32]{};
-    tags[0] = ',';
     const size_t n = (type_tags != nullptr) ? std::strlen(type_tags) : 0U;
     if (n + 2U > sizeof(tags)) {
         ok_ = false;
         return;
     }
-    if (n > 0U) {
-        std::memcpy(tags + 1, type_tags, n);
-    }
+    std::snprintf(tags, sizeof(tags), ",%s", (type_tags != nullptr) ? type_tags : "");
     put_padded_string(tags);
 }
 

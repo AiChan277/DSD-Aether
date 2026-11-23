@@ -1,6 +1,7 @@
 #include "animation/spring_bone.hpp"
 #include "core/hot_path_guard.hpp"
 #include "flip_metric.hpp"
+#include "renderer/asset_upload/vrm_parity_prep.hpp"
 #include "renderer/frame_globals_builder.hpp"
 #include "renderer/npr_renderer.hpp"
 #include "renderer/sdf_generator.hpp"
@@ -57,7 +58,6 @@ namespace {
     req.camera = cam;
     req.rt_enabled = rcfg.enable_rt;
     req.show_checkerboard = checkerboard;
-    req.show_orbit_orb = false;
     req.render_csm_shadow = false;
     REQUIRE(renderer.render_headless_frame(req).has_value());
 
@@ -111,7 +111,6 @@ TEST_CASE("Sync2 read-only D32_S8 stencil, 14 shading debug views, CVD heatmap, 
     req.joint_stress = bone_stress.data();
     req.joint_stress_count = static_cast<uint32_t>(bone_stress.size());
     req.show_skeleton_heatmap = true;
-    req.show_orbit_orb = true;
     req.rt_enabled = rhi->rt_supported();
 
     // Verify all 14 ShadingDebugView modes render cleanly with zero validation errors/warnings and 0 heap allocs
@@ -135,18 +134,6 @@ TEST_CASE("Sync2 read-only D32_S8 stencil, 14 shading debug views, CVD heatmap, 
 #endif
     }
 
-    // Verify 128x128 Light Orbit Orb rendered non-empty pixels
-    const auto outs = renderer.graph().outputs();
-    auto orb_px =
-        renderer.graph().readback_image_rgba8(outs.orbit_orb_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 128, 128);
-    REQUIRE(orb_px.has_value());
-    int non_zero_orb = 0;
-    for (size_t i = 0; i < static_cast<size_t>(128) * 128U; ++i) {
-        if (orb_px.value()[i * 4 + 3] > 200) {
-            ++non_zero_orb;
-        }
-    }
-    CHECK(non_zero_orb > 4000);
     CHECK(rhi->validation_error_count() == 0);
     CHECK(rhi->validation_warning_count() == 0);
 
@@ -285,10 +272,10 @@ TEST_CASE("Optical Invariant 2: 0-360 deg SDF face shadow sweep is smooth and sy
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto mean_center_luma = [&](float azimuth_deg) -> double {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = azimuth_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
-        rig.lights[0].intensity = 1.6f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = azimuth_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_lights[0].intensity_ev100 = 1.6f;
         rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
         rig.bg_rgba[3] = 1.0f;
         const auto px = render_synthetic_once(*rhi, spec, 128, 128, cam, rig, false, false, false);
@@ -353,9 +340,9 @@ TEST_CASE("Optical Invariant 3: Read-only D32_S8 stencil hair drop shadow shifts
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto render_azimuth = [&](float az_deg) {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = az_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = az_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
         rig.hair_shadow_offset_px = 14.0f;
         rig.hair_shadow_strength = 0.70f;
         return render_synthetic_once(*rhi, spec, 256, 256, cam, rig, false, false, false);
@@ -649,10 +636,10 @@ TEST_CASE("NprRenderer::bake_and_apply_face_sdf activates live R8 SDF on unflagg
     aether::renderer::PreviewCamera cam{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.65f};
     auto render_luma = [&](float az_deg, uint64_t fidx) -> double {
         auto rig = aether::renderer::LightingRig::default_three_point();
-        rig.active_count = 1;
-        rig.lights[0].orbit_azimuth_deg = az_deg;
-        rig.lights[0].orbit_elevation_deg = 0.0f;
-        rig.lights[0].intensity = 1.6f;
+        rig.studio_light_count = 1;
+        rig.studio_lights[0].orbit_azimuth_deg = az_deg;
+        rig.studio_lights[0].orbit_elevation_deg = 0.0f;
+        rig.studio_lights[0].intensity_ev100 = 1.6f;
         rig.bg_rgba[3] = 1.0f;
 
         aether::renderer::FrameRenderRequest req{};
@@ -663,7 +650,6 @@ TEST_CASE("NprRenderer::bake_and_apply_face_sdf activates live R8 SDF on unflagg
         req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
         req.rt_enabled = false;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = false;
         REQUIRE(renderer.render_headless_frame(req).has_value());
 
@@ -747,7 +733,6 @@ TEST_CASE("Vulkan wireframe mode, AvatarRoot 3D transform, and Rigging spring-bo
         req.premul_alpha = false;
         req.non_alpha_bg_rgb = {0.0f, 0.0f, 0.0f};
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = false;
         req.outline_width_scale = 0.0f;
         req.wireframe = wireframe;
@@ -901,7 +886,6 @@ TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtu
         CHECK(ies[5u * kIesLutWidth + 128u] < 0.05f);
 
         LightingRig rig = LightingRig::default_three_point();
-        rig.use_studio_lights = true;
         rig.studio_light_count = 12;
         for (uint32_t f = 0; f < 12u; ++f) {
             configure_fixture_defaults(rig.studio_lights[f], static_cast<StudioFixtureProfile>(f));
@@ -960,7 +944,6 @@ TEST_CASE("Phase 1 studio photometry: GPU priority, Heitz LTC/IES LUTs, 12 fixtu
 
     // (a) Softbox + Honeycomb Grid (30 deg) measurably attenuates peripheral edges relative to ungridded softbox
     LightingRig rig_open = LightingRig::default_three_point();
-    rig_open.use_studio_lights = true;
     rig_open.studio_light_count = 1;
     configure_fixture_defaults(rig_open.studio_lights[0], StudioFixtureProfile::RectSoftbox);
     rig_open.studio_lights[0].use_orbit_angles = false;
@@ -1071,7 +1054,6 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
 
         // Parallel Ortho ray picking vs Perspective ray picking on placed Softboxes
         LightingRig pick_rig = LightingRig::default_three_point();
-        pick_rig.use_studio_lights = true;
         pick_rig.studio_light_count = 2;
         configure_fixture_defaults(pick_rig.studio_lights[0], StudioFixtureProfile::RectSoftbox);
         pick_rig.studio_lights[0].use_orbit_angles = false;
@@ -1146,7 +1128,6 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
     REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.use_studio_lights = true;
     rig.studio_light_count = 6;
     for (uint32_t i = 0; i < 6u; ++i) {
         configure_fixture_defaults(rig.studio_lights[i], StudioFixtureProfile::RectSoftbox);
@@ -1185,15 +1166,16 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
         req.lighting_mode = mode;
         req.rt_enabled = (mode > 0u) && rcfg.enable_rt;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = false;
         req.frame_index = fidx;
         req.completed_frame_index = (fidx >= 2u) ? (fidx - 1u) : 0u;
         req.frame_slot = static_cast<uint32_t>(fidx % ::aether::rhi::RhiSwapchain::kFramesInFlight);
         REQUIRE(renderer.render_headless_frame(req).has_value());
         const auto outs = renderer.graph().outputs();
-        const VkImage target_vp = (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
-        auto vp_res = renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+        const VkImage target_vp =
+            (kind == RenderViewKind::LightingStage) ? outs.stage_viewport_image : outs.viewport_image;
+        auto vp_res =
+            renderer.graph().readback_image_rgba8(target_vp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
         auto bg_res = renderer.graph().readback_image_rgba8(outs.bgra8_image, VK_IMAGE_LAYOUT_GENERAL, kW, kH);
         REQUIRE(vp_res.has_value());
         REQUIRE(bg_res.has_value());
@@ -1224,7 +1206,8 @@ TEST_CASE("Phase 2 Vulkan Dual-Viewport Zero Leakage, 6 Ortho Cameras, Parallel 
     CHECK(std::memcmp(bcast_vp_0.data(), bcast_adv_vp.data(), bcast_vp_0.size()) == 0);
     CHECK(std::memcmp(bcast_bg_0.data(), bcast_adv_bg.data(), bcast_bg_0.size()) == 0);
 
-    // 3. Stage View (with RT enabled) renders schematics cleanly into stage_viewport_image while bgra8_image remains untouched Broadcast!
+    // 3. Stage View (with RT enabled) renders schematics cleanly into stage_viewport_image while bgra8_image remains
+    // untouched Broadcast!
     render_vk(RenderViewKind::LightingStage, bcast_cam, StageDiagnosticMode::Lit, true, true, 1u, 1u, stage_vp,
               stage_bg);
     CHECK(std::memcmp(bcast_bg_0.data(), stage_bg.data(), bcast_bg_0.size()) == 0);
@@ -1324,15 +1307,14 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
     REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
 
     LightingRig rig = LightingRig::default_three_point();
-    rig.lights[0].color[0] = 1.0f;
-    rig.lights[0].color[1] = 1.0f;
-    rig.lights[0].color[2] = 1.0f;
-    rig.lights[0].intensity = 1.8f;
+    rig.studio_lights[0].tint_rgb = {1.0f, 1.0f, 1.0f};
+    rig.studio_lights[0].intensity_ev100 = 1.8f;
     rig.bloom_intensity = 0.0f;
     rig.satsuei.halation_strength = 0.0f;
     rig.satsuei.light_wrap_strength = 0.0f;
 
-    auto measure_vk = [&](uint32_t vw, uint32_t vh, StageCameraView sv, uint64_t fidx) -> std::pair<uint32_t, uint32_t> {
+    auto measure_vk = [&](uint32_t vw, uint32_t vh, StageCameraView sv,
+                          uint64_t fidx) -> std::pair<uint32_t, uint32_t> {
         PreviewCamera cam = make_stage_camera_preset(sv, {0.0f, 1.0f, 0.0f}, 2.20f);
         if (sv == StageCameraView::FreePerspective) {
             cam.yaw_rad = 0.0f;
@@ -1356,7 +1338,6 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
         req.aa_mode = 0u;
         req.outline_width_scale = 0.0f;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = false;
         req.frame_index = fidx;
         req.frame_slot = static_cast<uint32_t>(fidx % aether::rhi::RhiSwapchain::kFramesInFlight);
@@ -1365,9 +1346,9 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
         const auto outs = renderer.graph().outputs();
         CHECK(outs.stage_viewport_width == vw);
         CHECK(outs.stage_viewport_height == vh);
-        auto px_res = renderer.graph().readback_image_rgba8(
-            outs.stage_viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, outs.stage_viewport_rt_width,
-            outs.stage_viewport_rt_height);
+        auto px_res =
+            renderer.graph().readback_image_rgba8(outs.stage_viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                  outs.stage_viewport_rt_width, outs.stage_viewport_rt_height);
         REQUIRE(px_res.has_value());
         const auto& px = px_res.value();
         uint32_t min_x = vw, max_x = 0u, min_y = vh, max_y = 0u;
@@ -1422,6 +1403,393 @@ TEST_CASE("LightingStageView Vulkan 1:1 Pixel Aspect Ratio Across Wide/Tall Resi
 
     renderer.destroy();
     avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Rev 3.1 Zero-Light Isolation Proof (Single Lighting Authority)", "[renderer][lighting][zero_light]") {
+    using namespace aether::renderer;
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Zero-Light GPU test: Vulkan unavailable");
+        return;
+    }
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat = aether::test::make_basic_npr_material(0.85f, 0.72f, 0.65f);
+    mat.toon_params[0] = 0.0f;
+    spec.materials.push_back(mat);
+    const float p0[3] = {-0.55f, 0.70f, 0.0f};
+    const float p1[3] = {0.55f, 0.70f, 0.0f};
+    const float p2[3] = {0.55f, 1.85f, 0.0f};
+    const float p3[3] = {-0.55f, 1.85f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.85f, 0.72f, 0.65f, 0, AETHER_SUBMESH_FLAG_OPAQUE);
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kW = 128u;
+    constexpr uint32_t kH = 128u;
+    RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = false;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    for (uint32_t i = 0; i < rig.studio_light_count; ++i) {
+        rig.studio_lights[i].enabled = false;
+    }
+    rig.ambient_floor = 0.0f;
+    rig.environment_sky_strength = 0.0f;
+    rig.ground_bounce_strength = 0.0f;
+    rig.bg_rgba[0] = 0.0f;
+    rig.bg_rgba[1] = 0.0f;
+    rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    FrameRenderRequest req{};
+    req.avatar = avatar.get();
+    req.rig = &rig;
+    req.camera = PreviewCamera{0.0f, 1.30f, 0.0f, 0.0f, 0.0f, 2.2f, 0.65f};
+    req.frame_index = 1u;
+    req.frame_slot = 0u;
+    req.rt_enabled = false;
+    req.show_checkerboard = false;
+    req.debug_view = ShadingDebugView::Final;
+
+    REQUIRE(renderer.render_headless_frame(req).has_value());
+    const auto outs = renderer.graph().outputs();
+    auto vp_res =
+        renderer.graph().readback_image_rgba8(outs.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+    REQUIRE(vp_res.has_value());
+    const auto& rgba = vp_res.value();
+    uint8_t max_rgb = 0u;
+    for (size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        max_rgb = std::max({max_rgb, rgba[i + 0], rgba[i + 1], rgba[i + 2]});
+    }
+    INFO("Zero-Light max_rgb=" << static_cast<int>(max_rgb));
+    CHECK(max_rgb == 0u);
+    REQUIRE(rhi->validation_error_count() == 0);
+
+    renderer.destroy();
+    avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Rev 3.1 Vulkan Additive Overlay, .sph Multiply, T_hair & SurfaceGroupID Proof",
+          "[renderer][pmx][vrm][rev31]") {
+    using namespace aether::renderer;
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Vulkan Rev 3.1 GPU proof: Vulkan unavailable");
+        return;
+    }
+
+    aether::test::SyntheticMeshSpec spec{};
+    auto mat_bg = aether::test::make_basic_npr_material(0.25f, 0.25f, 0.28f);
+    spec.materials.push_back(mat_bg);
+    auto mat_add = aether::test::make_basic_npr_material(1.0f, 1.0f, 1.0f, 1.0f, AETHER_MAT_FLAG_ADDITIVE);
+    mat_add.alpha_mode = AETHER_ALPHA_MODE_ADDITIVE;
+    mat_add.tex_base = 0u;
+    spec.materials.push_back(mat_add);
+    auto mat_hair =
+        aether::test::make_basic_npr_material(0.18f, 0.22f, 0.42f, 1.0f, AETHER_MAT_FLAG_HAIR_FRONT_STENCIL);
+    spec.materials.push_back(mat_hair);
+
+    AetherTextureDesc td{};
+    td.width = 8u;
+    td.height = 8u;
+    td.format = AETHER_TEX_FORMAT_RGBA8_UNORM;
+    td.usage_flags = AETHER_TEX_USAGE_COLOR;
+    td.pixel_size = 8u * 8u * 4u;
+    spec.tex_descs.push_back(td);
+    spec.tex_pixels.resize(td.pixel_size, 0u);
+    for (uint32_t y = 0; y < 8u; ++y) {
+        for (uint32_t x = 0; x < 8u; ++x) {
+            const size_t o = static_cast<size_t>(y * 8u + x) * 4u;
+            const bool center = (x >= 3u && x <= 4u && y >= 3u && y <= 4u);
+            spec.tex_pixels[o + 0] = center ? 255u : 0u;
+            spec.tex_pixels[o + 1] = center ? 255u : 0u;
+            spec.tex_pixels[o + 2] = center ? 255u : 0u;
+            spec.tex_pixels[o + 3] = 255u;
+        }
+    }
+
+    const float p0[3] = {-0.55f, 0.70f, 0.0f};
+    const float p1[3] = {0.55f, 0.70f, 0.0f};
+    const float p2[3] = {0.55f, 1.85f, 0.0f};
+    const float p3[3] = {-0.55f, 1.85f, 0.0f};
+    const float n[3] = {0.0f, 0.0f, 1.0f};
+    const float t[3] = {1.0f, 0.0f, 0.0f};
+    aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.0f, 0.0f, 0.0f, 0u, AETHER_SUBMESH_FLAG_OPAQUE);
+    const float q0[3] = {-0.40f, 0.85f, 0.02f};
+    const float q1[3] = {0.40f, 0.85f, 0.02f};
+    const float q2[3] = {0.40f, 1.65f, 0.02f};
+    const float q3[3] = {-0.40f, 1.65f, 0.02f};
+    aether::test::append_quad(spec, q0, q1, q2, q3, n, t, 0.0f, 0.0f, 0.0f, 1u,
+                              AETHER_SUBMESH_FLAG_TRANSPARENT | AETHER_SUBMESH_FLAG_ADDITIVE);
+    const float h0[3] = {0.20f, 1.40f, 0.04f};
+    const float h1[3] = {0.50f, 1.40f, 0.04f};
+    const float h2[3] = {0.50f, 1.80f, 0.04f};
+    const float h3[3] = {0.20f, 1.80f, 0.04f};
+    const size_t hair_surf_base = spec.surfaces.size();
+    aether::test::append_quad(spec, h0, h1, h2, h3, n, t, 0.0f, 0.0f, 0.0f, 2u,
+                              AETHER_SUBMESH_FLAG_OPAQUE | AETHER_SUBMESH_FLAG_HAIR_FRONT);
+    for (size_t s = hair_surf_base; s < spec.surfaces.size(); ++s) {
+        spec.surfaces[s].tangent_oct = 0x00007FFFu;
+    }
+
+    auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+    REQUIRE(av_res.has_value());
+    auto avatar = std::move(av_res.value());
+
+    constexpr uint32_t kW = 128u;
+    constexpr uint32_t kH = 128u;
+    RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = false;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+    REQUIRE(renderer.bind_avatar(avatar.get()).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.bg_rgba[0] = 0.0f;
+    rig.bg_rgba[1] = 0.0f;
+    rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    FrameRenderRequest req{};
+    req.avatar = avatar.get();
+    req.rig = &rig;
+    req.camera = PreviewCamera{0.0f, 1.28f, 0.0f, 0.0f, 0.0f, 2.2f, 0.65f};
+    req.frame_index = 1u;
+    req.frame_slot = 0u;
+    req.rt_enabled = false;
+    req.show_checkerboard = false;
+    req.debug_view = ShadingDebugView::Final;
+
+    REQUIRE(renderer.render_headless_frame(req).has_value());
+    const auto outs = renderer.graph().outputs();
+    auto vp_res =
+        renderer.graph().readback_image_rgba8(outs.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kW, kH);
+    REQUIRE(vp_res.has_value());
+    const auto& rgba = vp_res.value();
+
+    auto lum_at = [&](uint32_t x, uint32_t y) {
+        const size_t o = (static_cast<size_t>(y) * kW + x) * 4u;
+        return static_cast<int>(rgba[o]) + static_cast<int>(rgba[o + 1]) + static_cast<int>(rgba[o + 2]);
+    };
+    const int lum_bg = lum_at(22u, 64u);
+    const int lum_corner_black = lum_at(34u, 36u);
+    const int lum_center_glow = lum_at(64u, 64u);
+    INFO("VK Additive Card: bg=" << lum_bg << " card_black_corner=" << lum_corner_black
+                                 << " card_center=" << lum_center_glow);
+    CHECK(lum_bg > 20);
+    CHECK(lum_corner_black >= (lum_bg * 85) / 100);
+    CHECK(lum_center_glow > lum_corner_black + 60);
+    REQUIRE(rhi->validation_error_count() == 0);
+
+    renderer.destroy();
+    avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Empirical Test #3: VRM vs PMX Toon Parity Audit on Vulkan (Cel Contrast, Clean Face Ink, Angel Ring)",
+          "[renderer][vulkan][rev31][empirical][parity]") {
+    using namespace aether::renderer;
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+    auto rhi = create_test_rhi(false);
+    if (!rhi) {
+        aether_runtime_shutdown();
+        SUCCEED("Skipped Vulkan Parity test: Vulkan unavailable");
+        return;
+    }
+
+    auto make_parity_avatar = [&](bool is_pmx) -> std::unique_ptr<GpuAvatar> {
+        aether::test::SyntheticMeshSpec spec{};
+        auto face_m =
+            aether::test::make_basic_npr_material(0.92f, 0.78f, 0.72f, 1.0f, AETHER_MAT_FLAG_RECEIVES_HAIR_SHADOW);
+        if (is_pmx) {
+            face_m.flags |= AETHER_MAT_FLAG_IS_PMX;
+            face_m.shade_color_gi[0] = 0.74f;
+            face_m.shade_color_gi[1] = 0.56f;
+            face_m.shade_color_gi[2] = 0.52f;
+        } else {
+            face_m.shade_color_gi[0] = face_m.base_color[0];
+            face_m.shade_color_gi[1] = face_m.base_color[1];
+            face_m.shade_color_gi[2] = face_m.base_color[2];
+        }
+        face_m.outline_width = 0.0f;
+
+        auto cloth_m =
+            aether::test::make_basic_npr_material(0.38f, 0.44f, 0.76f, 1.0f, is_pmx ? AETHER_MAT_FLAG_IS_PMX : 0u);
+        if (is_pmx) {
+            cloth_m.shade_color_gi[0] = 0.22f;
+            cloth_m.shade_color_gi[1] = 0.27f;
+            cloth_m.shade_color_gi[2] = 0.58f;
+        } else {
+            cloth_m.shade_color_gi[0] = cloth_m.base_color[0];
+            cloth_m.shade_color_gi[1] = cloth_m.base_color[1];
+            cloth_m.shade_color_gi[2] = cloth_m.base_color[2];
+        }
+        cloth_m.outline_width = 0.0f;
+
+        auto hair_m = aether::test::make_basic_npr_material(
+            0.28f, 0.30f, 0.48f, 1.0f, AETHER_MAT_FLAG_HAIR_FRONT_STENCIL | (is_pmx ? AETHER_MAT_FLAG_IS_PMX : 0u));
+        hair_m.shade_color_gi[0] = 0.16f;
+        hair_m.shade_color_gi[1] = 0.18f;
+        hair_m.shade_color_gi[2] = 0.34f;
+        hair_m.outline_width = 0.0f;
+        spec.materials = {face_m, cloth_m, hair_m};
+
+        const float tf[3] = {1.0f, 0.0f, 0.0f};
+        const float f0[3] = {-0.18f, 1.24f, 0.08f}, f1[3] = {0.18f, 1.24f, 0.08f}, f2[3] = {0.18f, 1.44f, 0.08f},
+                    f3[3] = {-0.18f, 1.44f, 0.08f}, nf[3] = {0.20f, 0.08f, 0.97f};
+        aether::test::append_quad(spec, f0, f1, f2, f3, nf, tf, 0.92f, 0.78f, 0.72f, 0u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE | AETHER_SUBMESH_FLAG_FACE);
+        const float cl0[3] = {-0.48f, 0.86f, 0.04f}, cl1[3] = {-0.04f, 0.86f, 0.04f}, cl2[3] = {-0.04f, 1.20f, 0.04f},
+                    cl3[3] = {-0.48f, 1.20f, 0.04f}, n_lit[3] = {0.48f, 0.25f, 0.84f};
+        aether::test::append_quad(spec, cl0, cl1, cl2, cl3, n_lit, tf, 0.38f, 0.44f, 0.76f, 1u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE);
+        const float cs0[3] = {0.04f, 0.86f, 0.04f}, cs1[3] = {0.48f, 0.86f, 0.04f}, cs2[3] = {0.48f, 1.20f, 0.04f},
+                    cs3[3] = {0.04f, 1.20f, 0.04f}, n_shd[3] = {-0.85f, -0.15f, 0.50f};
+        aether::test::append_quad(spec, cs0, cs1, cs2, cs3, n_shd, tf, 0.38f, 0.44f, 0.76f, 1u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE);
+
+        const float h0[3] = {-0.32f, 1.46f, 0.06f}, h1[3] = {0.32f, 1.46f, 0.06f}, h2[3] = {0.32f, 1.66f, -0.02f},
+                    h3[3] = {-0.32f, 1.66f, -0.02f}, n_hair[3] = {0.08f, 0.55f, 0.83f};
+        const size_t hair_surf_base = spec.surfaces.size();
+        aether::test::append_quad(spec, h0, h1, h2, h3, n_hair, tf, 0.28f, 0.30f, 0.48f, 2u,
+                                  AETHER_SUBMESH_FLAG_OPAQUE | AETHER_SUBMESH_FLAG_HAIR_FRONT);
+        for (size_t s = hair_surf_base; s < spec.surfaces.size(); ++s) {
+            spec.surfaces[s].tangent_oct = 0x00007FFFu;
+        }
+
+        auto av_res = aether::test::upload_synthetic_avatar(*rhi, spec);
+        REQUIRE(av_res.has_value());
+        auto av = std::move(av_res.value());
+        av->desc.source_format = is_pmx ? AETHER_SOURCE_FORMAT_PMX : AETHER_SOURCE_FORMAT_VRM1;
+        av->pmx_aux_header.is_pmx = is_pmx ? 1u : 0u;
+        (void)prepare_vrm_and_pmx_parity(*av, true);
+        return av;
+    };
+
+    auto vrm = make_parity_avatar(false);
+    auto pmx = make_parity_avatar(true);
+
+    constexpr uint32_t kW = 160u;
+    constexpr uint32_t kH = 160u;
+    RendererConfig rcfg{};
+    rcfg.width = kW;
+    rcfg.height = kH;
+    rcfg.enable_rt = false;
+    NprRenderer renderer;
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+
+    LightingRig rig = LightingRig::default_three_point();
+    rig.studio_lights[0].orbit_azimuth_deg = 48.0f;
+    rig.studio_lights[0].orbit_elevation_deg = 22.0f;
+    rig.studio_lights[0].intensity_ev100 = 1.15f;
+    rig.studio_lights[1].enabled = false;
+    rig.studio_lights[2].enabled = false;
+    rig.ambient_floor = 0.14f;
+    rig.environment_sky_strength = 0.14f;
+    rig.bg_rgba[0] = rig.bg_rgba[1] = rig.bg_rgba[2] = 0.0f;
+    rig.bg_rgba[3] = 1.0f;
+    rig.bloom_intensity = 0.0f;
+
+    auto render_pair = [&](GpuAvatar* av, uint64_t fidx) -> std::vector<uint8_t> {
+        REQUIRE(renderer.bind_avatar(av).has_value());
+        FrameRenderRequest req{};
+        req.avatar = av;
+        req.rig = &rig;
+        req.camera = PreviewCamera{0.0f, 1.26f, 0.0f, 0.0f, 0.0f, 1.85f, 0.65f};
+        req.frame_index = fidx;
+        req.frame_slot = static_cast<uint32_t>(fidx % 3u);
+        req.rt_enabled = false;
+        req.show_checkerboard = false;
+        req.debug_view = ShadingDebugView::Final;
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+        const auto outs = renderer.graph().outputs();
+        auto rb = renderer.graph().readback_image_rgba8(outs.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                        kW, kH);
+        REQUIRE(rb.has_value());
+        return std::move(rb.value());
+    };
+
+    auto patch_luma = [&](const std::vector<uint8_t>& img, uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
+        double sum = 0.0;
+        uint32_t cnt = 0u;
+        for (uint32_t y = y0; y <= y1 && y < kH; ++y) {
+            for (uint32_t x = x0; x <= x1 && x < kW; ++x) {
+                const size_t o = (static_cast<size_t>(y) * kW + x) * 4u;
+                sum += 0.2126 * img[o] + 0.7152 * img[o + 1] + 0.0722 * img[o + 2];
+                ++cnt;
+            }
+        }
+        return cnt > 0u ? (sum / static_cast<double>(cnt)) : 0.0;
+    };
+
+    const auto img_vrm = render_pair(vrm.get(), 1u);
+    const auto img_pmx = render_pair(pmx.get(), 2u);
+
+    const double vrm_lit = patch_luma(img_vrm, 36u, 96u, 62u, 114u);
+    const double vrm_shd = patch_luma(img_vrm, 98u, 96u, 124u, 114u);
+    const double pmx_lit = patch_luma(img_pmx, 36u, 96u, 62u, 114u);
+    const double pmx_shd = patch_luma(img_pmx, 98u, 96u, 124u, 114u);
+    REQUIRE(vrm_lit > vrm_shd + 8.0);
+    REQUIRE(pmx_lit > pmx_shd + 8.0);
+    const double vrm_ratio = vrm_lit / std::max(1.0, vrm_shd);
+    const double pmx_ratio = pmx_lit / std::max(1.0, pmx_shd);
+    const double rel_diff = std::abs(vrm_ratio - pmx_ratio) / std::max(0.01, pmx_ratio);
+    INFO("VK VRM ratio=" << vrm_ratio << " PMX ratio=" << pmx_ratio << " rel_diff=" << rel_diff);
+    CHECK(rel_diff <= 0.10);
+
+    double min_face_luma = 255.0;
+    for (uint32_t y = 62u; y <= 76u; ++y) {
+        for (uint32_t x = 70u; x <= 90u; ++x) {
+            const size_t o = (static_cast<size_t>(y) * kW + x) * 4u;
+            const double lum = 0.2126 * img_vrm[o] + 0.7152 * img_vrm[o + 1] + 0.0722 * img_vrm[o + 2];
+            min_face_luma = std::min(min_face_luma, lum);
+        }
+    }
+    INFO("VK VRM min interior face luma=" << min_face_luma);
+    CHECK(min_face_luma > 45.0);
+
+    rig.hair_highlight_intensity = 0.0f;
+    rig.vrm_mmd_parity.vrm_hair_angel_ring_boost = 0.0f;
+    const auto img_hair_off = render_pair(vrm.get(), 3u);
+    rig.vrm_mmd_parity.vrm_hair_angel_ring_boost = 1.45f;
+    const auto img_hair_boost = render_pair(vrm.get(), 4u);
+    const double hair_off = patch_luma(img_hair_off, 58u, 36u, 102u, 52u);
+    const double hair_on = patch_luma(img_hair_boost, 58u, 36u, 102u, 52u);
+    INFO("VK Hair Angel Ring off=" << hair_off << " boost=" << hair_on);
+    CHECK(hair_on >= hair_off);
+
+    REQUIRE(rhi->validation_error_count() == 0);
+    renderer.destroy();
+    vrm->destroy();
+    pmx->destroy();
     rhi->destroy();
     aether_runtime_shutdown();
 }

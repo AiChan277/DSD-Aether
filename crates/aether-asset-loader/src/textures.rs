@@ -613,10 +613,8 @@ fn decode_bc1_or_bc3_blocks(
             c_pal[1] = [rgb1[0], rgb1[1], rgb1[2], 255];
             if c0_u16 > c1_u16 || is_bc3 {
                 for ch in 0..3 {
-                    c_pal[2][ch] =
-                        ((2 * u32::from(rgb0[ch]) + u32::from(rgb1[ch]) + 1) / 3) as u8;
-                    c_pal[3][ch] =
-                        ((u32::from(rgb0[ch]) + 2 * u32::from(rgb1[ch]) + 1) / 3) as u8;
+                    c_pal[2][ch] = ((2 * u32::from(rgb0[ch]) + u32::from(rgb1[ch]) + 1) / 3) as u8;
+                    c_pal[3][ch] = ((u32::from(rgb0[ch]) + 2 * u32::from(rgb1[ch]) + 1) / 3) as u8;
                 }
                 c_pal[2][3] = 255;
                 c_pal[3][3] = 255;
@@ -762,6 +760,70 @@ fn decode_ktx2_into(src: &[u8], dst: &mut [u8], width: u32, height: u32) -> bool
     false
 }
 
+fn apply_alpha_bleed_dilation_1pass(rgba: &mut [u8], width: usize, height: usize) {
+    let px_count = width.saturating_mul(height);
+    if width < 2 || height < 2 || rgba.len() < px_count * 4 {
+        return;
+    }
+    let mut has_zero_alpha = false;
+    let mut has_opaque = false;
+    for chunk in rgba[..px_count * 4].chunks_exact(4) {
+        if chunk[3] == 0 {
+            has_zero_alpha = true;
+        } else {
+            has_opaque = true;
+        }
+        if has_zero_alpha && has_opaque {
+            break;
+        }
+    }
+    if !has_zero_alpha || !has_opaque {
+        return;
+    }
+    let src = rgba[..px_count * 4].to_vec();
+    for y in 0..height {
+        let y_lo = y.saturating_sub(1);
+        let y_hi = (y + 1).min(height - 1);
+        let x_lo_base = 0usize;
+        let _ = x_lo_base;
+        for x in 0..width {
+            let o = (y * width + x) * 4;
+            if src[o + 3] != 0 {
+                continue;
+            }
+            let x_lo = x.saturating_sub(1);
+            let x_hi = (x + 1).min(width - 1);
+            let mut sum_r = 0u32;
+            let mut sum_g = 0u32;
+            let mut sum_b = 0u32;
+            let mut cnt = 0u32;
+            for ny in y_lo..=y_hi {
+                for nx in x_lo..=x_hi {
+                    if nx == x && ny == y {
+                        continue;
+                    }
+                    let no = (ny * width + nx) * 4;
+                    if src[no + 3] > 0 {
+                        sum_r += u32::from(src[no]);
+                        sum_g += u32::from(src[no + 1]);
+                        sum_b += u32::from(src[no + 2]);
+                        cnt += 1;
+                    }
+                }
+            }
+            if let (Some(r), Some(g), Some(b)) = (
+                sum_r.checked_div(cnt),
+                sum_g.checked_div(cnt),
+                sum_b.checked_div(cnt),
+            ) {
+                rgba[o] = r as u8;
+                rgba[o + 1] = g as u8;
+                rgba[o + 2] = b as u8;
+            }
+        }
+    }
+}
+
 fn decode_raw_bytes_into(tex: &RawTextureDesc, src: &[u8], dst: &mut [u8]) -> bool {
     match detect_image_kind(src) {
         Some(ImageKind::Png) => decode_png_into(src, dst, tex.width, tex.height),
@@ -787,8 +849,9 @@ pub fn decode_image_file_rgba(
         return Err(LoaderError::LimitExceeded("texture file exceeds size cap"));
     }
     let bytes = fs::read(path).map_err(|_| LoaderError::Io("failed to read texture file"))?;
-    let (w, h) = probe_dims_from_header(&bytes)?
-        .ok_or(LoaderError::Parse("unsupported or corrupted texture header"))?;
+    let (w, h) = probe_dims_from_header(&bytes)?.ok_or(LoaderError::Parse(
+        "unsupported or corrupted texture header",
+    ))?;
     let byte_len = (w as usize)
         .checked_mul(h as usize)
         .and_then(|px| px.checked_mul(4))
@@ -898,6 +961,11 @@ pub fn decode_textures_into_arena(
             extra_warnings.fetch_or(AETHER_WARN_MISSING_TEXTURES, Ordering::Relaxed);
             fill_fallback_pixel(dst, tex.usage_flags);
             return;
+        }
+        if !matches!(tex.source, RawTextureSource::Missing)
+            && (tex.usage_flags & aether_ffi::AETHER_TEX_USAGE_COLOR) != 0
+        {
+            apply_alpha_bleed_dilation_1pass(dst, tex.width as usize, tex.height as usize);
         }
 
         if write_cache

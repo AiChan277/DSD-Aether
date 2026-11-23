@@ -1339,7 +1339,15 @@ Expected<ID3D12PipelineState*> D3D12Device::create_graphics_pso(const D3D12Graph
     p.BlendState.IndependentBlendEnable = FALSE;
     auto& rt0 = p.BlendState.RenderTarget[0];
     rt0.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    if (desc.alpha_blend || desc.premultiplied_alpha) {
+    if (desc.additive_blend) {
+        rt0.BlendEnable = TRUE;
+        rt0.SrcBlend = D3D12_BLEND_ONE;
+        rt0.DestBlend = D3D12_BLEND_ONE;
+        rt0.BlendOp = D3D12_BLEND_OP_ADD;
+        rt0.SrcBlendAlpha = D3D12_BLEND_ZERO;
+        rt0.DestBlendAlpha = D3D12_BLEND_ONE;
+        rt0.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    } else if (desc.alpha_blend || desc.premultiplied_alpha) {
         rt0.BlendEnable = TRUE;
         rt0.SrcBlend = desc.premultiplied_alpha ? D3D12_BLEND_ONE : D3D12_BLEND_SRC_ALPHA;
         rt0.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;

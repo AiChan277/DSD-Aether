@@ -54,13 +54,7 @@ static_assert(sizeof(GpuSkinnedVertex) == 96);
 static_assert(AETHER_OFFSETOF(GpuSkinnedVertex, pos_zflat) == 0);
 static_assert(AETHER_OFFSETOF(GpuSkinnedVertex, uv) == 80);
 
-struct alignas(16) GpuLight {
-    float pos_or_dir[4]{};
-    float color_intensity[4]{};
-    float direction_radius[4]{};
-    uint32_t role_and_flags[4]{};
-};
-static_assert(sizeof(GpuLight) == 64);
+// Legacy GpuLight removed (Rev 3.1 Single Lighting Authority: StudioLightGPU[16] only)
 
 struct alignas(16) GpuMaterial {
     float lit_color[4]{1.0f, 1.0f, 1.0f, 1.0f};
@@ -176,7 +170,8 @@ struct alignas(16) GpuFrameGlobals {
     uint64_t reservoir_curr_bda{0};
     uint64_t reservoir_prev_bda{0};
     uint32_t studio_aux_u32[2]{0u, 0u};
-    // x = is_orthographic (0/1), y = ortho_height (m), z = stage_diag_mode (0=Lit, 1=Clay 18% Gray, 2=False Color), w = reserved
+    // x = is_orthographic (0/1), y = ortho_height (m), z = stage_diag_mode (0=Lit, 1=Clay 18% Gray, 2=False Color), w =
+    // reserved
     float stage_camera_params[4]{0.0f, 2.20f, 0.0f, 0.0f};
     uint64_t joint_mats_bda{0};
     uint64_t pmx_sdef_bda{0};
@@ -187,11 +182,15 @@ struct alignas(16) GpuFrameGlobals {
     // Active sub-rect UV mapping inside physical render targets: xy = active_size / buf_size, zw = max_valid_uv
     float target_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
     float target_half_uv_scale[4]{1.0f, 1.0f, 1.0f, 1.0f};
-    GpuLight lights[8]{};
+    // VRM-to-MMD 2.5D Parity (Rev 3.1 §8.3)
+    //   vrm_parity_params0: x=auto_toon_harmonizer (0/1), y=cel_crispness_boost, z=shadow_chroma_lift,
+    //   w=pre_cel_clarity vrm_parity_params1: x=hair_angel_ring_boost, y=unified_surface_group_crease (0/1),
+    //   z=auto_edge_scale (0/1), w=pmx_strict_order
+    float vrm_parity_params0[4]{1.0f, 0.85f, 0.22f, 0.25f};
+    float vrm_parity_params1[4]{0.75f, 1.0f, 1.0f, 1.0f};
 };
 static_assert(sizeof(GpuFrameGlobals) % 16 == 0);
 static_assert(sizeof(GpuFrameGlobals) <= 4096);
-static_assert(AETHER_OFFSETOF(GpuFrameGlobals, lights) + 8 * sizeof(GpuLight) == sizeof(GpuFrameGlobals));
 
 struct alignas(64) GpuReSTIRReservoir {
     float sample_pos_len[4]{};  // xyz = hit point world pos, w = W_sum * p_hat^-1
@@ -204,5 +203,6 @@ static_assert(sizeof(GpuReSTIRReservoir) == 64);
 static_assert(sizeof(AetherVertex25D) == 64);
 static_assert(sizeof(AetherNprMaterial) == 192);
 static_assert(sizeof(AetherStudioLightGpu) == 128);
+static_assert(alignof(AetherStudioLightGpu) == 64);
 
 } // namespace aether::renderer

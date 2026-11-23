@@ -62,8 +62,8 @@ class BodySelfCollisionField {
      * Stage 1 Pre-IK tangential slide: pushes wrist targets smoothly onto collision-free tangent surface outside
      * torso (`+3.5 cm`), neck/head, and maintains bilateral hand separation when both arms are active.
      */
-    void resolve_pre_ik_wrists(bool left_active, Vec3& io_left_wrist, bool right_active, Vec3& io_right_wrist) const
-        noexcept;
+    void resolve_pre_ik_wrists(bool left_active, Vec3& io_left_wrist, bool right_active,
+                               Vec3& io_right_wrist) const noexcept;
 
     [[nodiscard]] uint32_t capsule_count() const noexcept { return count_; }
 

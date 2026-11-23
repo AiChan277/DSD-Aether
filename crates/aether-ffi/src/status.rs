@@ -157,6 +157,8 @@ pub const AETHER_SUBMESH_FLAG_OPAQUE: u32 = 1 << 4;
 pub const AETHER_SUBMESH_FLAG_ALPHA_CUTOUT: u32 = 1 << 5;
 /// Submesh flag: transparent forward pass.
 pub const AETHER_SUBMESH_FLAG_TRANSPARENT: u32 = 1 << 6;
+/// Submesh flag: additive/screen transparent overlay (`.spa` / specular card).
+pub const AETHER_SUBMESH_FLAG_ADDITIVE: u32 = 1 << 7;
 
 /// Material alpha mode: opaque.
 pub const AETHER_ALPHA_MODE_OPAQUE: u32 = 0;
@@ -164,6 +166,8 @@ pub const AETHER_ALPHA_MODE_OPAQUE: u32 = 0;
 pub const AETHER_ALPHA_MODE_MASK: u32 = 1;
 /// Material alpha mode: alpha blend.
 pub const AETHER_ALPHA_MODE_BLEND: u32 = 2;
+/// Material alpha mode: additive / screen overlay (`.spa` / eye catchlight / glow card).
+pub const AETHER_ALPHA_MODE_ADDITIVE: u32 = 3;
 
 /// Material flag: double-sided rendering (`cullMode = NONE`).
 pub const AETHER_MAT_FLAG_DOUBLE_SIDED: u32 = 1 << 0;
@@ -179,6 +183,18 @@ pub const AETHER_MAT_FLAG_OUTLINE_SCREEN: u32 = 1 << 4;
 pub const AETHER_MAT_FLAG_UNLIT: u32 = 1 << 5;
 /// Material flag: migrated from VRM `MToon` (`0.x` or `1.0`).
 pub const AETHER_MAT_FLAG_HAS_EXT_VRM: u32 = 1 << 6;
+/// Material flag: additive blending overlay (`AETHER_ALPHA_MODE_ADDITIVE`).
+pub const AETHER_MAT_FLAG_ADDITIVE: u32 = 1 << 7;
+/// Material flag: material does not cast RT/CSM shadows (e.g. PMX `CastShadow == 0`).
+pub const AETHER_MAT_FLAG_NO_SHADOW_CAST: u32 = 1 << 8;
+/// Material flag: inverted-hull outline disabled (PMX `EdgeFlag == 0` or `MToon` `None`).
+pub const AETHER_MAT_FLAG_NO_OUTLINE: u32 = 1 << 9;
+/// Material flag: sourced from `MikuMikuDance` PMX/PMD (preserves strict draw order and MMD semantics).
+pub const AETHER_MAT_FLAG_IS_PMX: u32 = 1 << 14;
+/// Material flag: preserve authored transparent/draw order (`PMX` material sequence).
+pub const AETHER_MAT_FLAG_STRICT_DRAW_ORDER: u32 = 1 << 20;
+/// Material flag: explicit alpha-cutout RT/shader candidate (`AETHER_ALPHA_MODE_MASK`).
+pub const AETHER_MAT_FLAG_ALPHA_CUTOUT: u32 = 1 << 21;
 
 /// Joint region tag for §6.7 2.5D depth-flattening weights: generic/other.
 pub const AETHER_JOINT_REGION_OTHER: u16 = 0;

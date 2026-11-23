@@ -40,10 +40,19 @@ add_custom_target(aether_preview_shaders DEPENDS
 )
 
 add_library(aether_renderer STATIC
+    ${CMAKE_SOURCE_DIR}/src/core/alfx_serializer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/alfx_serializer.hpp
+    ${CMAKE_SOURCE_DIR}/src/core/apr_serializer.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/apr_serializer.hpp
+    ${CMAKE_SOURCE_DIR}/src/core/session_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/session_manager.hpp
+    ${CMAKE_SOURCE_DIR}/src/lighting/lighting_store.cpp
+    ${CMAKE_SOURCE_DIR}/src/lighting/lighting_store.hpp
     accel_struct.cpp
     accel_struct.hpp
     asset_upload/gpu_avatar.cpp
     asset_upload/asset_job.cpp
+    asset_upload/vrm_parity_prep.cpp
     material_override_cache.cpp
     material_override_cache.hpp
     circadian_lighting.cpp

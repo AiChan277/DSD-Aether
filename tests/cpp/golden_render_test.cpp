@@ -83,7 +83,6 @@ render_all_canonical_scenes(uint32_t preferred_vendor_id, bool prefer_integrated
             req.camera = sc.camera;
             req.rt_enabled = rt_on;
             req.show_checkerboard = sc.checkerboard;
-            req.show_orbit_orb = false;
 
             // Render 3 warmup frames so SVGF-lite / SIGMA temporal history converges cleanly
             for (int w = 0; w < 3; ++w) {

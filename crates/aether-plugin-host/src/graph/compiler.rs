@@ -936,9 +936,7 @@ fn parse_shader_profile(node: &GraphNode) -> Option<u32> {
     match s.as_str() {
         "2.5d skin sdf" | "skin_sdf" | "skin" => Some(AETHER_MAT_PROFILE_SKIN_SDF),
         "dual-lobe hair" | "dual_lobe_hair" | "hair" => Some(AETHER_MAT_PROFILE_DUAL_LOBE_HAIR),
-        "micro-pbr cloth" | "micro_pbr_cloth" | "cloth" => {
-            Some(AETHER_MAT_PROFILE_MICRO_PBR_CLOTH)
-        }
+        "micro-pbr cloth" | "micro_pbr_cloth" | "cloth" => Some(AETHER_MAT_PROFILE_MICRO_PBR_CLOTH),
         "eye caustic" | "eye_caustic" | "eye" => Some(AETHER_MAT_PROFILE_EYE_CAUSTIC),
         "metallic" | "metal" => Some(AETHER_MAT_PROFILE_METALLIC),
         "glass" => Some(AETHER_MAT_PROFILE_GLASS),
@@ -1773,8 +1771,7 @@ pub fn compile_graph_document(
                     param_vec4(node, "tint_rgb", [1.0, 1.0, 1.0, 1.0])
                 };
                 let tint_connected = driven_inputs.contains_key(&(node.id, "tint".to_owned()));
-                let mut uv_scale_offset =
-                    param_vec4(node, "uv_scale_offset", [1.0, 1.0, 0.0, 0.0]);
+                let mut uv_scale_offset = param_vec4(node, "uv_scale_offset", [1.0, 1.0, 0.0, 0.0]);
                 if let Some(sc) = node
                     .params
                     .get("uv_scale")
@@ -1799,16 +1796,32 @@ pub fn compile_graph_document(
                         uv_scale_offset[3] = y as f32;
                     }
                 }
-                if let Some(sx) = node.params.get("uv_scale_x").and_then(serde_json::Value::as_f64) {
+                if let Some(sx) = node
+                    .params
+                    .get("uv_scale_x")
+                    .and_then(serde_json::Value::as_f64)
+                {
                     uv_scale_offset[0] = sx as f32;
                 }
-                if let Some(sy) = node.params.get("uv_scale_y").and_then(serde_json::Value::as_f64) {
+                if let Some(sy) = node
+                    .params
+                    .get("uv_scale_y")
+                    .and_then(serde_json::Value::as_f64)
+                {
                     uv_scale_offset[1] = sy as f32;
                 }
-                if let Some(ox) = node.params.get("uv_offset_x").and_then(serde_json::Value::as_f64) {
+                if let Some(ox) = node
+                    .params
+                    .get("uv_offset_x")
+                    .and_then(serde_json::Value::as_f64)
+                {
                     uv_scale_offset[2] = ox as f32;
                 }
-                if let Some(oy) = node.params.get("uv_offset_y").and_then(serde_json::Value::as_f64) {
+                if let Some(oy) = node
+                    .params
+                    .get("uv_offset_y")
+                    .and_then(serde_json::Value::as_f64)
+                {
                     uv_scale_offset[3] = oy as f32;
                 }
                 Op::TextureGrade {
@@ -1948,8 +1961,9 @@ pub fn compile_graph_document(
                         material_index = u32::try_from(pos).unwrap_or(AETHER_INVALID_INDEX);
                     }
                 }
-                let mut base_override_mask =
-                    AETHER_MAT_OVR_SHADE_SHIFT | AETHER_MAT_OVR_SSS_FRINGE | AETHER_MAT_OVR_OUTLINE_SCALE;
+                let mut base_override_mask = AETHER_MAT_OVR_SHADE_SHIFT
+                    | AETHER_MAT_OVR_SSS_FRINGE
+                    | AETHER_MAT_OVR_OUTLINE_SCALE;
                 let shader_profile = if let Some(prof) = parse_shader_profile(node) {
                     base_override_mask |= AETHER_MAT_OVR_PROFILE;
                     prof

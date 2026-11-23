@@ -1038,6 +1038,9 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             double_sided: mat.double_sided(),
             unlit: mat.unlit(),
             has_vrm_mtoon: false,
+            cast_shadow: true,
+            edge_enabled: true,
+            is_pmx: false,
             render_queue_offset: 0,
             flatten_override: None,
             tex_base: pbr.base_color_texture().map(|t| t.texture().index() as u32),
@@ -1103,6 +1106,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                 .and_then(Value::as_str)
                 .unwrap_or("none");
             raw.outline_screen_space = omode == "screenCoordinates";
+            raw.edge_enabled = omode != "none";
             raw.outline_width = if omode == "none" {
                 0.0
             } else {
@@ -1111,6 +1115,17 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                     .and_then(Value::as_f64)
                     .unwrap_or(0.002) as f32
             };
+            if let Some(t) = mtoon
+                .get("outlineWidthMultiplyTexture")
+                .and_then(|t| t.get("index"))
+                .and_then(Value::as_u64)
+                .map(|i| i as u32)
+            {
+                raw.tex_outline_width = Some(t);
+                if let Some(td) = textures.get_mut(t as usize) {
+                    td.srgb = false;
+                }
+            }
             raw.outline_color = val_vec3(mtoon.get("outlineColorFactor"), [0.1, 0.08, 0.08]);
             raw.outline_lighting_mix = mtoon
                 .get("outlineLightingMixFactor")
@@ -1231,6 +1246,7 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0) as f32;
                 raw.outline_screen_space = ow_mode == 2;
+                raw.edge_enabled = ow_mode != 0;
                 // VRM 0.x world outline is authored in cm (0.01 m) (§6.8)
                 raw.outline_width = match ow_mode {
                     1 => ow * 0.01,
@@ -1288,6 +1304,9 @@ pub fn parse_vrm_or_gltf(data: &[u8], base_dir: &Path) -> Result<ParsedAvatar, L
             double_sided: false,
             unlit: false,
             has_vrm_mtoon: false,
+            cast_shadow: true,
+            edge_enabled: true,
+            is_pmx: false,
             render_queue_offset: 0,
             flatten_override: None,
             tex_base: None,

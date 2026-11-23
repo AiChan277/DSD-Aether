@@ -173,7 +173,7 @@ class NodeCanvas {
     bool toggle_pin_watched(const PinRef& pin) noexcept;
     [[nodiscard]] size_t watched_pin_count() const noexcept { return watched_pin_count_; }
     size_t format_watched_pin_value(const PinRef& pin, const StudioHostStatus& host_status, char* out,
-                                      size_t cap) const noexcept;
+                                    size_t cap) const noexcept;
 
     void open_add_node_popup() noexcept { open_add_popup_ = true; }
     /** Smoothly pans/zooms to fit every node on the next draw (`F`). */
@@ -181,6 +181,10 @@ class NodeCanvas {
 
     void draw(const StudioHostStatus& host_status, UndoStack& undo, const KeymapRegistry& keymap,
               const UiFontSet& fonts, float dpi_scale, UiSelection& selection, StudioActions& actions);
+
+    /** Draws Inspector properties for the currently selected node (used by `InspectorPanel` in Nodes mode). */
+    void draw_selected_node_inspector(uint64_t preferred_node_id, const UiFontSet& fonts, UndoStack& undo,
+                                      StudioActions& actions);
 
     /** Screen position of a pin / wire midpoint as laid out by the last `draw()` (tests, tooling). */
     [[nodiscard]] ImVec2 pin_screen_position(const PinRef& pin) const noexcept;
@@ -253,6 +257,7 @@ class NodeCanvas {
     void prune_watched_pins() noexcept;
     void draw_node(ImDrawList* dl, const CanvasXform& xf, GraphNodeVm& n, bool hovered, const UiFontSet& fonts,
                    const StudioHostStatus& host_status, float dpi, UndoStack& undo, StudioActions& actions);
+    void draw_node_extra_controls(GraphNodeVm& n, float field_w, UndoStack& undo, StudioActions& actions);
     void draw_context_menus(const CanvasXform& xf, UndoStack& undo, StudioActions& actions);
     void draw_add_node_menu(UndoStack& undo, StudioActions& actions);
 
