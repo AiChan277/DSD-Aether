@@ -43,14 +43,13 @@ namespace {
     return h;
 }
 
-}  // namespace
+} // namespace
 
-void apply_material_overrides_non_destructive(
-    std::span<const AetherNprMaterial> base_materials,
-    std::string_view avatar_strings,
-    const AetherMaterialOverrideBuffer& overrides,
-    std::vector<AetherNprMaterial>& out_materials,
-    std::vector<GpuMaterialGrade>& out_grades) noexcept {
+void apply_material_overrides_non_destructive(std::span<const AetherNprMaterial> base_materials,
+                                              std::string_view avatar_strings,
+                                              const AetherMaterialOverrideBuffer& overrides,
+                                              std::vector<AetherNprMaterial>& out_materials,
+                                              std::vector<GpuMaterialGrade>& out_grades) {
     const size_t n = base_materials.size();
     if (out_materials.size() != n) {
         out_materials.resize(n);
@@ -97,12 +96,11 @@ void apply_material_overrides_non_destructive(
             GpuMaterialGrade& grade = out_grades[mi];
             const uint32_t mask = ovr.override_mask;
 
-            if ((mask & AETHER_MAT_OVR_PROFILE) != 0U &&
-                ovr.shader_profile != AETHER_MAT_PROFILE_KEEP &&
+            if ((mask & AETHER_MAT_OVR_PROFILE) != 0U && ovr.shader_profile != AETHER_MAT_PROFILE_KEEP &&
                 ovr.shader_profile <= AETHER_MAT_PROFILE_EMISSIVE) {
                 dst.flags &= ~(0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT);
-                dst.flags |= AETHER_MAT_FLAG_HAS_PROFILE |
-                             ((ovr.shader_profile & 0x7u) << AETHER_MAT_FLAG_PROFILE_SHIFT);
+                dst.flags |=
+                    AETHER_MAT_FLAG_HAS_PROFILE | ((ovr.shader_profile & 0x7u) << AETHER_MAT_FLAG_PROFILE_SHIFT);
             }
 
             if ((mask & AETHER_MAT_OVR_SHADE_COLOR) != 0U) {
@@ -191,10 +189,8 @@ void MaterialOverrideCache::shutdown() noexcept {
     rhi_ = nullptr;
 }
 
-uint64_t MaterialOverrideCache::register_texture_source(
-    std::string_view path_or_spout_name,
-    bool is_srgb,
-    bool is_spout) noexcept {
+uint64_t MaterialOverrideCache::register_texture_source(std::string_view path_or_spout_name, bool is_srgb,
+                                                        bool is_spout) noexcept {
     const uint64_t h = fnv1a_handle_64(path_or_spout_name, is_srgb, is_spout);
     if (h == 0ULL) {
         return 0ULL;
@@ -210,10 +206,8 @@ uint64_t MaterialOverrideCache::register_texture_source(
     // Claim an empty slot with lock-free CAS
     for (auto& slot : slots_) {
         uint32_t expected = static_cast<uint32_t>(SlotState::Empty);
-        if (slot.state.compare_exchange_strong(
-                expected,
-                static_cast<uint32_t>(SlotState::Decoding),
-                std::memory_order_acq_rel)) {
+        if (slot.state.compare_exchange_strong(expected, static_cast<uint32_t>(SlotState::Decoding),
+                                               std::memory_order_acq_rel)) {
             slot.is_srgb = is_srgb;
             slot.is_spout = is_spout;
             const size_t copy_len = std::min(path_or_spout_name.size(), sizeof(slot.path_utf8) - 1U);
@@ -227,16 +221,14 @@ uint64_t MaterialOverrideCache::register_texture_source(
     return h;
 }
 
-void MaterialOverrideCache::worker_loop() noexcept {
+void MaterialOverrideCache::worker_loop() {
     aether_set_thread_role(AETHER_THREAD_ROLE_LOADER);
     while (!stop_worker_.load(std::memory_order_acquire)) {
         bool did_work = false;
         for (auto& slot : slots_) {
             uint32_t expected = static_cast<uint32_t>(SlotState::Queued);
-            if (!slot.state.compare_exchange_strong(
-                    expected,
-                    static_cast<uint32_t>(SlotState::Decoding),
-                    std::memory_order_acq_rel)) {
+            if (!slot.state.compare_exchange_strong(expected, static_cast<uint32_t>(SlotState::Decoding),
+                                                    std::memory_order_acq_rel)) {
                 continue;
             }
             did_work = true;
@@ -245,26 +237,19 @@ void MaterialOverrideCache::worker_loop() noexcept {
                 // when no external Spout2 sender process is active on the host machine.
                 slot.width = 4U;
                 slot.height = 4U;
-                slot.rgba_pixels.assign(4U * 4U * 4U, 255U);
+                slot.rgba_pixels.assign(size_t{64}, 255U);
                 slot.state.store(static_cast<uint32_t>(SlotState::ReadyToUpload), std::memory_order_release);
                 continue;
             }
 
             uint32_t w = 0, h = 0, fmt = 0;
             uintptr_t req_bytes = 0;
-            AetherStatus rc = aether_texture_decode_file(
-                slot.path_utf8, slot.is_srgb ? 1U : 0U, &w, &h, &fmt, nullptr, 0U, &req_bytes);
+            AetherStatus rc = aether_texture_decode_file(slot.path_utf8, slot.is_srgb ? 1U : 0U, &w, &h, &fmt, nullptr,
+                                                         0U, &req_bytes);
             if (rc == AETHER_OK && req_bytes > 0U && w > 0U && h > 0U) {
                 slot.rgba_pixels.resize(req_bytes);
-                rc = aether_texture_decode_file(
-                    slot.path_utf8,
-                    slot.is_srgb ? 1U : 0U,
-                    &w,
-                    &h,
-                    &fmt,
-                    slot.rgba_pixels.data(),
-                    req_bytes,
-                    &req_bytes);
+                rc = aether_texture_decode_file(slot.path_utf8, slot.is_srgb ? 1U : 0U, &w, &h, &fmt,
+                                                slot.rgba_pixels.data(), req_bytes, &req_bytes);
                 if (rc == AETHER_OK) {
                     slot.width = w;
                     slot.height = h;
@@ -293,11 +278,8 @@ void MaterialOverrideCache::poll_uploads() noexcept {
             continue;
         }
         const VkFormat fmt = slot.is_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-        auto img_res = rhi_->create_image_2d(
-            std::max(1U, slot.width),
-            std::max(1U, slot.height),
-            fmt,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        auto img_res = rhi_->create_image_2d(std::max(1U, slot.width), std::max(1U, slot.height), fmt,
+                                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         if (img_res) {
             slot.gpu_image = img_res.value();
             slot.state.store(static_cast<uint32_t>(SlotState::Uploaded), std::memory_order_release);
@@ -320,4 +302,4 @@ const rhi::RhiImage* MaterialOverrideCache::find_uploaded_image(uint64_t handle)
     return nullptr;
 }
 
-}  // namespace aether::renderer
+} // namespace aether::renderer

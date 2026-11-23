@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 
 using namespace aether::animation;
@@ -236,4 +237,45 @@ TEST_CASE("SpringBone collider contact detection and overlay export work across 
         sim->step(1.0f / 60.0f, Vec3{0.0f, 0.0f, 0.0f}, 1.0f, bones, rots, kMaxBones, path);
         CHECK_FALSE(sim->collider_in_contact(0U));
     }
+}
+
+TEST_CASE("Rev 3.1 SpringBone clamps dt <= 1/30 s and recovers cleanly from NaN joint state",
+          "[animation][spring][rev31]") {
+    auto sim = std::make_unique<SpringBoneSimulator>();
+    sim->clear();
+    SpringJointDesc jd{};
+    jd.bone_index = 64;
+    jd.parent_joint_index = -1;
+    jd.parent_bone_index = static_cast<int32_t>(AETHER_BONE_HEAD);
+    jd.center_bone_index = static_cast<int32_t>(AETHER_BONE_HIPS);
+    jd.local_bone_offset = {0.0f, -0.05f, 0.0f};
+    jd.bone_length = 0.12f;
+    jd.stiffness = 0.45f;
+    jd.drag_force = 0.40f;
+    jd.gravity_power = 0.30f;
+    REQUIRE(sim->add_joint(jd));
+
+    std::array<Vec3, kMaxBones> bones{};
+    std::array<Quat, kMaxBones> rots{};
+    rots.fill(Quat::identity());
+    bones[AETHER_BONE_HIPS] = {0.0f, 1.0f, 0.0f};
+    bones[AETHER_BONE_HEAD] = {0.0f, 1.5f, 0.0f};
+    sim->reset_state(bones, rots, kMaxBones);
+
+    // Huge tab-out dt (5.0 s) and NaN dt never explode SpringBone Verlet state
+    sim->step(5.0f, Vec3{0.0f, 0.0f, 0.0f}, 1.0f, bones, rots, kMaxBones, SpringBoneSimulator::SimdPath::Avx2);
+    sim->step(std::numeric_limits<float>::quiet_NaN(), Vec3{0.0f, 0.0f, 0.0f}, 1.0f, bones, rots, kMaxBones,
+              SpringBoneSimulator::SimdPath::Scalar);
+
+    std::array<SpringColliderOverlay, kMaxOverlayColliders> col_out{};
+    std::array<SpringSegmentOverlay, kMaxOverlaySpringSegments> seg_out{};
+    uint32_t col_cnt = 0;
+    uint32_t seg_cnt = 0;
+    sim->export_overlay(col_out.data(), kMaxOverlayColliders, col_cnt, seg_out.data(), kMaxOverlaySpringSegments,
+                        seg_cnt, bones);
+    REQUIRE(seg_cnt == 1U);
+    CHECK(std::isfinite(seg_out[0].tail[0]));
+    CHECK(std::isfinite(seg_out[0].tail[1]));
+    CHECK(std::isfinite(seg_out[0].tail[2]));
+    CHECK(std::abs(seg_out[0].tail[1] - bones[AETHER_BONE_HEAD].y) < 1.0f);
 }

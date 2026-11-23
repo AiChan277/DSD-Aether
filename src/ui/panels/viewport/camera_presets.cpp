@@ -51,7 +51,7 @@ const char* builtin_framing_preset_shortcut(int32_t index) noexcept {
 
 CameraFramingPreset compute_builtin_framing_preset(int32_t index, float hips_y, float chest_y, float head_y,
                                                    const std::array<float, 3>& avatar_pos, float avatar_scale,
-                                                   float viewport_aspect) noexcept {
+                                                   float viewport_aspect) {
     const int32_t idx = std::clamp(index, 0, static_cast<int32_t>(kBuiltinFramingPresetCount) - 1);
     const float sc = std::clamp(avatar_scale, 0.25f, 4.0f);
     const float base_hips = std::clamp(hips_y, 0.25f, 2.5f);

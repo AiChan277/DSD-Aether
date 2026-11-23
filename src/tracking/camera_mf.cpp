@@ -46,9 +46,8 @@ using Microsoft::WRL::ComPtr;
 
 [[nodiscard]] std::string to_lower_ascii(std::string_view sv) {
     std::string out(sv);
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return out;
 }
 
@@ -60,9 +59,8 @@ using Microsoft::WRL::ComPtr;
     const std::string fn = to_lower_ascii(friendly_name);
     const std::string sl = to_lower_ascii(symbolic_link);
     static constexpr const char* kVirtualHints[] = {
-        "smart connect", "obs virtual", "obs-camera", "broadcast", "snap camera",
-        "virtual",       "root\\camera", "manycam",   "iriun",     "droidcam",
-        "epoccam",       "youcam",      "vcam",
+        "smart connect", "obs virtual", "obs-camera", "broadcast", "snap camera", "virtual", "root\\camera",
+        "manycam",       "iriun",       "droidcam",   "epoccam",   "youcam",      "vcam",
     };
     for (const char* hint : kVirtualHints) {
         if (fn.find(hint) != std::string::npos || sl.find(hint) != std::string::npos) {
@@ -203,7 +201,8 @@ class MfReaderCallback final : public IMFSourceReaderCallback {
                     if (SUCCEEDED(buf->Lock(&raw, &max_len, &cur_len))) {
                         const LONG abs_pitch = static_cast<LONG>(row_bytes_for_format(format_, dst.width));
                         if (bottom_up_ && format_ == CameraPixelFormat::BGRA32 && dst.height > 0U) {
-                            const BYTE* scan0 = raw + static_cast<size_t>(dst.height - 1U) * static_cast<size_t>(abs_pitch);
+                            const BYTE* scan0 =
+                                raw + static_cast<size_t>(dst.height - 1U) * static_cast<size_t>(abs_pitch);
                             copy_locked_planes(scan0, raw, -abs_pitch, cur_len, dst);
                         } else {
                             copy_locked_planes(raw, raw, abs_pitch, cur_len, dst);
@@ -323,8 +322,8 @@ struct NativeCameraMode {
     if (include_fps && fps_num > 0U && fps_den > 0U) {
         (void)::MFSetAttributeRatio(target_type.Get(), MF_MT_FRAME_RATE, fps_num, fps_den);
     }
-    return SUCCEEDED(
-        reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, target_type.Get()));
+    return SUCCEEDED(reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr,
+                                                 target_type.Get()));
 }
 
 [[nodiscard]] bool negotiate_stream_format(IMFSourceReader* reader, uint32_t req_width, uint32_t req_height,
@@ -416,9 +415,8 @@ struct NativeCameraMode {
         native_modes.push_back(mode);
     }
 
-    std::stable_sort(native_modes.begin(), native_modes.end(), [](const NativeCameraMode& a, const NativeCameraMode& b) {
-        return a.score > b.score;
-    });
+    std::stable_sort(native_modes.begin(), native_modes.end(),
+                     [](const NativeCameraMode& a, const NativeCameraMode& b) { return a.score > b.score; });
 
     bool negotiated = false;
     for (const NativeCameraMode& m : native_modes) {
@@ -508,8 +506,8 @@ struct NativeCameraMode {
 class MfCameraSource final : public ICameraSource {
   public:
     MfCameraSource(std::string symlink, uint32_t w, uint32_t h, uint32_t fps)
-        : symlink_(std::move(symlink)), req_width_(w), req_height_(h), req_fps_(fps), width_(w), height_(h),
-          fps_(fps) {}
+        : symlink_(std::move(symlink)), req_width_(w), req_height_(h), req_fps_(fps), width_(w), height_(h), fps_(fps) {
+    }
 
     ~MfCameraSource() override { close(); }
 
@@ -568,7 +566,8 @@ class MfCameraSource final : public ICameraSource {
         std::vector<bool> used(candidates.size(), false);
         if (!symlink_.empty()) {
             for (size_t i = 0; i < candidates.size(); ++i) {
-                if (candidates[i].symbolic_link == symlink_ || equals_ignore_case(candidates[i].friendly_name, symlink_)) {
+                if (candidates[i].symbolic_link == symlink_ ||
+                    equals_ignore_case(candidates[i].friendly_name, symlink_)) {
                     ordered.push_back(i);
                     used[i] = true;
                 }

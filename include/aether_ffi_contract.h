@@ -313,6 +313,11 @@
 #define AETHER_SUBMESH_FLAG_TRANSPARENT (1 << 6)
 
 /*
+ Submesh flag: additive/screen transparent overlay (`.spa` / specular card).
+ */
+#define AETHER_SUBMESH_FLAG_ADDITIVE (1 << 7)
+
+/*
  Material alpha mode: opaque.
  */
 #define AETHER_ALPHA_MODE_OPAQUE 0
@@ -326,6 +331,11 @@
  Material alpha mode: alpha blend.
  */
 #define AETHER_ALPHA_MODE_BLEND 2
+
+/*
+ Material alpha mode: additive / screen overlay (`.spa` / eye catchlight / glow card).
+ */
+#define AETHER_ALPHA_MODE_ADDITIVE 3
 
 /*
  Material flag: double-sided rendering (`cullMode = NONE`).
@@ -361,6 +371,36 @@
  Material flag: migrated from VRM `MToon` (`0.x` or `1.0`).
  */
 #define AETHER_MAT_FLAG_HAS_EXT_VRM (1 << 6)
+
+/*
+ Material flag: additive blending overlay (`AETHER_ALPHA_MODE_ADDITIVE`).
+ */
+#define AETHER_MAT_FLAG_ADDITIVE (1 << 7)
+
+/*
+ Material flag: material does not cast RT/CSM shadows (e.g. PMX `CastShadow == 0`).
+ */
+#define AETHER_MAT_FLAG_NO_SHADOW_CAST (1 << 8)
+
+/*
+ Material flag: inverted-hull outline disabled (PMX `EdgeFlag == 0` or `MToon` `None`).
+ */
+#define AETHER_MAT_FLAG_NO_OUTLINE (1 << 9)
+
+/*
+ Material flag: sourced from `MikuMikuDance` PMX/PMD (preserves strict draw order and MMD semantics).
+ */
+#define AETHER_MAT_FLAG_IS_PMX (1 << 14)
+
+/*
+ Material flag: preserve authored transparent/draw order (`PMX` material sequence).
+ */
+#define AETHER_MAT_FLAG_STRICT_DRAW_ORDER (1 << 20)
+
+/*
+ Material flag: explicit alpha-cutout RT/shader candidate (`AETHER_ALPHA_MODE_MASK`).
+ */
+#define AETHER_MAT_FLAG_ALPHA_CUTOUT (1 << 21)
 
 /*
  Joint region tag for §6.7 2.5D depth-flattening weights: generic/other.
@@ -2896,6 +2936,26 @@ extern AetherStatus aether_texture_decode_file(const char *path_utf8,
                                                uint8_t *out_rgba,
                                                uintptr_t cap,
                                                uintptr_t *out_len);
+
+/*
+ Serializes the active node graph document into canonical UTF-8 JSON (`*out_json_utf8`),
+ which must be freed with [`aether_string_free`]. `[any]`
+ */
+extern AetherStatus aether_graph_serialize_json(AetherHostHandle host,
+                                                char **out_json_utf8,
+                                                uintptr_t *out_len);
+
+/*
+ Parses and applies a node graph JSON document cleanly onto `host`. `[any]`
+ */
+extern AetherStatus aether_graph_deserialize_json(AetherHostHandle host,
+                                                  const char *json_utf8,
+                                                  uintptr_t len);
+
+/*
+ Frees a NUL-terminated UTF-8 string returned by `aether_graph_serialize_json`. `[any]`
+ */
+extern void aether_string_free(char *ptr);
 
 /*
  Returns pointer and byte length to `layout_table.json` embedded at build time (`REQ-FFI-005`). `[any]`

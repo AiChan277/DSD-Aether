@@ -6,7 +6,7 @@
 NPU-accelerated tracking, Live2D-grade 2.5D rendering on Vulkan / DirectX 12 / DirectX 11,
 and zero-copy alpha video output for OBS and every major streaming app.**
 
-`a1.0.3B` · Windows 10/11 x64 · C++20 · Rust 2024 · Slang
+`a1.0.4B` · Windows 10/11 x64 · C++20 · Rust 2024 · Slang
 
 [![License: Source-Available, No-Derivatives, No-AI](https://img.shields.io/badge/license-Source--Available%20%C2%B7%20No--Derivatives%20%C2%B7%20No--AI-red)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6)
@@ -108,7 +108,8 @@ The engine was built to one binding specification,
 | **3-tier lighting** | **Traditional** (raster toon + SDF face + SH ambient + MatCap/Fresnel rim, zero RT cost) · **Hybrid Ray Tracing** (RT soft shadows with curvature-scaled bias) · **2.5D Path Tracing** (1 shadow + 1 bounce ray, temporally locked SVGF) |
 | **16-luminaire studio photometry** | 12 physical/natural fixture profiles (ARRI SkyPanel, Fresnel, Dedolight, Ellipsoidal Leko + gobos, Softboxes, Octabox, Lantern, Ring, CIE Sky), `64×64` Heitz LTC & `256×64` ANSI/IES LUTs, honeycomb grids, 4-leaf barn doors, diffusion, color gels, passive bounce/negative-fill flags, cornea catchlights, and Satsuei light wrap / halation / backscatter |
 | **4-AOV RT & Neck-Seam Blending** | 4 explicit visibility masks (`FaceSkin`, `Hair`, `HandsProps`, `BodyCloth`) + skeletal neck-to-head proxy normal & skin-chroma-gated de-shadowing (`neck_seam_blend`) across Vulkan and DX12 |
-| **Lighting Workspace & Stage View** | Isolated 3D schematic stage (floor grid, fixture apertures, camera frustum, transform gizmo), 6-axis orthographic views, **Quad View** (`Ctrl+Alt+Q`), **Clay / EL-Zone** false-color exposure diagnostics, `LIVE CAM` 16:9 Broadcast PiP, and 16-slot Light Mixer Console (`config/lighting_rigs.json`) |
+| **Lighting Workspace & Stage View** | Isolated 3D schematic stage (floor grid, fixture apertures, camera frustum, transform gizmo), 6-axis orthographic views, **Quad View** (`Ctrl+Alt+Q`), **Clay / EL-Zone** false-color exposure diagnostics, `LIVE CAM` 16:9 Broadcast PiP, and 16-slot Light Mixer Console (`presets/alfx/*.alfx` packages with 4-mode import) |
+| **DaVinci-Style Project Manager & Archives** | Thumbnailed `.apr` project hub (`Local`, `Recent`, `Pinned`, `TEMPLATES`, `PRESET VAULT (.alfx)`), Crash Recovery banner, `.aether` legacy migration, Windows Explorer `.apr`/`.alfx` associations, and global preferences persisted in `session_state.json` |
 | **Non-destructive node materials** | Lock-free `MaterialOverrideCache` applies node-graph material overrides, color grades, async textures, and live Spout2 feeds on top of base/morph materials with zero per-frame allocs |
 | Pre-quantization colour bleeding | One-bounce indirect light is added to the effective luminance **before** the cel step, and its chroma tints the shadow colour — lush colour bleeding with razor-sharp 2D bands |
 | Dynamic hair "angel ring" | Shifted dual-lobe Kajiya-Kay anisotropic highlight, driven by view, light, and live SpringBone hair velocity, then 2D-stepped |
@@ -296,8 +297,8 @@ stays a crisp 2D step.
 
 ### Circadian / solar-time lighting
 
-When **Enable Circadian Lighting** is on, the key, fill, and rim lights follow the sun for the
-chosen timezone (or a manual **Time Preview Override**):
+When **Enable Circadian Lighting** is on, the single locked `NaturalSunCieSky` solar slot in `StudioLightingStore` follows the sun for the
+chosen timezone (or a manual **Time Preview Override**) while leaving studio fill/rim fixtures untouched:
 
 | Phase | Hours | Look |
 |---|---|---|
@@ -350,12 +351,13 @@ hair capsules iteratively until no penetration remains.
 
 Prebuilt packages are published on the [GitHub Releases](https://github.com/AiChan277/DSD-Aether/releases) page:
 
-- **Windows Installer (`AetherStudio-a1.0.3B-x64.msi`) — Recommended:**
+- **Windows Installer (`AetherStudio-a1.0.4B-x64.msi`) — Recommended:**
   Standard declarative WiX v5 Windows Installer (`msiexec.exe`). Installs AETHER-2.5D Studio with
-  app-local Visual C++ runtime DLLs, bundled tracking models and fonts, Start Menu and Desktop
-  shortcuts, clean Apps & Features uninstall, and automatic **x64 + x86 DirectShow Virtual Camera**
-  registration. User settings, presets, and caches live in `%LOCALAPPDATA%\AetherStudio`.
-- **Portable Archive (`AetherStudio-a1.0.3B-win64-portable.zip`):**
+  app-local Visual C++ runtime DLLs, bundled tracking models, fonts, and `.alfx` preset packages,
+  Start Menu and Desktop shortcuts, `.apr`/`.alfx` Windows Explorer file associations, clean Apps
+  & Features uninstall, and automatic **x64 + x86 DirectShow Virtual Camera** registration. Global
+  preferences live in `%APPDATA%\AETHER-2.5D-Studio\session_state.json`.
+- **Portable Archive (`AetherStudio-a1.0.4B-win64-portable.zip`):**
   Unzip anywhere and launch `aether_studio.exe`. Ships with `portable.flag` so all user data
   stays self-contained in `.\UserData`. Spout2 works without admin rights; optional Virtual Camera
   registration commands are in `README-PORTABLE.txt`.
@@ -363,7 +365,7 @@ Prebuilt packages are published on the [GitHub Releases](https://github.com/AiCh
 Verify the download checksum against `SHA256SUMS.txt` on the release page:
 
 ```powershell
-Get-FileHash .\AetherStudio-a1.0.3B-x64.msi -Algorithm SHA256
+Get-FileHash .\AetherStudio-a1.0.4B-x64.msi -Algorithm SHA256
 ```
 
 > [!NOTE]
@@ -424,7 +426,10 @@ build\windows-release\aether_studio.exe --avatar "C:\path\to\avatar.vrm"
 
 | Flag | Effect |
 |---|---|
-| `--avatar <path.vrm>` | Load a VRM avatar on start-up |
+| `[path.apr\|.aether\|.alfx\|.vrm\|...]` | Positional file launch from Explorer or shell (opens `.apr`/`.aether`, pops 4-mode `.alfx` import modal, or loads avatar) |
+| `--project <path.apr\|.aether>` | Open a `.apr` archive or migrate a legacy `.aether` file straight into the Studio Workspace |
+| `--alfx <path.alfx>` | Open Studio and display the 4-mode `.alfx` import modal (`ReplaceAll` / `LightsOnly` / `ColorPostFxOnly` / `AdditiveAppendLights`) |
+| `--avatar <path.vrm>` | Load a VRM / PMX / glTF / FBX avatar on start-up |
 | `--render-backend vulkan\|dx12\|dx11` | Choose the avatar render backend |
 | `--smoke-frames <n>` | Render *n* frames and exit (CI smoke test) |
 | `--require-validation` | Fail if Vulkan validation layers are unavailable |
@@ -434,8 +439,9 @@ build\windows-release\aether_studio.exe --avatar "C:\path\to\avatar.vrm"
 
 ## Using the studio
 
-- **Workspaces:** **Live Studio**, **Rigging**, **Lighting**, and **Nodes** — dockable panels built on Dear ImGui.
-- **Lighting Workspace:** Isolated 3D stage with schematic fixtures, 6-axis ortho views, Quad View (`Ctrl+Alt+Q`), Clay / EL-Zone false-color diagnostics, 16-slot Light Mixer (`Save Rig` / `Load...`), and a `LIVE CAM` 16:9 Broadcast PiP monitor.
+- **Project Manager & Archives:** Launch into the DaVinci-style Project Manager (`Local`, `Recent`, `Pinned`, `TEMPLATES`, `PRESET VAULT (.alfx)`), manage `.apr` project bundles, recover crashed sessions, migrate `.aether` files, or customize global preferences stored in `session_state.json`.
+- **Workspaces:** **Live Studio**, **Rigging**, **Lighting**, and **Nodes** — dockable panels built on Dear ImGui with contextual per-tab Inspector sections.
+- **Lighting Workspace:** Isolated 3D stage with schematic fixtures, 6-axis ortho views, Quad View (`Ctrl+Alt+Q`), Clay / EL-Zone false-color diagnostics, 16-slot Light Mixer (`presets/alfx/*.alfx` presets, 4-mode import), and a `LIVE CAM` 16:9 Broadcast PiP monitor.
 - **Graphics Settings** (top menu) and **Inspector ▸ Lighting & NPR** expose:
   *Render Backend*, *Lighting Mode*, *2D Filter Pro*, *Neck Seam Blend*, *Circadian Lighting* (enable, timezone, time override), denoiser, bloom, outline, and shading-debug views.
 - **Tracking & Pipeline:** *NPU Safe-Zone Box* (enable, width / height / depth, soft wall
@@ -456,7 +462,7 @@ ctest --test-dir build\windows-debug --output-on-failure
 cargo test --workspace --offline
 ```
 
-32 C++ test suites (Catch2) and the Rust workspace tests cover, among others:
+33 C++ test suites (Catch2) and the Rust workspace tests cover, among others:
 
 | Suite | What it proves |
 |---|---|
@@ -464,14 +470,15 @@ cargo test --workspace --offline
 | `hot_path_guard_test`, `triple_buffer_test`, `spsc_mailbox_test` | Lock-free, allocation-free hot paths |
 | `tracking_router_test`, `tracking_preprocess_test` | EP fallback chain, latency budgets, AVX2 pre-processing |
 | `animation_filters_ik_test`, `spring_bone_simd_test` | Filter jitter / lag, IK, SIMD SpringBone parity |
-| `renderer_npr_effects_test`, `golden_render_test` | NPR features, FLIP golden images, cross-vendor parity |
+| `renderer_npr_effects_test`, `golden_render_test` | NPR features, FLIP golden images, VRM–PMX parity (Empirical Test #3), cross-vendor parity |
 | `denoiser_and_rt_test` | RT and denoiser budgets and fallbacks |
 | `output_spout_vcam_test`, `phase5_pipeline_m2p_test` | Spout2, virtual camera, motion-to-photon |
 | `dx11_backend_test`, `gc_and_dx11_renderer_test` | DirectX 11 backend and garbage collector |
-| `dx12_and_capabilities_test` | DX12 vs Vulkan anti-flip parity, neck-seam blending, DX12 avatar swap, Intel iGPU tiering, 3-tier lighting, colour bleeding, angel ring, 2D Filter Pro, circadian math, NPU Safe-Zone and zero-penetration anti-clipping |
+| `dx12_and_capabilities_test` | DX12 vs Vulkan anti-flip parity, neck-seam blending, DX12 VRM–PMX parity (Empirical Test #3), DX12 avatar swap, Intel iGPU tiering, 3-tier lighting, colour bleeding, angel ring, 2D Filter Pro, circadian math, NPU Safe-Zone and zero-penetration anti-clipping |
 | `lighting_tab_verification_test` | Isolated Lighting Stage rendering, Quad/PiP isolation, overlay bounds, 1:1 aspect across Vulkan & DX12 |
 | `phase3_material_and_pmx_test` | Native PMX 2.0/2.1 SDEF/CCD-IK/Append/RigidBody physics and zero-alloc non-destructive material/texture overrides |
-| `studio_ui_test`, `studio_ui_snapshot_test` | UI frame budget and headless PNG snapshots |
+| `project_archive_test` | `.apr` archives, `.alfx` 4-mode import & presets, `.aether` migration, crash recovery, legacy `settings.toml` -> `session_state.json` consolidation |
+| `studio_ui_test`, `studio_ui_snapshot_test` | UI frame budget, contextual Inspector, and headless PNG snapshots |
 
 Headless snapshots are written to `build/windows-debug/tests/ui_snapshots/`.
 
@@ -494,6 +501,7 @@ src/
   plugin_runner/ Out-of-process native plugin runner
   ui/           Studio workspace (Live Studio, Rigging, Lighting, Nodes), panels, modals, widgets, theme
 shaders/    Slang sources (compiled to SPIR-V and DXIL)
+presets/    Default .alfx lighting, environment, and post-FX packages
 tests/      Catch2 suites, golden images, test corpus
 tools/      CI, shader build, code generators, model conversion
 installer/  WiX v5 MSI installer & portable ZIP packaging (virtual-camera COM registration)

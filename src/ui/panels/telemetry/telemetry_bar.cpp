@@ -34,6 +34,10 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
         ImGui::Separator();
 
         if (ImGui::BeginMenu(tr("File"))) {
+            if (ImGui::MenuItem(tr("Project Manager..."), "Shift+1", false, !host_status.on_air)) {
+                menu_act = TopMenuAction::OpenProjectManager;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(tr("New Project"), "Ctrl+N", false, !host_status.on_air)) {
                 menu_act = TopMenuAction::NewProject;
             }
@@ -49,6 +53,12 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             ImGui::Separator();
             if (ImGui::MenuItem(tr("Import Avatar..."), "Ctrl+I", false, !host_status.on_air)) {
                 menu_act = TopMenuAction::ImportAvatar;
+            }
+            if (ImGui::MenuItem(tr("Export Lighting & FX (.alfx)..."))) {
+                menu_act = TopMenuAction::ExportAlfx;
+            }
+            if (ImGui::MenuItem(tr("Import Lighting & FX (.alfx)..."))) {
+                menu_act = TopMenuAction::ImportAlfx;
             }
             ImGui::EndMenu();
         }
@@ -76,7 +86,7 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
                 settings_dirty = true;
             }
             const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
-            if (ImGui::MenuItem(tr("Light Orb"), "Alt+L", orb_on)) {
+            if (ImGui::MenuItem(tr("Quick Key Orb"), "Alt+L", orb_on)) {
                 (void)params.set(ParamId::AppOrbitOrbVisible, orb_on ? 0.0 : 1.0);
                 settings_dirty = true;
             }
@@ -139,16 +149,6 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
                 actions.viewport.target_hand_tracking_enabled = next_hand;
                 settings_dirty = true;
             }
-            const bool hud_on = params.get_bool(ParamId::AppTrackingHudVisible);
-            if (ImGui::MenuItem(tr("Tracking HUD"), nullptr, hud_on)) {
-                (void)params.set(ParamId::AppTrackingHudVisible, hud_on ? 0.0 : 1.0);
-                settings_dirty = true;
-            }
-            const bool orb_on = params.get_bool(ParamId::AppOrbitOrbVisible);
-            if (ImGui::MenuItem(tr("Light Orb"), "Alt+L", orb_on)) {
-                (void)params.set(ParamId::AppOrbitOrbVisible, orb_on ? 0.0 : 1.0);
-                settings_dirty = true;
-            }
             ImGui::Separator();
             if (ImGui::MenuItem(tr("Hardware Optimizer..."), nullptr, false, !host_status.on_air)) {
                 menu_act = TopMenuAction::OpenWizard;
@@ -189,59 +189,6 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
             const bool eco = params.get_bool(ParamId::RenderBackgroundEco);
             if (ImGui::MenuItem(tr("Background Eco (30 FPS)"), nullptr, eco)) {
                 (void)params.set(ParamId::RenderBackgroundEco, eco ? 0.0 : 1.0);
-                settings_dirty = true;
-            }
-            const bool rt_on = params.get_bool(ParamId::RenderRtEnabled);
-            if (ImGui::MenuItem(tr("Ray Tracing"), nullptr, rt_on, rhi.rt_supported())) {
-                (void)params.set(ParamId::RenderRtEnabled, rt_on ? 0.0 : 1.0);
-                if (rt_on) {
-                    (void)params.set(ParamId::RenderLightingMode, 0.0);
-                } else if (params.get_int(ParamId::RenderLightingMode) == 0) {
-                    (void)params.set(ParamId::RenderLightingMode, 1.0);
-                }
-                actions.viewport.lighting_dirty = true;
-                settings_dirty = true;
-            }
-            if (ImGui::BeginMenu(tr("Lighting Mode"))) {
-                const int cur_lm = params.get_int(ParamId::RenderLightingMode);
-                static constexpr const char* kLightLabels[3] = {
-                    "Traditional (Fast)",
-                    "Hybrid Ray Tracing",
-                    "2.5D Path Tracing",
-                };
-                for (int li = 0; li < 3; ++li) {
-                    const bool ok = (li == 0) || rhi.rt_supported();
-                    if (ImGui::MenuItem(kLightLabels[li], nullptr, cur_lm == li, ok)) {
-                        (void)params.set(ParamId::RenderLightingMode, static_cast<double>(li));
-                        (void)params.set(ParamId::RenderRtEnabled, li > 0 ? 1.0 : 0.0);
-                        actions.viewport.lighting_dirty = true;
-                        settings_dirty = true;
-                    }
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu(tr("Render Backend"))) {
-                const int cur_bk = params.get_int(ParamId::RenderBackend);
-                static constexpr const char* kBackendLabels[3] = {"Vulkan 1.3", "DirectX 11", "DirectX 12"};
-                for (int bi = 0; bi < 3; ++bi) {
-                    if (ImGui::MenuItem(kBackendLabels[bi], nullptr, cur_bk == bi)) {
-                        (void)params.set(ParamId::RenderBackend, static_cast<double>(bi));
-                        actions.viewport.render_backend = static_cast<uint8_t>(bi);
-                        settings_dirty = true;
-                    }
-                }
-                ImGui::EndMenu();
-            }
-            const bool f2d = params.get_bool(ParamId::Render2DFilterPro);
-            if (ImGui::MenuItem(tr("2D Filter Pro"), nullptr, f2d)) {
-                (void)params.set(ParamId::Render2DFilterPro, f2d ? 0.0 : 1.0);
-                actions.viewport.lighting_dirty = true;
-                settings_dirty = true;
-            }
-            const bool circ = params.get_bool(ParamId::RenderCircadianEnabled);
-            if (ImGui::MenuItem(tr("Circadian Lighting"), nullptr, circ)) {
-                (void)params.set(ParamId::RenderCircadianEnabled, circ ? 0.0 : 1.0);
-                actions.viewport.lighting_dirty = true;
                 settings_dirty = true;
             }
             ImGui::EndMenu();
@@ -370,7 +317,8 @@ TopMenuAction TelemetryBar::draw_top_bar(double now_s, StudioMode& mode, bool& m
 void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& telemetry, const ImGuiArenaAllocator& arena,
                                    const rhi::RhiDevice& rhi, const DevShellTrackingView& tracking,
                                    const DevShellRenderView& render_view, const DevShellOutputView& output_view,
-                                   const UiFontSet& fonts, float dpi_scale) {
+                                   const StudioHostStatus& host_status, const UiFontSet& fonts, float dpi_scale,
+                                   StudioActions& actions) {
     const PrecisionDarkTokens& t = tokens();
     const float scale = std::max(0.75f, dpi_scale);
 
@@ -385,8 +333,8 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
         std::snprintf(t4_buf_.data(), t4_buf_.size(), "T4 Spout:%llu VCam:%llu",
                       static_cast<unsigned long long>(output_view.spout_frames_published),
                       static_cast<unsigned long long>(output_view.vcam_frames_published));
-        const bool m2p_valid = (telemetry.m2p.sample_count > 0U) && (telemetry.m2p.p50_ms > 0.0f) &&
-                               (telemetry.m2p.p95_ms <= 5000.0f);
+        const bool m2p_valid =
+            (telemetry.m2p.sample_count > 0U) && (telemetry.m2p.p50_ms > 0.0f) && (telemetry.m2p.p95_ms <= 5000.0f);
         if (m2p_valid) {
             std::snprintf(m2p_buf_.data(), m2p_buf_.size(), "M2P p50 %.1f / p95 %.1fms",
                           static_cast<double>(telemetry.m2p.p50_ms), static_cast<double>(telemetry.m2p.p95_ms));
@@ -398,9 +346,8 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
         std::snprintf(ui_buf_.data(), ui_buf_.size(), "UI %.3fms | Arena+%zuB",
                       static_cast<double>(telemetry.ui_cpu.p95_ms), arena.steady_bump_growth_bytes());
 
-        const bool raw_over =
-            (m2p_valid && telemetry.m2p.p95_ms > 20.0f) || (render_view.total_gpu_ms > 4.2f) ||
-            (telemetry.ui_cpu.p95_ms > 0.4f);
+        const bool raw_over = (m2p_valid && telemetry.m2p.p95_ms > 20.0f) || (render_view.total_gpu_ms > 4.2f) ||
+                              (telemetry.ui_cpu.p95_ms > 0.4f);
         if (raw_over) {
             if (over_budget_since_s_ < 0.0) {
                 over_budget_since_s_ = now_s;
@@ -436,6 +383,22 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
             ImGui::PushFont(fonts.mono);
         }
 
+        ImGui::BeginDisabled(host_status.on_air);
+        if (ImGui::SmallButton(tr("Home"))) {
+            actions.request_open_project_manager = true;
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", host_status.on_air ? tr("Blocked while ON AIR") : tr("Project Manager (Shift+1)"));
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(host_status.project_dirty ? t.status_warn : t.text_secondary, "%s%s",
+                           host_status.project_title[0] != '\0' ? host_status.project_title.data() : "Untitled",
+                           host_status.project_dirty ? "*" : "");
+        ImGui::SameLine();
+        ImGui::TextColored(t.text_disabled, "|");
+        ImGui::SameLine();
+
         ImGui::TextColored(t.viz_t1, "%s", t1_buf_.data());
         ImGui::SameLine();
         ImGui::TextColored(t.text_disabled, "|");
@@ -470,7 +433,8 @@ void TelemetryBar::draw_bottom_bar(double now_s, const TelemetrySnapshot& teleme
         if (ImGui::BeginPopup("##PerfPopover")) {
             ImGui::TextColored(t.text_primary, "%s", tr("Detailed Frame Budget Breakdown"));
             ImGui::Separator();
-            ImGui::Text("RT Shadows/Hair: %.2f ms  |  Denoiser (%s): %.2f ms (p95 %.2f)",
+            ImGui::Text("Skin/Prepass: %.2f ms  |  RT Shadows/Hair: %.2f ms  |  Denoiser (%s): %.2f ms (p95 %.2f)",
+                        static_cast<double>(render_view.skin_prepass_gpu_ms),
                         static_cast<double>(render_view.rt_gpu_ms), render_view.denoiser_active_name,
                         static_cast<double>(render_view.denoise_gpu_ms),
                         static_cast<double>(render_view.denoise_p95_120f_ms));

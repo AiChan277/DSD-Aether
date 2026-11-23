@@ -13,11 +13,11 @@ DevShell::DevShell(DevShell&&) noexcept = default;
 DevShell& DevShell::operator=(DevShell&&) noexcept = default;
 
 void DevShell::init(const RuntimePaths& paths, const HardwareInventory& hw, float dpi_scale,
-                    const char* initial_avatar_path, bool allow_disk_config) {
+                    const char* initial_avatar_path, bool allow_disk_config, core::SessionManager* session_mgr) {
     if (!workspace_) {
         workspace_ = std::make_unique<StudioWorkspace>();
     }
-    workspace_->init(paths, hw, dpi_scale, initial_avatar_path, allow_disk_config);
+    workspace_->init(paths, hw, dpi_scale, initial_avatar_path, allow_disk_config, session_mgr);
 }
 
 void DevShell::shutdown() {

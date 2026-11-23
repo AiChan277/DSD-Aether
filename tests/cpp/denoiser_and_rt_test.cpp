@@ -1,6 +1,7 @@
 #include "core/hot_path_guard.hpp"
 #include "renderer/denoise/denoiser_manager.hpp"
 #include "renderer/npr_renderer.hpp"
+#include "synthetic_avatar_helper.hpp"
 #include "test_png_io.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -251,6 +252,161 @@ TEST_CASE("1080p RT + BLAS refit + 300-frame rebuild + GPU frame budget verifica
 
     renderer.destroy();
     avatar->destroy();
+    rhi->destroy();
+    aether_runtime_shutdown();
+}
+
+TEST_CASE("Rev 3.1 Empirical Test #7: LightingStageView 1x Skin+BLAS, TransparentPass Timing & 10x Swap Zero-Leak",
+          "[phase4][rt][rev31][empirical]") {
+    using namespace aether::renderer;
+
+    AetherRuntimeConfig rt{};
+    rt.struct_size = static_cast<uint32_t>(sizeof(rt));
+    REQUIRE(aether_runtime_init(&rt) == AETHER_OK);
+
+    aether::rhi::RhiDeviceConfig dcfg{};
+    dcfg.enable_validation = true;
+    dcfg.require_validation = true;
+    dcfg.headless = true;
+    auto dev_res = aether::rhi::RhiDevice::create(dcfg);
+    REQUIRE(dev_res.has_value());
+    std::unique_ptr<aether::rhi::RhiDevice> rhi(dev_res.value());
+
+    auto build_avatar = [&](uint8_t tint_r) {
+        aether::test::SyntheticMeshSpec spec{};
+        spec.materials.push_back(
+            aether::test::make_basic_npr_material(static_cast<float>(tint_r) / 255.0f, 0.70f, 0.68f));
+        auto mat_tr = aether::test::make_basic_npr_material(0.55f, 0.78f, 1.0f, 0.65f);
+        mat_tr.alpha_mode = AETHER_ALPHA_MODE_BLEND;
+        spec.materials.push_back(mat_tr);
+        const float p0[3] = {-0.45f, 0.70f, 0.0f};
+        const float p1[3] = {0.45f, 0.70f, 0.0f};
+        const float p2[3] = {0.45f, 1.80f, 0.0f};
+        const float p3[3] = {-0.45f, 1.80f, 0.0f};
+        const float n[3] = {0.0f, 0.0f, 1.0f};
+        const float t[3] = {1.0f, 0.0f, 0.0f};
+        aether::test::append_quad(spec, p0, p1, p2, p3, n, t, 0.0f, 0.0f, 0.0f, 0u, AETHER_SUBMESH_FLAG_OPAQUE);
+        const float q0[3] = {-0.25f, 0.90f, 0.04f};
+        const float q1[3] = {0.25f, 0.90f, 0.04f};
+        const float q2[3] = {0.25f, 1.60f, 0.04f};
+        const float q3[3] = {-0.25f, 1.60f, 0.04f};
+        aether::test::append_quad(spec, q0, q1, q2, q3, n, t, 0.0f, 0.0f, 0.0f, 1u, AETHER_SUBMESH_FLAG_TRANSPARENT);
+        auto res = aether::test::upload_synthetic_avatar(*rhi, spec);
+        REQUIRE(res.has_value());
+        return std::move(res.value());
+    };
+
+    NprRenderer renderer;
+    RendererConfig rcfg{};
+    rcfg.width = 640u;
+    rcfg.height = 360u;
+    rcfg.enable_rt = rhi->rt_supported();
+    REQUIRE(renderer.init(*rhi, rcfg).has_value());
+
+    // 1) Broadcast + MainStage + QuadTop + QuadRight share exactly 1 Skin & <= 1 BLAS dispatch per frame
+    {
+        auto av = build_avatar(220u);
+        REQUIRE(renderer.bind_avatar(av.get()).has_value());
+
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo cpci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cpci.queueFamilyIndex = rhi->graphics_family();
+        REQUIRE(vkCreateCommandPool(rhi->device(), &cpci, nullptr, &pool) == VK_SUCCESS);
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbai.commandPool = pool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        REQUIRE(vkAllocateCommandBuffers(rhi->device(), &cbai, &cmd) == VK_SUCCESS);
+
+        for (uint64_t f = 0; f < 3u; ++f) {
+            const uint64_t skin0 = renderer.graph().skin_dispatch_count();
+            const uint64_t blas0 = renderer.graph().blas_update_count();
+
+            VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            REQUIRE(vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS);
+
+            FrameRenderRequest req{};
+            req.avatar = av.get();
+            req.rig = &renderer.lighting();
+            req.camera = PreviewCamera{0.0f, 1.25f, 0.0f, 0.1f, 0.05f, 1.8f, 0.55f};
+            req.frame_index = f;
+            req.frame_slot = static_cast<uint32_t>(f % 3u);
+            req.rt_enabled = rhi->rt_supported();
+            renderer.graph().record_critical_passes(cmd, req);
+
+            for (auto slot :
+                 {FrameRenderRequest::StageOutputSlot::MainStage, FrameRenderRequest::StageOutputSlot::QuadTop,
+                  FrameRenderRequest::StageOutputSlot::QuadRight}) {
+                FrameRenderRequest sreq = req;
+                sreq.view_kind = RenderViewKind::LightingStage;
+                sreq.stage_output_slot = slot;
+                sreq.stage_viewport_w = 320u;
+                sreq.stage_viewport_h = 180u;
+                sreq.skip_skin_and_blas = true;
+                renderer.graph().record_critical_passes(cmd, sreq);
+            }
+            REQUIRE(vkEndCommandBuffer(cmd) == VK_SUCCESS);
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cmd;
+            REQUIRE(vkQueueSubmit(rhi->graphics_queue(), 1, &si, VK_NULL_HANDLE) == VK_SUCCESS);
+            rhi->wait_idle();
+
+            CHECK(renderer.graph().skin_dispatch_count() - skin0 == 1ULL);
+            CHECK(renderer.graph().blas_update_count() - blas0 <= 1ULL);
+
+            const auto& snap = renderer.graph().timing().resolve_frame(req.frame_slot);
+            CHECK(snap.valid);
+            CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::TransparentPass)] >= 0.0f);
+            CHECK(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::LightingStage)] >= 0.0f);
+        }
+
+        vkDestroyCommandPool(rhi->device(), pool, nullptr);
+        REQUIRE(renderer.bind_avatar(nullptr).has_value());
+        CHECK_FALSE(renderer.graph().accel_struct().is_ready());
+        av->destroy();
+    }
+
+    // 2) 10x sequential avatar load/bind/render/unbind/wait_idle cycles reclaim BLAS & VRAM cleanly
+    auto av_a = build_avatar(210u);
+    auto av_b = build_avatar(160u);
+    uint64_t baseline_vram = 0;
+
+    for (uint32_t cycle = 0; cycle < 10u; ++cycle) {
+        GpuAvatar* cur = ((cycle & 1u) == 0u) ? av_a.get() : av_b.get();
+        REQUIRE(renderer.bind_avatar(cur).has_value());
+        renderer.graph().invalidate_temporal_history();
+
+        FrameRenderRequest req{};
+        req.avatar = cur;
+        req.rig = &renderer.lighting();
+        req.camera = PreviewCamera{0.0f, 1.25f, 0.0f, 0.1f, 0.05f, 1.8f, 0.55f};
+        req.frame_index = static_cast<uint64_t>(cycle);
+        req.completed_frame_index = (cycle > 0u) ? static_cast<uint64_t>(cycle - 1u) : 0ULL;
+        req.frame_slot = cycle % 3u;
+        req.rt_enabled = rhi->rt_supported();
+        REQUIRE(renderer.render_headless_frame(req).has_value());
+
+        rhi->wait_idle();
+        REQUIRE(renderer.bind_avatar(nullptr).has_value());
+        CHECK_FALSE(renderer.graph().accel_struct().is_ready());
+
+        const auto vb = rhi->query_vram_budget();
+        if (cycle == 1u) {
+            baseline_vram = vb.usage_bytes;
+        } else if (cycle == 9u && baseline_vram > 0ULL && vb.usage_bytes > baseline_vram) {
+            // Allow <= 4 MiB driver allocator pooling jitter across 10 swap/unload cycles; BLAS/vertex must reclaim.
+            CHECK((vb.usage_bytes - baseline_vram) <= (4ULL * 1024ULL * 1024ULL));
+        }
+    }
+
+    CHECK(rhi->validation_error_count() == 0);
+    av_a->destroy();
+    av_b->destroy();
+    renderer.destroy();
     rhi->destroy();
     aether_runtime_shutdown();
 }

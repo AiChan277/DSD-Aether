@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/action_registry.hpp"
+#include "core/session_manager.hpp"
 #include "ui/params/param_registry.hpp"
 
 #include <imgui.h>
@@ -14,97 +16,9 @@
 
 namespace aether::ui {
 
-enum class KeyScope : uint8_t {
-    Global = 0,
-    Viewport = 1,
-    NodeGraph = 2,
-    Outliner = 3,
-};
-
-enum class ActionId : uint16_t {
-    OpenPalette = 0,
-    ModeLiveStudio,
-    ModeRigging,
-    ModeLighting,
-    ModeNodes,
-    ProjectNew,
-    ProjectOpen,
-    ProjectSave,
-    ProjectSaveAs,
-    ImportAvatar,
-    Undo,
-    Redo,
-    Preferences,
-    ShortcutOverlay,
-    ToggleOnAir,
-    PauseTracking,
-    CalibrateNeutral,
-    ToggleRayTracing,
-    MaximizeHoveredPanel,
-    Expression1,
-    Expression2,
-    Expression3,
-    Expression4,
-    Expression5,
-    Expression6,
-    Expression7,
-    Expression8,
-
-    ViewportHeatmap,
-    ViewportOrbitOrb,
-    ViewportFrameHead,
-    ViewportFrameBody,
-    ViewportCam1,
-    ViewportCam2,
-    ViewportCam3,
-    ViewportCam4,
-    ViewportCam5,
-    ViewportStoreCam1,
-    ViewportStoreCam2,
-    ViewportStoreCam3,
-    ViewportStoreCam4,
-    ViewportStoreCam5,
-    ViewportPreset1,
-    ViewportPreset2,
-    ViewportPreset3,
-    ViewportPreset4,
-    ViewportPreset5,
-    ViewportPreset6,
-    GizmoSelect,
-    GizmoMove,
-    GizmoRotate,
-    GizmoScale,
-    GizmoLocalWorld,
-    ViewportGrid,
-
-    GraphAddNode,
-    GraphDuplicate,
-    GraphDelete,
-    GraphFrame,
-    GraphComment,
-    GraphBypass,
-    GraphRecompile,
-
-    OutlinerRename,
-    OutlinerFilter,
-    OutlinerHide,
-    OutlinerUnhideAll,
-    OutlinerDelete,
-
-    LightingQuadView,
-    LightingPilotLight,
-
-    Count,
-};
-
-struct KeyBindingSpec {
-    ActionId id;
-    const char* name;
-    const char* label;
-    KeyScope scope;
-    const char* default_chord;
-    bool global_hotkey_capable;
-};
+using KeyScope = core::KeyScope;
+using ActionId = core::ActionId;
+using KeyBindingSpec = core::KeyBindingSpec;
 
 struct KeymapConflict {
     ActionId first{ActionId::Count};
@@ -126,6 +40,7 @@ class KeymapRegistry {
 
     [[nodiscard]] std::vector<KeymapConflict> detect_conflicts() const;
     [[nodiscard]] bool is_pressed(ActionId id) const noexcept;
+    [[nodiscard]] static bool is_raw_key_pressed(ImGuiKey key, bool repeat = false) noexcept;
 
     [[nodiscard]] bool load_toml(const std::filesystem::path& path);
     [[nodiscard]] bool save_toml(const std::filesystem::path& path) const;
@@ -164,5 +79,9 @@ struct AppSettings {
 [[nodiscard]] bool load_app_settings_toml(const std::filesystem::path& path, AppSettings& settings, ParamStore& params);
 [[nodiscard]] bool save_app_settings_toml(const std::filesystem::path& path, const AppSettings& settings,
                                           const ParamStore& params);
+
+/** Synchronizes global workstation preferences cleanly from/to canonical `SessionState` (`session_state.json`). */
+void load_app_settings_from_session(const core::SessionState& session, AppSettings& settings, ParamStore& params);
+void save_app_settings_to_session(const AppSettings& settings, const ParamStore& params, core::SessionState& session);
 
 } // namespace aether::ui

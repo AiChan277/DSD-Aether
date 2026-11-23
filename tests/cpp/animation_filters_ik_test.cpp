@@ -305,8 +305,8 @@ TEST_CASE("60Hz critically-damped kinematic chain, zero jitter, C2 follow-throug
         CHECK(max_jitter_deg < 0.001f);
 
         // Verify upright rest pose preservation & relaxed natural idle arms (~68 deg below horizontal)
-        const Vec3 head_delta_aa =
-            to_axis_angle(normalize(engine.bone_rot_ws()[AETHER_BONE_HEAD] * conjugate(rm.rest_world_rotations[AETHER_BONE_HEAD])));
+        const Vec3 head_delta_aa = to_axis_angle(
+            normalize(engine.bone_rot_ws()[AETHER_BONE_HEAD] * conjugate(rm.rest_world_rotations[AETHER_BONE_HEAD])));
         CHECK(length(head_delta_aa) * kRadToDeg < 0.25f);
 
         // With no hands tracked, upper arms hang downward from shoulder (~68 deg below horizontal)
@@ -363,7 +363,7 @@ TEST_CASE("60Hz critically-damped kinematic chain, zero jitter, C2 follow-throug
             max_head_yaw_deg = std::max(max_head_yaw_deg, h_yaw);
 
             const Vec3 tip = engine.bone_pos_ws()[67]; // end of hair strand 0
-            if (f >= 90) { // >= 0.5 s after 60-frame convergence window
+            if (f >= 90) {                             // >= 0.5 s after 60-frame convergence window
                 worst_spring_disp_late = std::max(worst_spring_disp_late, length(tip - prev_hair_tip));
             }
             prev_hair_tip = tip;
@@ -497,8 +497,8 @@ TEST_CASE("Live default node graph + near-neutral tracking keeps avatar upright,
         }
         engine.tick(raw, dsp, gout, tick_us, 0.0f, cfg, skin);
 
-        constexpr std::array<uint32_t, 6> kChain = {AETHER_BONE_HIPS, AETHER_BONE_SPINE, AETHER_BONE_CHEST,
-                                                    AETHER_BONE_UPPER_CHEST, AETHER_BONE_NECK, AETHER_BONE_HEAD};
+        constexpr std::array<uint32_t, 6> kChain = {AETHER_BONE_HIPS,        AETHER_BONE_SPINE, AETHER_BONE_CHEST,
+                                                    AETHER_BONE_UPPER_CHEST, AETHER_BONE_NECK,  AETHER_BONE_HEAD};
         for (size_t i = 0; i < kChain.size(); ++i) {
             const Quat q = engine.bone_rot_ws()[kChain[i]];
             if (f >= 120) {
@@ -574,7 +574,8 @@ TEST_CASE("Graph IK override is per-tick: a one-off head target never latches th
         engine.tick(raw, dsp, gout, static_cast<uint64_t>(f + 1) * 16667ULL, 0.0f, cfg, skin);
         if (f == 20) {
             CHECK(rest_delta_deg(engine, rm, AETHER_BONE_SPINE) < 0.5f);
-            // An IK pull to the origin would swing the left hand inward past the shoulder; the idle arm hangs outside it.
+            // An IK pull to the origin would swing the left hand inward past the shoulder; the idle arm hangs outside
+            // it.
             CHECK(engine.bone_pos_ws()[AETHER_BONE_LEFT_HAND].x > engine.bone_pos_ws()[AETHER_BONE_LEFT_UPPER_ARM].x);
         }
     }
@@ -707,8 +708,7 @@ TEST_CASE("ExpressionMixer drives VRM vowel slots from the webcam and takes max 
     CHECK(out[0] > 0.9f);
 }
 
-TEST_CASE("Warudo pendulum lean: torso rolls with lateral head offset, head stays tracked-level",
-          "[animation][lean]") {
+TEST_CASE("Warudo pendulum lean: torso rolls with lateral head offset, head stays tracked-level", "[animation][lean]") {
     const RestSkeletonMetrics rm = make_vrm_like_rest_metrics();
     SimEngine engine;
     engine.reset(rm);
@@ -745,7 +745,8 @@ TEST_CASE("Warudo pendulum lean: torso rolls with lateral head offset, head stay
     CHECK(engine.bone_pos_ws()[AETHER_BONE_HEAD].x > engine.bone_pos_ws()[AETHER_BONE_HIPS].x);
 }
 
-TEST_CASE("Emotion presets suppress tracked blink (VRM overrideBlink) but keep explicit winks", "[animation][expression]") {
+TEST_CASE("Emotion presets suppress tracked blink (VRM overrideBlink) but keep explicit winks",
+          "[animation][expression]") {
     ExpressionMixer mixer;
     mixer.reset();
     std::array<float, 52> cam{};
@@ -993,7 +994,8 @@ TEST_CASE("Hand tracker self-collision avoidance maintains >= 0 signed distance 
     CHECK(idle_l_drop > 60.0f);
     CHECK(idle_r_drop > 60.0f);
 
-    // 2) Enable Hand Tracking and sweep aggressive self-intersecting wrist targets into Chest, Head, & Bilateral overlap
+    // 2) Enable Hand Tracking and sweep aggressive self-intersecting wrist targets into Chest, Head, & Bilateral
+    // overlap
     cfg.visibility.enable_hand_ik = true;
     raw.valid_flags = 0x0FU;
     raw.left_hand_confidence = 0.95f;
@@ -1035,7 +1037,8 @@ TEST_CASE("Hand tracker self-collision avoidance maintains >= 0 signed distance 
     }
     CHECK(worst_sd >= -1e-4f);
 
-    // 3) Raise arms outward cleanly while active, then disable Hand Tracking -> smooth 0.35s cubic transition back to A-Pose
+    // 3) Raise arms outward cleanly while active, then disable Hand Tracking -> smooth 0.35s cubic transition back to
+    // A-Pose
     raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = 0.32f;
     raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][1] = 1.26f;
     raw.joint_positions_ws[AETHER_BONE_LEFT_HAND][2] = 0.24f;

@@ -499,12 +499,20 @@ pub fn bake_into_arena(
         let mut is_hair_vert = vec![false; v_count];
         for sm in &avatar.submeshes {
             let lower_sm = sm.name.to_ascii_lowercase();
-            let lower_mat = avatar
+            let raw_mat = avatar
                 .materials
                 .get(sm.material_index as usize)
-                .map(|m| m.name.to_ascii_lowercase())
-                .unwrap_or_default();
-            if lower_sm.contains("hair") || lower_mat.contains("hair") || sm.name.contains("髪") {
+                .map_or("", |m| m.name.as_str());
+            let lower_mat = raw_mat.to_ascii_lowercase();
+            if lower_sm.contains("hair")
+                || lower_mat.contains("hair")
+                || lower_sm.contains("bang")
+                || lower_mat.contains("bang")
+                || lower_mat.contains("kami")
+                || lower_mat.contains("ahoge")
+                || sm.name.contains("髪")
+                || raw_mat.contains("髪")
+            {
                 for &vi in &sm.indices {
                     if (vi as usize) < v_count {
                         is_hair_vert[vi as usize] = true;
@@ -901,6 +909,9 @@ mod tests {
             double_sided: false,
             unlit: false,
             has_vrm_mtoon: true,
+            cast_shadow: true,
+            edge_enabled: true,
+            is_pmx: false,
             render_queue_offset: 0,
             flatten_override: None,
             tex_base: None,

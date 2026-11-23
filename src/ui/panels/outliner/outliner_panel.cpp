@@ -219,9 +219,7 @@ void OutlinerPanel::draw_scene_well(const DevShellAvatarView& avatar, const UiFo
                 ImGui::PopFont();
             }
             ImGui::Indent(10.0f * scale);
-            draw_node(SelectionKind::LightKey, 0, icons::kSun, tr("Key Light"), "Key");
-            draw_node(SelectionKind::LightFill, 0, icons::kSun, tr("Fill Light"), "Fill");
-            draw_node(SelectionKind::LightRim, 0, icons::kSun, tr("Rim Light"), "Rim");
+            draw_node(SelectionKind::StudioLight, 0, icons::kSun, tr("Studio Lighting Rig"), "16-Slot");
             draw_node(SelectionKind::Camera, 0, icons::kCamera, tr("Studio Camera"), nullptr);
             ImGui::Unindent(10.0f * scale);
             if (!any_visible) {
@@ -232,79 +230,6 @@ void OutlinerPanel::draw_scene_well(const DevShellAvatarView& avatar, const UiFo
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(2);
-}
-
-void OutlinerPanel::draw_expression_grid(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts,
-                                         UiSelection& selection, float scale) {
-    const PrecisionDarkTokens& t = tokens();
-    if (!ImGui::BeginTable("##ExprGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
-        return;
-    }
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float rounding = t.radius_control_px * scale;
-    size_t shown = 0;
-    for (size_t i = 0; i < expressions.size() && i < 8; ++i) {
-        ExpressionSlotInfo& ex = expressions[i];
-        if (!icase_contains(ex.name.data(), filter_buf_.data()) &&
-            !icase_contains(ex.hotkey.data(), filter_buf_.data())) {
-            continue;
-        }
-        ImGui::TableNextColumn();
-        ++shown;
-        ImGui::PushID(static_cast<int>(ex.slot));
-        const float w = ImGui::GetContentRegionAvail().x;
-        const float h = ImGui::GetFrameHeight();
-        const ImVec2 p0 = ImGui::GetCursorScreenPos();
-        const bool clicked = ImGui::InvisibleButton("##expr", ImVec2(w, h));
-        const bool hovered = ImGui::IsItemHovered();
-        const ImVec2 p1(p0.x + w, p0.y + h);
-        const bool latched = ex.triggered_override;
-
-        dl->AddRectFilled(p0, p1, latched ? t.col32_bg_selected : (hovered ? t.col32_bg_hover : t.col32_bg_raised),
-                          rounding);
-        dl->AddRect(p0, p1, latched ? t.col32_accent : t.col32_border_default, rounding, 0,
-                    latched ? 1.5f * scale : 1.0f);
-        if (ex.current_weight > 0.001f) {
-            const float bar_w = (w - 2.0f) * std::clamp(ex.current_weight, 0.0f, 1.0f);
-            dl->AddRectFilled(ImVec2(p0.x + 1.0f, p1.y - 3.0f * scale), ImVec2(p0.x + 1.0f + bar_w, p1.y - 1.0f),
-                              t.col32_accent);
-        }
-
-        // Key badge (mono) + elided label
-        if (fonts.mono != nullptr) {
-            ImGui::PushFont(fonts.mono);
-        }
-        const ImVec2 key_sz = ImGui::CalcTextSize(ex.hotkey.data());
-        const float pad = 5.0f * scale;
-        const ImVec2 b0(p0.x + pad, p0.y + (h - key_sz.y - 2.0f * scale) * 0.5f);
-        const ImVec2 b1(b0.x + key_sz.x + 8.0f * scale, b0.y + key_sz.y + 2.0f * scale);
-        dl->AddRectFilled(b0, b1, latched ? t.col32_accent : t.col32_bg_inset, 2.0f * scale);
-        dl->AddText(ImVec2(b0.x + 4.0f * scale, b0.y + 1.0f * scale),
-                    latched ? t.col32_text_on_accent : t.col32_text_secondary, ex.hotkey.data());
-        if (fonts.mono != nullptr) {
-            ImGui::PopFont();
-        }
-        const float label_x = b1.x + 6.0f * scale;
-        char lbl[48]{};
-        elide_into(ex.name.data(), p1.x - label_x - pad, lbl, sizeof(lbl));
-        const float text_h = ImGui::GetTextLineHeight();
-        dl->AddText(ImVec2(label_x, p0.y + (h - text_h) * 0.5f),
-                    latched ? t.col32_text_primary : t.col32_text_secondary, lbl);
-
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip("%s\n%s · %s", ex.name.data(), ex.hotkey.data(),
-                              latched ? tr("latched - click to release") : tr("click to latch"));
-        }
-        if (clicked) {
-            ex.triggered_override = !ex.triggered_override;
-            set_selection(selection, SelectionKind::Expression, static_cast<int32_t>(ex.slot), ex.name.data());
-        }
-        ImGui::PopID();
-    }
-    ImGui::EndTable();
-    if (shown == 0) {
-        ImGui::TextColored(t.text_tertiary, "%s", tr("No expressions match the search."));
-    }
 }
 
 void OutlinerPanel::draw_outputs(const DevShellOutputView& output_view, ParamStore& params, UndoStack& undo,
@@ -393,6 +318,8 @@ void OutlinerPanel::draw(StudioMode mode, bool on_air, const DevShellAvatarView&
                          std::span<OutlinerMaterialInfo> materials, std::span<ExpressionSlotInfo> expressions,
                          std::span<const LoadedPluginVm> plugins, ParamStore& params, UndoStack& undo,
                          const UiFontSet& fonts, UiSelection& selection, StudioActions& actions) {
+    (void)on_air;
+    (void)expressions;
     const PrecisionDarkTokens& t = tokens();
 
     if (ImGui::Begin(tr("Outliner & Project"))) {
@@ -462,8 +389,8 @@ void OutlinerPanel::draw(StudioMode mode, bool on_air, const DevShellAvatarView&
                             } else {
                                 const bool sel = (selection.kind == SelectionKind::Bone &&
                                                   selection.item_index == static_cast<int32_t>(b.bone_id));
-                                const ImVec4 col =
-                                    b.hidden ? t.text_disabled : (b.humanoid_mapped ? t.text_primary : t.text_secondary);
+                                const ImVec4 col = b.hidden ? t.text_disabled
+                                                            : (b.humanoid_mapped ? t.text_primary : t.text_secondary);
                                 ImGui::PushStyleColor(ImGuiCol_Text, col);
                                 char line[96]{};
                                 std::snprintf(line, sizeof(line), "%s %s", b.hidden ? icons::kEyeOff : icons::kBone,
@@ -474,10 +401,10 @@ void OutlinerPanel::draw(StudioMode mode, bool on_air, const DevShellAvatarView&
                                 }
                                 ImGui::PopStyleColor();
                                 if (sel && ImGui::IsWindowFocused()) {
-                                    if (ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+                                    if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_F2, false)) {
                                         renaming_bone_idx_ = row;
                                         std::snprintf(rename_buf_.data(), rename_buf_.size(), "%s", b.name.data());
-                                    } else if (ImGui::IsKeyPressed(ImGuiKey_H, false)) {
+                                    } else if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_H, false)) {
                                         b.hidden = !b.hidden;
                                     }
                                 }
@@ -508,57 +435,7 @@ void OutlinerPanel::draw(StudioMode mode, bool on_air, const DevShellAvatarView&
             }
         }
 
-        // Avatar source bar (disabled while ON AIR to protect the live stream §12.4)
-        if (ImGui::CollapsingHeader(tr("Avatar Source"))) {
-            ImGui::BeginDisabled(on_air || avatar.is_loading);
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            ImGui::InputTextWithHint("##AvatarPath", tr("model path (.vrm/.glb/.fbx/.pmx)"), path_buf_.data(),
-                                     path_buf_.size());
-            const float half_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            if (ImGui::Button(tr("Load"), ImVec2(half_w, 0.0f))) {
-                actions.viewport.request_load_path = path_buf_.data();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(tr("Browse..."), ImVec2(half_w, 0.0f))) {
-                actions.request_open_avatar_dialog = true;
-            }
-            if (sample_ref_vrm_[0] != '\0' || sample_fbx_[0] != '\0' || sample_pmx_[0] != '\0') {
-                ImGui::TextColored(t.text_tertiary, "%s", tr("Samples"));
-                ImGui::SameLine();
-                if (sample_ref_vrm_[0] != '\0' && ImGui::SmallButton("Ref VRM")) {
-                    std::snprintf(path_buf_.data(), path_buf_.size(), "%s", sample_ref_vrm_.data());
-                    actions.viewport.request_load_path = path_buf_.data();
-                }
-                if (sample_fbx_[0] != '\0') {
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("FBX")) {
-                        std::snprintf(path_buf_.data(), path_buf_.size(), "%s", sample_fbx_.data());
-                        actions.viewport.request_load_path = path_buf_.data();
-                    }
-                }
-                if (sample_pmx_[0] != '\0') {
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("PMX")) {
-                        std::snprintf(path_buf_.data(), path_buf_.size(), "%s", sample_pmx_.data());
-                        actions.viewport.request_load_path = path_buf_.data();
-                    }
-                }
-            }
-            ImGui::EndDisabled();
-            if (on_air) {
-                ImGui::TextColored(t.text_tertiary, "%s", tr("Avatar replacement locked while ON AIR."));
-            }
-            if (avatar.load_error != nullptr && avatar.load_error[0] != '\0') {
-                (void)draw_inline_error_banner(fonts, tr("Avatar load failed."), avatar.load_error, tr("Retry"));
-            }
-        }
-
-        // Quick expressions (F1-F8): compact key badge + label grid
-        if (ImGui::CollapsingHeader(tr("Expressions (F1-F8)"), ImGuiTreeNodeFlags_DefaultOpen)) {
-            draw_expression_grid(expressions, fonts, selection, scale);
-            ImGui::Spacing();
-        }
-
+        // Outliner owns scene hierarchy, outputs, and plugins in Rev 3.1.
         // Outputs quick status & toggle (§12.7)
         if (ImGui::CollapsingHeader(tr("Outputs"), ImGuiTreeNodeFlags_DefaultOpen)) {
             draw_outputs(output_view, params, undo, fonts, selection, actions, scale);

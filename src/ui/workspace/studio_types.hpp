@@ -22,9 +22,6 @@ namespace aether::ui {
 enum class SelectionKind : uint8_t {
     None = 0,
     Avatar = 1,
-    LightKey = 2,
-    LightFill = 3,
-    LightRim = 4,
     Camera = 5,
     Bone = 6,
     Material = 7,
@@ -102,8 +99,10 @@ struct StudioHostStatus {
     bool on_air{false};
     bool ws_enabled{false};
     bool tracking_paused{false};
+    bool project_dirty{false};
     std::array<char, 128> project_path{};
     std::array<char, 64> project_title{"Untitled"};
+    std::array<char, 64> active_alfx_name{"Studio Clean Daylight"};
     uint32_t compiled_node_count{0};
     float last_compile_ms{0.0f};
     float last_eval_us{0.0f};
@@ -130,7 +129,7 @@ struct StudioHostStatus {
     }
 
     [[nodiscard]] bool pin_readout_for(uint64_t node_id, uint8_t pin_idx, uint8_t& out_kind,
-                                         std::array<float, 4>& out_values) const noexcept {
+                                       std::array<float, 4>& out_values) const noexcept {
         if (telemetry.valid == 0u) {
             return false;
         }
@@ -170,6 +169,13 @@ struct StudioActions {
     std::array<char, 512> project_path_buf{};
     bool request_save_project{false};
     bool request_save_project_as{false};
+    bool request_open_project_manager{false};
+    bool request_export_alfx_dialog{false};
+    bool request_import_alfx_dialog{false};
+    int32_t request_apply_alfx_preset_index{-1};
+    uint8_t request_apply_alfx_mode{0};
+    bool request_switch_mode{false};
+    StudioMode target_mode{StudioMode::LiveStudio};
 
     bool request_open_avatar_dialog{false};
     bool request_apply_graph_json{false};
@@ -335,8 +341,8 @@ inline void format_camera_status_badge(const DevShellTrackingView& tracking, cha
     } else if (!tracking.camera_active) {
         std::snprintf(out, out_cap, "Camera Stopped · Face %3.0f%%", face_pct);
     } else if (tracking.camera_width > 0U && tracking.camera_height > 0U) {
-        std::snprintf(out, out_cap, "%s (%ux%u @ %u fps) · Face %3.0f%%", tracking.camera_label,
-                      tracking.camera_width, tracking.camera_height, tracking.camera_fps, face_pct);
+        std::snprintf(out, out_cap, "%s (%ux%u @ %u fps) · Face %3.0f%%", tracking.camera_label, tracking.camera_width,
+                      tracking.camera_height, tracking.camera_fps, face_pct);
     } else {
         std::snprintf(out, out_cap, "%s · Face %3.0f%%", tracking.camera_label, face_pct);
     }

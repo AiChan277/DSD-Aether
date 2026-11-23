@@ -508,8 +508,7 @@ void WasapiAudioLipsync::thread_entry() {
 
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
     Microsoft::WRL::ComPtr<IMMDevice> device;
-    HRESULT hr =
-        ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+    HRESULT hr = ::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
     if (SUCCEEDED(hr) && enumerator) {
         if (!target_device_id_.empty()) {
             const std::wstring wid = utf8_to_wide(target_device_id_);
@@ -543,8 +542,7 @@ void WasapiAudioLipsync::thread_entry() {
                 {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80U, 0x20U, 0x67U, 0xd1U, 0x46U, 0xa8U, 0x50U, 0xe0U}}, 14};
             PROPVARIANT var{};
             PropVariantInit(&var);
-            if (SUCCEEDED(props->GetValue(kFriendlyNameKey, &var)) && var.vt == VT_LPWSTR &&
-                var.pwszVal != nullptr) {
+            if (SUCCEEDED(props->GetValue(kFriendlyNameKey, &var)) && var.vt == VT_LPWSTR && var.pwszVal != nullptr) {
                 set_buf(active_device_label_buf_, wide_to_utf8(var.pwszVal).c_str());
             }
             ::PropVariantClear(&var);
@@ -618,8 +616,8 @@ void WasapiAudioLipsync::thread_entry() {
         return;
     }
 
-    AETHER_LOG_INFO("tracking", "WASAPI audio lip-sync started on '%s' (%u Hz, %u ch)",
-                    active_device_label_buf_.data(), sample_rate, channels);
+    AETHER_LOG_INFO("tracking", "WASAPI audio lip-sync started on '%s' (%u Hz, %u ch)", active_device_label_buf_.data(),
+                    sample_rate, channels);
 
     // Zero heap allocations inside capture loop: process downmixed chunks on stack
     float mono_chunk[1024]{};

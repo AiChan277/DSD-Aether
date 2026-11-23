@@ -6,6 +6,7 @@
 #include "renderer/gpu_structs.hpp"
 #include "renderer/sdf_generator.hpp"
 #include "rhi/d3d12_device.hpp"
+#include "rhi/gpu_timing.hpp"
 
 #include <array>
 #include <cstdint>
@@ -14,6 +15,7 @@
 
 struct ID3D12PipelineState;
 struct ID3D12GraphicsCommandList4;
+struct ID3D12QueryHeap;
 
 namespace aether::renderer {
 
@@ -65,6 +67,11 @@ class Dx12FrameGraph {
     [[nodiscard]] uint8_t last_effective_lighting_mode() const noexcept { return last_eff_lighting_mode_; }
     [[nodiscard]] uint64_t rendered_frames() const noexcept { return rendered_frames_; }
     [[nodiscard]] float last_render_ms() const noexcept { return last_render_ms_; }
+    [[nodiscard]] const rhi::GpuPassTimingSnapshot& timing_snapshot() const noexcept { return timing_snapshot_; }
+    [[nodiscard]] bool hardware_timestamps_supported() const noexcept {
+        return timestamp_heap_ != nullptr && timestamp_freq_ > 0ULL;
+    }
+    void invalidate_temporal_history() noexcept;
 
     [[nodiscard]] const rhi::D3D12Texture& out_bgra8() const noexcept { return out_bgra8_; }
     [[nodiscard]] const rhi::D3D12Texture& out_rgba8() const noexcept { return out_rgba8_; }
@@ -105,6 +112,7 @@ class Dx12FrameGraph {
     struct TemporalHistoryBank {
         bool have_prev_view_proj{false};
         GpuMat4 prev_view_proj{};
+        rhi::D3D12Texture prev_depth{};
         rhi::D3D12Texture prev_normal{};
         rhi::D3D12Texture prev_rt_shadow{};
         rhi::D3D12Texture prev_rim_occ{};
@@ -114,6 +122,15 @@ class Dx12FrameGraph {
     std::array<TemporalHistoryBank, 2> history_{}; // [0] = BroadcastView, [1] = LightingStageView
     uint64_t rendered_frames_{0};
     float last_render_ms_{0.0f};
+
+    ID3D12QueryHeap* timestamp_heap_{nullptr};
+    rhi::D3D12Buffer timestamp_readback_{};
+    uint64_t timestamp_freq_{0};
+    std::array<uint32_t, rhi::kD3D12FrameCount> timestamp_recorded_mask_{};
+    rhi::GpuPassTimingSnapshot timing_snapshot_{};
+    std::array<float, rhi::GpuTimingRing::kRollingWindowFrames> timing_denoiser_hist_{};
+    uint32_t timing_denoiser_count_{0};
+    uint32_t timing_denoiser_cursor_{0};
 
     std::array<FrameUploadSlice, rhi::kD3D12FrameCount> upload_slices_{};
 
@@ -201,6 +218,8 @@ class Dx12FrameGraph {
     ID3D12PipelineState* pso_npr_opaque_nocull_{nullptr};
     ID3D12PipelineState* pso_npr_blend_cull_{nullptr};
     ID3D12PipelineState* pso_npr_blend_nocull_{nullptr};
+    ID3D12PipelineState* pso_npr_additive_cull_{nullptr};
+    ID3D12PipelineState* pso_npr_additive_nocull_{nullptr};
     ID3D12PipelineState* pso_npr_wire_{nullptr};
     ID3D12PipelineState* pso_outline_hull_{nullptr};
     ID3D12PipelineState* pso_crease_lines_{nullptr};

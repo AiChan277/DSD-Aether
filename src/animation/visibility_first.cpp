@@ -145,11 +145,11 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     // the body follows the head organically: Spine 15% @ 185 ms, Chest/UpperChest 20% @ 145 ms, Neck 30% @ 105 ms,
     // Head 35% @ 75 ms (= 100% of the tracked head angle). Stillness is handled upstream by the Trickster deadzone.
     const SmoothTimes smooth{};
-    const Vec3 spine_rv = smooth_damp(spine_rot_spring_.pos, raw_target_head_rv * 0.15f, spine_rot_spring_.vel,
-                                      smooth.spine, safe_dt);
+    const Vec3 spine_rv =
+        smooth_damp(spine_rot_spring_.pos, raw_target_head_rv * 0.15f, spine_rot_spring_.vel, smooth.spine, safe_dt);
     spine_rot_spring_.pos = spine_rv;
-    const Vec3 chest_rv = smooth_damp(chest_rot_spring_.pos, raw_target_head_rv * 0.20f, chest_rot_spring_.vel,
-                                      smooth.chest, safe_dt);
+    const Vec3 chest_rv =
+        smooth_damp(chest_rot_spring_.pos, raw_target_head_rv * 0.20f, chest_rot_spring_.vel, smooth.chest, safe_dt);
     chest_rot_spring_.pos = chest_rv;
     const Vec3 neck_rv =
         smooth_damp(neck_rot_spring_.pos, raw_target_head_rv * 0.30f, neck_rot_spring_.vel, smooth.neck, safe_dt);
@@ -161,11 +161,11 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     // Head translation (camera space, metres relative to the calibrated neutral) -> pendulum lean of the torso.
     const Vec3 head_ws_sample = tracked.joint_positions_ws[AETHER_BONE_HEAD];
     const float head_dy = (head_ws_sample.y > 0.5f) ? (head_ws_sample.y - 1.50f) : head_ws_sample.y;
-    const Vec3 target_lean =
-        Vec3{std::clamp(head_ws_sample.x, -0.18f, 0.18f), std::clamp(head_dy, -0.08f, 0.08f),
-             std::clamp(head_ws_sample.z, -0.14f, 0.14f)} *
-        w_face;
-    const Vec3 hips_lean = smooth_damp(hips_lean_spring_.pos, target_lean, hips_lean_spring_.vel, smooth.spine, safe_dt);
+    const Vec3 target_lean = Vec3{std::clamp(head_ws_sample.x, -0.18f, 0.18f), std::clamp(head_dy, -0.08f, 0.08f),
+                                  std::clamp(head_ws_sample.z, -0.14f, 0.14f)} *
+                             w_face;
+    const Vec3 hips_lean =
+        smooth_damp(hips_lean_spring_.pos, target_lean, hips_lean_spring_.vel, smooth.spine, safe_dt);
     hips_lean_spring_.pos = hips_lean;
     const Vec3 chest_lean =
         smooth_damp(chest_lean_spring_.pos, target_lean, chest_lean_spring_.vel, smooth.chest, safe_dt);
@@ -244,20 +244,22 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     const bool body_flag_ok = (tracked.valid_flags == 0U || (tracked.valid_flags & 0x08U) != 0U);
     const bool l_body_target_ok = length_sq(tracked.joint_positions_ws[AETHER_BONE_LEFT_HAND]) > 1e-4f;
     const bool r_body_target_ok = length_sq(tracked.joint_positions_ws[AETHER_BONE_RIGHT_HAND]) > 1e-4f;
-    const float l_arm_conf = (cfg.enable_hand_ik && body_flag_ok && l_body_target_ok)
-                                 ? std::min(tracked.upper_body_confidence, tracked.joint_confidence[AETHER_BONE_LEFT_HAND])
-                                 : 0.0f;
-    const float r_arm_conf = (cfg.enable_hand_ik && body_flag_ok && r_body_target_ok)
-                                 ? std::min(tracked.upper_body_confidence, tracked.joint_confidence[AETHER_BONE_RIGHT_HAND])
-                                 : 0.0f;
+    const float l_arm_conf =
+        (cfg.enable_hand_ik && body_flag_ok && l_body_target_ok)
+            ? std::min(tracked.upper_body_confidence, tracked.joint_confidence[AETHER_BONE_LEFT_HAND])
+            : 0.0f;
+    const float r_arm_conf =
+        (cfg.enable_hand_ik && body_flag_ok && r_body_target_ok)
+            ? std::min(tracked.upper_body_confidence, tracked.joint_confidence[AETHER_BONE_RIGHT_HAND])
+            : 0.0f;
 
     // Hand tracking & arm IK disabled by default: arms stay cleanly locked in relaxed standing A-pose.
     const float l_hand_raw = cfg.enable_hand_ik ? std::max(l_arm_conf, tracked.left_hand_confidence) : 0.0f;
     const float r_hand_raw = cfg.enable_hand_ik ? std::max(r_arm_conf, tracked.right_hand_confidence) : 0.0f;
     // 3. Smooth 0.35 s cubic S-curve entry/exit gate + 60 Hz springs for wrist (85 ms) & fingers (50 ms)
     const float toggle_step = safe_dt / 0.35f;
-    hand_enable_t_ =
-        cfg.enable_hand_ik ? std::min(1.0f, hand_enable_t_ + toggle_step) : std::max(0.0f, hand_enable_t_ - toggle_step);
+    hand_enable_t_ = cfg.enable_hand_ik ? std::min(1.0f, hand_enable_t_ + toggle_step)
+                                        : std::max(0.0f, hand_enable_t_ - toggle_step);
     hand_enable_blend_ = hand_enable_t_ * hand_enable_t_ * (3.0f - 2.0f * hand_enable_t_);
 
     const float l_hand_gated = (l_hand_raw >= 0.45f) ? l_hand_raw : 0.0f;
@@ -315,7 +317,8 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     out.left_wrist_track_weight = w_l_arm;
     out.right_wrist_track_weight = w_r_arm;
     if (hand_enable_blend_ > 1e-4f) {
-        out.left_wrist_rot_ws = slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_LEFT_HAND]), w_l_arm);
+        out.left_wrist_rot_ws =
+            slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_LEFT_HAND]), w_l_arm);
         out.right_wrist_rot_ws =
             slerp(Quat::identity(), normalize(tracked.joint_rotations[AETHER_BONE_RIGHT_HAND]), w_r_arm);
     }
@@ -348,8 +351,7 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
     const float sway_amp = cfg.enable_idle_breathing ? cfg.idle_sway_deg * kDegToRad : 0.0f;
     const Vec3 idle_sway{0.0f, sway_amp * std::sin(kTwoPi * 0.071f * phase_time_s_),
                          0.7f * sway_amp * std::sin(kTwoPi * 0.113f * phase_time_s_ + 1.3f)};
-    const Quat spine_delta =
-        rotvec_to_quat(spine_rv + idle_sway + Vec3{hips_lean.z * 0.06f, 0.0f, spine_roll_lean});
+    const Quat spine_delta = rotvec_to_quat(spine_rv + idle_sway + Vec3{hips_lean.z * 0.06f, 0.0f, spine_roll_lean});
     out.local_rotations[AETHER_BONE_SPINE] = rest_metrics_.world_delta_to_local_pose(AETHER_BONE_SPINE, spine_delta);
 
     const Quat chest_delta =
@@ -360,8 +362,7 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
         rest_metrics_.world_delta_to_local_pose(AETHER_BONE_UPPER_CHEST, upper_chest_delta);
 
     // Shoulder subtle counter-roll (-12% of torso roll) + gentle breathing lift (0.8 deg at 0.22 Hz)
-    const float shoulder_counter_roll =
-        -0.12f * (spine_rv.z + chest_rv.z + spine_roll_lean + chest_roll_lean);
+    const float shoulder_counter_roll = -0.12f * (spine_rv.z + chest_rv.z + spine_roll_lean + chest_roll_lean);
     const Quat l_shoulder_delta =
         from_euler_xyz(0.0f, 0.0f, l_clavicle_lag_ + breath_shoulder_rad + shoulder_counter_roll);
     const Quat r_shoulder_delta =
@@ -509,8 +510,8 @@ void VisibilityFirstSolver::solve(const FilteredTrackingState& tracked, const Ae
             graph_out.ik_targets[slot][2],
         };
         // An unset slot (origin / non-finite) would drag the chain to the floor: ignore it.
-        const bool target_ok = std::isfinite(gp.x) && std::isfinite(gp.y) && std::isfinite(gp.z) &&
-                               length_sq(gp) > 1e-6f;
+        const bool target_ok =
+            std::isfinite(gp.x) && std::isfinite(gp.y) && std::isfinite(gp.z) && length_sq(gp) > 1e-6f;
         if (iw > 0.0f && target_ok) {
             const Quat gq = normalize(Quat{
                 graph_out.ik_targets[slot][3],

@@ -234,9 +234,8 @@ void CameraTransitionState::cancel() noexcept {
     vel_avatar_scale = 0.0f;
 }
 
-bool CameraTransitionState::step(float dt_s, PreviewCamera& in_out_cam,
-                                 std::array<float, 3>* in_out_avatar_pos, float* in_out_avatar_rot_y_deg,
-                                 float* in_out_avatar_scale) noexcept {
+bool CameraTransitionState::step(float dt_s, PreviewCamera& in_out_cam, std::array<float, 3>* in_out_avatar_pos,
+                                 float* in_out_avatar_rot_y_deg, float* in_out_avatar_scale) noexcept {
     if (!active) {
         return false;
     }
@@ -258,7 +257,8 @@ bool CameraTransitionState::step(float dt_s, PreviewCamera& in_out_cam,
     }
 
     const float step_dt = std::clamp(dt_s, 1e-4f, 0.05f);
-    // Critically damped SmoothDamp (~3*smooth_time reaches >98%; use 0.30*smooth_time_s so full settle <= ~2.0*smooth_time_s)
+    // Critically damped SmoothDamp (~3*smooth_time reaches >98%; use 0.30*smooth_time_s so full settle <=
+    // ~2.0*smooth_time_s)
     const float st = std::max(0.008f, smooth_time_s * 0.30f);
     in_out_cam.target_x = smooth_damp_cam(in_out_cam.target_x, target_cam.target_x, vel_cam.target_x, st, step_dt);
     in_out_cam.target_y = smooth_damp_cam(in_out_cam.target_y, target_cam.target_y, vel_cam.target_y, st, step_dt);
@@ -270,20 +270,19 @@ bool CameraTransitionState::step(float dt_s, PreviewCamera& in_out_cam,
     in_out_cam.distance = smooth_damp_cam(in_out_cam.distance, target_cam.distance, vel_cam.distance, st, step_dt);
     in_out_cam.fovy_rad = smooth_damp_cam(in_out_cam.fovy_rad, target_cam.fovy_rad, vel_cam.fovy_rad, st, step_dt);
 
-    bool settled =
-        std::abs(in_out_cam.target_x - target_cam.target_x) < 2e-4f &&
-        std::abs(in_out_cam.target_y - target_cam.target_y) < 2e-4f &&
-        std::abs(in_out_cam.target_z - target_cam.target_z) < 2e-4f &&
-        std::abs(wrap_angle_rad(in_out_cam.yaw_rad - target_cam.yaw_rad)) < 2e-4f &&
-        std::abs(in_out_cam.pitch_rad - target_cam.pitch_rad) < 2e-4f &&
-        std::abs(in_out_cam.distance - target_cam.distance) < 5e-4f &&
-        std::abs(in_out_cam.fovy_rad - target_cam.fovy_rad) < 2e-4f;
+    bool settled = std::abs(in_out_cam.target_x - target_cam.target_x) < 2e-4f &&
+                   std::abs(in_out_cam.target_y - target_cam.target_y) < 2e-4f &&
+                   std::abs(in_out_cam.target_z - target_cam.target_z) < 2e-4f &&
+                   std::abs(wrap_angle_rad(in_out_cam.yaw_rad - target_cam.yaw_rad)) < 2e-4f &&
+                   std::abs(in_out_cam.pitch_rad - target_cam.pitch_rad) < 2e-4f &&
+                   std::abs(in_out_cam.distance - target_cam.distance) < 5e-4f &&
+                   std::abs(in_out_cam.fovy_rad - target_cam.fovy_rad) < 2e-4f;
 
     if (animate_avatar) {
         if (in_out_avatar_pos != nullptr) {
             for (size_t i = 0; i < 3; ++i) {
-                (*in_out_avatar_pos)[i] = smooth_damp_cam((*in_out_avatar_pos)[i], target_avatar_pos[i],
-                                                           vel_avatar_pos[i], st, step_dt);
+                (*in_out_avatar_pos)[i] =
+                    smooth_damp_cam((*in_out_avatar_pos)[i], target_avatar_pos[i], vel_avatar_pos[i], st, step_dt);
                 if (std::abs((*in_out_avatar_pos)[i] - target_avatar_pos[i]) >= 1e-4f) {
                     settled = false;
                 }

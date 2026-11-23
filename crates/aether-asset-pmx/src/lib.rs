@@ -119,12 +119,16 @@ impl<'a> Cursor<'a> {
             return Err(PmxError::LimitExceeded("pmx text string too large"));
         }
         let raw = self.take(byte_len)?;
-        if encoding == 0 {
+        let decoded = if encoding == 0 {
             let (cow, _, _) = encoding_rs::UTF_16LE.decode(raw);
-            Ok(cow.into_owned())
+            cow.into_owned()
         } else {
-            Ok(String::from_utf8_lossy(raw).into_owned())
-        }
+            String::from_utf8_lossy(raw).into_owned()
+        };
+        Ok(decoded
+            .trim_start_matches('\u{FEFF}')
+            .trim_end_matches('\0')
+            .to_owned())
     }
 
     fn pmx_signed_idx(&mut self, size: u8) -> Result<i32, PmxError> {
@@ -264,8 +268,21 @@ pub fn classify_pmx_ray_mmd(
         "眉",
         "ハイライト",
     ]);
-    let is_face_hint = has_any(&["face", "cheek", "mouth", "tongue", "teeth", "顔", "ほほ", "頬", "口", "舌", "歯"]);
-    let is_skin_hint = is_face_hint || has_any(&["skin", "body", "neck", "hada", "肌", "首", "腕", "脚", "太もも"]);
+    let is_face_hint = has_any(&[
+        "face", "cheek", "mouth", "tongue", "teeth", "顔", "ほほ", "頬", "口", "舌", "歯",
+    ]);
+    let is_skin_hint = is_face_hint
+        || has_any(&[
+            "skin",
+            "body",
+            "neck",
+            "hada",
+            "肌",
+            "首",
+            "腕",
+            "脚",
+            "太もも",
+        ]);
     let is_hair = has_any(&[
         "hair",
         "bang",
@@ -280,12 +297,43 @@ pub fn classify_pmx_ray_mmd(
         "ツインテ",
         "もみあげ",
     ]);
-    let is_glass = has_any(&["glass", "lens", "crystal", "gem", "water", "ガラス", "眼鏡", "メガネ", "レンズ", "涙"])
-        || (diffuse[3] < 0.85 && spec_pow >= 25.0);
-    let is_emissive = has_any(&["emit", "emissive", "glow", "neon", "led", "発光", "蛍光", "ランプ"]);
+    let is_glass = has_any(&[
+        "glass",
+        "lens",
+        "crystal",
+        "gem",
+        "water",
+        "ガラス",
+        "眼鏡",
+        "メガネ",
+        "レンズ",
+        "涙",
+    ]) || (diffuse[3] < 0.85 && spec_pow >= 25.0);
+    let is_emissive = has_any(&[
+        "emit",
+        "emissive",
+        "glow",
+        "neon",
+        "led",
+        "発光",
+        "蛍光",
+        "ランプ",
+    ]);
     let spec_luma = 0.2126 * specular[0] + 0.7152 * specular[1] + 0.0722 * specular[2];
     let is_metallic = has_any(&[
-        "metal", "gold", "silver", "chrome", "steel", "armor", "buckle", "button", "zipper", "金属", "金", "銀", "メッキ",
+        "metal",
+        "gold",
+        "silver",
+        "chrome",
+        "steel",
+        "armor",
+        "buckle",
+        "button",
+        "zipper",
+        "金属",
+        "金",
+        "銀",
+        "メッキ",
         "鉄",
     ]) || (sphere_mode == 2 && spec_pow >= 28.0 && spec_luma > 0.35);
 
@@ -483,7 +531,9 @@ pub fn parse_pmx_bytes(data: &[u8]) -> Result<PmxDocument, PmxError> {
     }
     let version = cur.f32_le()?;
     if !(1.99..=2.15).contains(&version) {
-        return Err(PmxError::Parse("unsupported PMX version (expected 2.0 or 2.1)"));
+        return Err(PmxError::Parse(
+            "unsupported PMX version (expected 2.0 or 2.1)",
+        ));
     }
     let g_len = usize::from(cur.u8()?);
     if g_len < 8 {
@@ -767,9 +817,7 @@ pub fn parse_pmx_bytes(data: &[u8]) -> Result<PmxDocument, PmxError> {
             if t >= 0 && (t as usize) < bone_count {
                 ik_target = Some(t as usize);
             }
-            let link_cnt = usize::try_from(cur.i32_le()?.max(0))
-                .unwrap_or(0)
-                .min(128);
+            let link_cnt = usize::try_from(cur.i32_le()?.max(0)).unwrap_or(0).min(128);
             ik_links.reserve(link_cnt);
             for _ in 0..link_cnt {
                 let lb = cur.pmx_signed_idx(bone_idx_sz)?;
@@ -1262,7 +1310,9 @@ mod tests {
             buf.push(0);
             buf.extend_from_slice(&0xFFFFu16.to_le_bytes());
             buf.push(0);
-            for f in [1.0f32, 1.0, 1.0, 0.0, 10.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.9, 0.9, 0.0, 0.5] {
+            for f in [
+                1.0f32, 1.0, 1.0, 0.0, 10.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.9, 0.9, 0.0, 0.5,
+            ] {
                 buf.extend_from_slice(&f.to_le_bytes());
             }
             buf.push(mode);

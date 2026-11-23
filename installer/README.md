@@ -16,7 +16,7 @@ Custom `.exe` installers (self-extracting stubs, UPX/packed wrappers, embedded P
 2. **PE Metadata & Least Privilege**: Every first-party executable (`aether_studio.exe`, `aether-plugin-runner.exe`) and DirectShow COM DLL (`aether_vcam_ds_x64.dll`, `aether_vcam_ds_x86.dll`) embeds full Win32 `VS_VERSION_INFO` metadata and an explicit `requestedExecutionLevel level="asInvoker"` application manifest.
 3. **App-Local Microsoft Visual C++ Runtime**: Signed Microsoft `VC143.CRT` runtime DLLs are staged app-local next to the binaries (`Program Files\AETHER-2.5D Studio` and `vcam/`), avoiding nested third-party redistributable installers.
 4. **Standard COM Virtual Camera Registration**: DirectShow filter registration (`regsvr32 /s` on install, `/u /s` on uninstall) runs solely as deferred elevated actions against the installed DLL paths and removes all entries cleanly on uninstall.
-5. **User-Writable Data Separation**: Installed runs write settings, logs, caches, custom camera presets, and custom lighting rigs to `%LOCALAPPDATA%\AetherStudio` (never to `Program Files`).
+5. **User-Writable Data Separation**: Installed runs write session state (`session_state.json`), project archives (`.apr`), custom `.alfx` packages, logs, caches, and custom camera presets to `%APPDATA%\AETHER-2.5D-Studio` / `%LOCALAPPDATA%\AetherStudio` (never to `Program Files`).
 
 ### About Windows SmartScreen on Unsigned Community Builds
 
@@ -24,7 +24,7 @@ If the release is built without `-CertThumbprint` (no paid EV/OV Authenticode ce
 
 - Always verify the download against `SHA256SUMS.txt` from the GitHub Release page:
   ```powershell
-  Get-FileHash .\AetherStudio-a1.0.3B-x64.msi -Algorithm SHA256
+  Get-FileHash .\AetherStudio-a1.0.4B-x64.msi -Algorithm SHA256
   ```
 - **Never** distribute binaries signed with a self-signed certificate for public releases—untrusted root signatures still warn in SmartScreen and trigger reputation issues.
 
@@ -60,12 +60,12 @@ powershell -ExecutionPolicy Bypass -File installer\Build-Installer.ps1 -CertThum
 ```
 
 Outputs are written to `dist\`:
-- `dist\AetherStudio-a1.0.3B-x64.msi`
-- `dist\AetherStudio-a1.0.3B-win64-portable.zip`
+- `dist\AetherStudio-a1.0.4B-x64.msi`
+- `dist\AetherStudio-a1.0.4B-win64-portable.zip`
 - `dist\SHA256SUMS.txt`
 
 ## What the Installer Installs
 
-- **Application**: `C:\Program Files\AETHER-2.5D Studio\` (`aether_studio.exe`, `aether-plugin-runner.exe`, runtime DLLs, `models\`, `assets\fonts\`, `config\`, `vcam\x64\aether_vcam_ds_x64.dll`, `LICENSE.txt`, `README.md`)
+- **Application**: `C:\Program Files\AETHER-2.5D Studio\` (`aether_studio.exe`, `aether-plugin-runner.exe`, runtime DLLs, `models\`, `assets\fonts\`, `config\`, `presets\alfx\`, `vcam\x64\aether_vcam_ds_x64.dll`, `LICENSE.txt`, `README.md`)
 - **32-bit Virtual Camera**: `C:\Program Files (x86)\AETHER-2.5D Studio\vcam\aether_vcam_ds_x86.dll`
-- **Shortcuts & Registry**: Start Menu folder, Desktop shortcut, Apps & Features entry (`AiChan277 / AETHER-2.5D Studio`), `App Paths\aether_studio.exe`, and DirectShow `CLSID_VideoInputDeviceCategory` registration.
+- **Shortcuts, File Associations & Registry**: Start Menu folder, Desktop shortcut, `.apr` & `.alfx` Explorer file associations, Apps & Features entry (`AiChan277 / AETHER-2.5D Studio`), `App Paths\aether_studio.exe`, and DirectShow `CLSID_VideoInputDeviceCategory` registration.

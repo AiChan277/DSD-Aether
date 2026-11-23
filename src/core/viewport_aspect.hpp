@@ -57,26 +57,22 @@ enum class ViewportAspectMode : uint8_t {
 struct ViewportAspectLayout {
     float vp_w{1.0f};
     float vp_h{1.0f};
-    float frame_x0{0.0f};      ///< Pixel-local X start inside viewport [0, vp_w]
-    float frame_y0{0.0f};      ///< Pixel-local Y start inside viewport [0, vp_h]
-    float frame_x1{1.0f};      ///< Pixel-local X end inside viewport [0, vp_w]
-    float frame_y1{1.0f};      ///< Pixel-local Y end inside viewport [0, vp_h]
-    float norm_x0{0.0f};       ///< Normalized [0, 1] X start inside viewport
-    float norm_y0{0.0f};       ///< Normalized [0, 1] Y start inside viewport
-    float norm_x1{1.0f};       ///< Normalized [0, 1] X end inside viewport
-    float norm_y1{1.0f};       ///< Normalized [0, 1] Y end inside viewport
-    float uv_du{1.0f};         ///< Sampled UV width from broadcast source texture (<= 1.0)
-    float uv_dv{1.0f};         ///< Sampled UV height from broadcast source texture (<= 1.0)
+    float frame_x0{0.0f}; ///< Pixel-local X start inside viewport [0, vp_w]
+    float frame_y0{0.0f}; ///< Pixel-local Y start inside viewport [0, vp_h]
+    float frame_x1{1.0f}; ///< Pixel-local X end inside viewport [0, vp_w]
+    float frame_y1{1.0f}; ///< Pixel-local Y end inside viewport [0, vp_h]
+    float norm_x0{0.0f};  ///< Normalized [0, 1] X start inside viewport
+    float norm_y0{0.0f};  ///< Normalized [0, 1] Y start inside viewport
+    float norm_x1{1.0f};  ///< Normalized [0, 1] X end inside viewport
+    float norm_y1{1.0f};  ///< Normalized [0, 1] Y end inside viewport
+    float uv_du{1.0f};    ///< Sampled UV width from broadcast source texture (<= 1.0)
+    float uv_dv{1.0f};    ///< Sampled UV height from broadcast source texture (<= 1.0)
     float frame_aspect{16.0f / 9.0f};
     bool explicit_matte{false};
 
-    [[nodiscard]] float frame_width() const noexcept {
-        return std::max(1.0f, frame_x1 - frame_x0);
-    }
+    [[nodiscard]] float frame_width() const noexcept { return std::max(1.0f, frame_x1 - frame_x0); }
 
-    [[nodiscard]] float frame_height() const noexcept {
-        return std::max(1.0f, frame_y1 - frame_y0);
-    }
+    [[nodiscard]] float frame_height() const noexcept { return std::max(1.0f, frame_y1 - frame_y0); }
 
     /** Computes effective vertical FOV (radians) matching the sampled vertical UV span `uv_dv`. */
     [[nodiscard]] float effective_fovy_rad(float source_fovy_rad) const noexcept {
@@ -96,8 +92,8 @@ struct ViewportAspectLayout {
  * Computes lossless 1:1 pixel-aspect layout between a rendered broadcast source (`out_w x out_h`, e.g. 1920x1080)
  * and a dynamically sized Studio viewport (`vp_w x vp_h`).
  */
-[[nodiscard]] inline ViewportAspectLayout compute_viewport_aspect_layout(
-    float vp_w, float vp_h, float out_w, float out_h, ViewportAspectMode mode) noexcept {
+[[nodiscard]] inline ViewportAspectLayout
+compute_viewport_aspect_layout(float vp_w, float vp_h, float out_w, float out_h, ViewportAspectMode mode) noexcept {
     ViewportAspectLayout r{};
     const float safe_vp_w = std::max(1.0f, vp_w);
     const float safe_vp_h = std::max(1.0f, vp_h);

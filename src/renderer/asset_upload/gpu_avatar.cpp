@@ -1,4 +1,5 @@
 #include "renderer/asset_upload/gpu_avatar.hpp"
+#include "renderer/asset_upload/vrm_parity_prep.hpp"
 
 #include "animation/math_quat.hpp"
 #include "core/clock.hpp"
@@ -235,8 +236,7 @@ void build_joint_humanoid_sources(const std::vector<AetherJointDesc>& joints, co
 }
 
 void build_joint_spring_sources(const std::vector<AetherJointDesc>& joints,
-                                const std::vector<AetherSpringJointDesc>& springs,
-                                std::vector<int32_t>& out_sources) {
+                                const std::vector<AetherSpringJointDesc>& springs, std::vector<int32_t>& out_sources) {
     out_sources.assign(joints.size(), -1);
     constexpr uint32_t kCustomSpringBoneOffset = 64U;
     constexpr uint32_t kMaxCustomSprings = 160U;
@@ -503,9 +503,8 @@ bool sample_avatar_texel_rgba8(const AetherTextureDesc& td, const std::vector<ui
     const uint32_t p0 = static_cast<uint32_t>((lo >> 63U) & 1ULL);
     const uint32_t p1 = static_cast<uint32_t>(hi & 1ULL);
     const uint32_t pi = (ty & 3U) * 4U + (tx & 3U);
-    const uint32_t idx =
-        (pi == 0U) ? static_cast<uint32_t>((hi >> 1U) & 0x7ULL)
-                   : static_cast<uint32_t>((hi >> (4U + (pi - 1U) * 4U)) & 0xFULL);
+    const uint32_t idx = (pi == 0U) ? static_cast<uint32_t>((hi >> 1U) & 0x7ULL)
+                                    : static_cast<uint32_t>((hi >> (4U + (pi - 1U) * 4U)) & 0xFULL);
     static constexpr uint32_t kWeights[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
     const uint32_t w = kWeights[idx & 15U];
     for (uint32_t ch = 0U; ch < 4U; ++ch) {
@@ -566,10 +565,9 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
         if (td.width == 0U || td.height == 0U) {
             return;
         }
-        const bool is_srgb =
-            (td.format == AETHER_TEX_FORMAT_RGBA8_SRGB || td.format == AETHER_TEX_FORMAT_BC7_SRGB);
-        const size_t idx_end = std::min<size_t>(static_cast<size_t>(sm.index_offset) + sm.index_count,
-                                                avatar.rest_indices.size());
+        const bool is_srgb = (td.format == AETHER_TEX_FORMAT_RGBA8_SRGB || td.format == AETHER_TEX_FORMAT_BC7_SRGB);
+        const size_t idx_end =
+            std::min<size_t>(static_cast<size_t>(sm.index_offset) + sm.index_count, avatar.rest_indices.size());
         const size_t stride = std::max<size_t>(1U, (idx_end - sm.index_offset) / 2400U);
         for (size_t ii = sm.index_offset; ii < idx_end; ii += stride) {
             const uint32_t vi = avatar.rest_indices[ii];
@@ -591,7 +589,8 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
             const AetherVertexSurface& s = avatar.rest_surfaces[vi];
             const float u = std::clamp(s.uv0[0], 0.0f, 1.0f);
             const float v_coord = std::clamp(s.uv0[1], 0.0f, 1.0f);
-            const uint32_t tx = std::min<uint32_t>(td.width - 1U, static_cast<uint32_t>(u * static_cast<float>(td.width)));
+            const uint32_t tx =
+                std::min<uint32_t>(td.width - 1U, static_cast<uint32_t>(u * static_cast<float>(td.width)));
             const uint32_t ty =
                 std::min<uint32_t>(td.height - 1U, static_cast<uint32_t>(v_coord * static_cast<float>(td.height)));
             uint8_t px[4]{};
@@ -601,9 +600,12 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
             if (px[3] < 180U) {
                 continue;
             }
-            const float r = (is_srgb ? srgb_u8_to_lin(px[0]) : (static_cast<float>(px[0]) / 255.0f)) * mat.base_color[0];
-            const float g = (is_srgb ? srgb_u8_to_lin(px[1]) : (static_cast<float>(px[1]) / 255.0f)) * mat.base_color[1];
-            const float b = (is_srgb ? srgb_u8_to_lin(px[2]) : (static_cast<float>(px[2]) / 255.0f)) * mat.base_color[2];
+            const float r =
+                (is_srgb ? srgb_u8_to_lin(px[0]) : (static_cast<float>(px[0]) / 255.0f)) * mat.base_color[0];
+            const float g =
+                (is_srgb ? srgb_u8_to_lin(px[1]) : (static_cast<float>(px[1]) / 255.0f)) * mat.base_color[1];
+            const float b =
+                (is_srgb ? srgb_u8_to_lin(px[2]) : (static_cast<float>(px[2]) / 255.0f)) * mat.base_color[2];
             const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
             if (lum < 0.04f) {
                 continue;
@@ -616,7 +618,8 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
         if (sm.material_index >= avatar.materials.size()) {
             return false;
         }
-        const std::string m_low = to_lower_str(read_cstr_from_pool(avatar.strings, avatar.materials[sm.material_index].name_offset));
+        const std::string m_low =
+            to_lower_str(read_cstr_from_pool(avatar.strings, avatar.materials[sm.material_index].name_offset));
         const std::string s_low = to_lower_str(avatar.string_slice(sm.name_offset, sm.name_len));
         auto has_bad = [](const std::string& t) {
             return t.find("eye") != std::string::npos || t.find("mouth") != std::string::npos ||
@@ -628,7 +631,8 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
         if (has_bad(m_low) || has_bad(s_low)) {
             return false;
         }
-        const bool named_face_skin = (m_low.find("face") != std::string::npos && m_low.find("skin") != std::string::npos);
+        const bool named_face_skin =
+            (m_low.find("face") != std::string::npos && m_low.find("skin") != std::string::npos);
         const bool flagged_face = ((sm.flags & AETHER_SUBMESH_FLAG_FACE) != 0U) &&
                                   (m_low.find("face") != std::string::npos || s_low.find("face") != std::string::npos ||
                                    m_low.find("skin") != std::string::npos);
@@ -674,7 +678,10 @@ void compute_face_skin_reference(GpuAvatar& avatar) {
 
 } // namespace
 
+StagedAvatarUpload::~StagedAvatarUpload() noexcept = default;
+
 void StagedAvatarUpload::release() noexcept {
+    prebuilt_avatar.reset();
     if (device != nullptr && staging_buf.handle != VK_NULL_HANDLE) {
         device->destroy_buffer(staging_buf);
     }
@@ -760,9 +767,7 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
             const float px = joint_rest_world_pos[j][0];
             const float py = joint_rest_world_pos[j][1];
             const std::array<float, 12> delta{
-                c,    -s,   0.0f, px - (c * px - s * py),
-                s,    c,    0.0f, py + ty - (s * px + c * py),
-                0.0f, 0.0f, 1.0f, 0.0f,
+                c, -s, 0.0f, px - (c * px - s * py), s, c, 0.0f, py + ty - (s * px + c * py), 0.0f, 0.0f, 1.0f, 0.0f,
             };
             std::array<float, 12> composed{};
             mul_3x4(joint_skin_matrices[j], delta, composed);
@@ -813,9 +818,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                 for (size_t mi = 0; mi < morph_ranges.size(); ++mi) {
                     float& w = morph_weights_scratch[mi];
                     const MorphMeta& mm = morph_meta[mi];
-                    const bool is_eye_brow_emotion =
-                        !mm.is_blink && mm.affects_eyelids && mm.region != MorphRegion::Mouth &&
-                        mm.region != MorphRegion::Other;
+                    const bool is_eye_brow_emotion = !mm.is_blink && mm.affects_eyelids &&
+                                                     mm.region != MorphRegion::Mouth && mm.region != MorphRegion::Other;
                     if (is_eye_brow_emotion) {
                         w *= eyelid_guard;
                     }
@@ -848,10 +852,12 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
 
                 const float eye_l_budget = std::max(0.0f, 1.0f - std::min(eye_l_blink, 1.0f));
                 const float eye_r_budget = std::max(0.0f, 1.0f - std::min(eye_r_blink, 1.0f));
-                const float eye_l_scale =
-                    (eye_l_non_blink > eye_l_budget && eye_l_non_blink > 1e-5f) ? (eye_l_budget / eye_l_non_blink) : 1.0f;
-                const float eye_r_scale =
-                    (eye_r_non_blink > eye_r_budget && eye_r_non_blink > 1e-5f) ? (eye_r_budget / eye_r_non_blink) : 1.0f;
+                const float eye_l_scale = (eye_l_non_blink > eye_l_budget && eye_l_non_blink > 1e-5f)
+                                              ? (eye_l_budget / eye_l_non_blink)
+                                              : 1.0f;
+                const float eye_r_scale = (eye_r_non_blink > eye_r_budget && eye_r_non_blink > 1e-5f)
+                                              ? (eye_r_budget / eye_r_non_blink)
+                                              : 1.0f;
                 const float blink_l_scale = (eye_l_blink > 1.0f) ? (1.0f / eye_l_blink) : 1.0f;
                 const float blink_r_scale = (eye_r_blink > 1.0f) ? (1.0f / eye_r_blink) : 1.0f;
                 const float brow_scale = (brow_sum > 0.75f) ? (0.75f / brow_sum) : 1.0f;
@@ -923,9 +929,16 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
         if (pmx_aux_header.is_pmx != 0U) {
             if (!pmx_channel_weights_scratch.empty()) {
                 std::fill(pmx_channel_weights_scratch.begin(), pmx_channel_weights_scratch.end(), 0.0f);
-                const size_t copy_n = std::min(morph_weights_scratch.size(), pmx_channel_weights_scratch.size());
-                for (size_t i = 0; i < copy_n; ++i) {
-                    pmx_channel_weights_scratch[i] = morph_weights_scratch[i];
+                for (size_t ci = 0; ci < pmx_morph_channels.size() && ci < pmx_channel_weights_scratch.size(); ++ci) {
+                    const auto& ch = pmx_morph_channels[ci];
+                    float w = 0.0f;
+                    if (ch.vertex_morph_index != AETHER_INVALID_INDEX &&
+                        static_cast<size_t>(ch.vertex_morph_index) < morph_weights_scratch.size()) {
+                        w = morph_weights_scratch[ch.vertex_morph_index];
+                    } else if (expr_weights != nullptr && ch.appendix_b_slot < expr_count) {
+                        w = std::clamp(expr_weights[ch.appendix_b_slot], 0.0f, 1.0f);
+                    }
+                    pmx_channel_weights_scratch[ci] = w;
                 }
                 for (int pass = 0; pass < 2; ++pass) {
                     for (size_t ci = 0; ci < pmx_morph_channels.size(); ++ci) {
@@ -937,18 +950,16 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                         if (std::abs(gw) < 1e-4f) {
                             continue;
                         }
-                        const uint32_t end = std::min<uint32_t>(
-                            ch.child_offset + ch.child_count,
-                            static_cast<uint32_t>(pmx_group_children.size()));
+                        const uint32_t end = std::min<uint32_t>(ch.child_offset + ch.child_count,
+                                                                static_cast<uint32_t>(pmx_group_children.size()));
                         for (uint32_t gi = ch.child_offset; gi < end; ++gi) {
                             const auto& child = pmx_group_children[gi];
                             if (static_cast<size_t>(child.child_morph_index) < pmx_channel_weights_scratch.size() &&
                                 static_cast<size_t>(child.child_morph_index) != ci) {
-                                pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] =
-                                    std::clamp(
-                                        pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] +
-                                            gw * child.weight,
-                                        0.0f, 1.0f);
+                                pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] = std::clamp(
+                                    pmx_channel_weights_scratch[static_cast<size_t>(child.child_morph_index)] +
+                                        gw * child.weight,
+                                    0.0f, 1.0f);
                             }
                         }
                     }
@@ -968,9 +979,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                         if (std::abs(w) < 1e-4f) {
                             continue;
                         }
-                        const uint32_t end = std::min<uint32_t>(
-                            ch.uv_offset + ch.uv_count,
-                            static_cast<uint32_t>(pmx_uv_morphs.size()));
+                        const uint32_t end =
+                            std::min<uint32_t>(ch.uv_offset + ch.uv_count, static_cast<uint32_t>(pmx_uv_morphs.size()));
                         for (uint32_t ui = ch.uv_offset; ui < end; ++ui) {
                             const auto& ud = pmx_uv_morphs[ui];
                             if (ud.vertex_index < uv_deltas_scratch.size()) {
@@ -1000,13 +1010,11 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                         if (std::abs(w) < 1e-4f) {
                             continue;
                         }
-                        const uint32_t end = std::min<uint32_t>(
-                            ch.mat_offset + ch.mat_count,
-                            static_cast<uint32_t>(pmx_mat_morphs.size()));
+                        const uint32_t end = std::min<uint32_t>(ch.mat_offset + ch.mat_count,
+                                                                static_cast<uint32_t>(pmx_mat_morphs.size()));
                         for (uint32_t mi = ch.mat_offset; mi < end; ++mi) {
                             const auto& md = pmx_mat_morphs[mi];
-                            const size_t mat_lo =
-                                (md.material_index < 0) ? 0U : static_cast<size_t>(md.material_index);
+                            const size_t mat_lo = (md.material_index < 0) ? 0U : static_cast<size_t>(md.material_index);
                             const size_t mat_hi = (md.material_index < 0)
                                                       ? morphed_materials_scratch.size()
                                                       : std::min(mat_lo + 1U, morphed_materials_scratch.size());
@@ -1062,9 +1070,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                     if (std::abs(w) < 1e-4f) {
                         continue;
                     }
-                    const uint32_t end = std::min<uint32_t>(
-                        ch.bone_offset + ch.bone_count,
-                        static_cast<uint32_t>(pmx_bone_morphs.size()));
+                    const uint32_t end = std::min<uint32_t>(ch.bone_offset + ch.bone_count,
+                                                            static_cast<uint32_t>(pmx_bone_morphs.size()));
                     for (uint32_t bi = ch.bone_offset; bi < end; ++bi) {
                         const auto& bm = pmx_bone_morphs[bi];
                         if (static_cast<size_t>(bm.bone_index) < j_count) {
@@ -1083,9 +1090,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                         const float* inv_row = &pmx_rest_inv_mats[j * 12U];
                         // Multiply column-major 4x4 w_col by row-major 3x4 inv_row into row-major 3x4 delta
                         std::array<float, 12> w_row{
-                            w_col[0], w_col[4], w_col[8],  w_col[12],
-                            w_col[1], w_col[5], w_col[9],  w_col[13],
-                            w_col[2], w_col[6], w_col[10], w_col[14],
+                            w_col[0], w_col[4],  w_col[8], w_col[12], w_col[1],  w_col[5],
+                            w_col[9], w_col[13], w_col[2], w_col[6],  w_col[10], w_col[14],
                         };
                         std::array<float, 12> inv_arr{};
                         std::memcpy(inv_arr.data(), inv_row, sizeof(float) * 12U);
@@ -1148,7 +1154,8 @@ void GpuAvatar::update_pose(uint32_t frame_slot, uint64_t pose_seq, const float 
                 }
                 return {0.0f, 0.0f, 0.0f, 1.0f};
             };
-            auto slerp_q = [](std::array<float, 4> a, std::array<float, 4> b, float t) noexcept -> std::array<float, 4> {
+            auto slerp_q = [](std::array<float, 4> a, std::array<float, 4> b,
+                              float t) noexcept -> std::array<float, 4> {
                 float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
                 if (dot < 0.0f) {
                     b = {-b[0], -b[1], -b[2], -b[3]};
@@ -1297,60 +1304,58 @@ uint32_t GpuAvatar::mapped_humanoid_count() const noexcept {
     return mapped;
 }
 
-Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
-                                                          std::unique_ptr<StagedAvatarUpload> staged) {
-    if (!staged || staged->staging_buf.handle == VK_NULL_HANDLE || staged->staging_buf.info.pMappedData == nullptr) {
-        return fail(ErrorCode::InvalidArg, "Invalid StagedAvatarUpload payload");
+void prepare_cpu_avatar_payload(StagedAvatarUpload& staged) {
+    if (staged.prebuilt_avatar || staged.staging_buf.info.pMappedData == nullptr) {
+        return;
     }
 
-    const uint64_t upload_t0 = now_us();
-    const auto* mapped = static_cast<const uint8_t*>(staged->staging_buf.info.pMappedData);
+    auto* mapped_mut = static_cast<uint8_t*>(staged.staging_buf.info.pMappedData);
+    const uint8_t* mapped = mapped_mut;
 
     auto avatar = std::make_unique<GpuAvatar>();
-    avatar->device = &rhi;
-    avatar->requirements = staged->requirements;
-    avatar->desc = staged->desc;
-    avatar->source_path = std::move(staged->source_path);
-    avatar->stats.open_query_ms = staged->open_query_ms;
-    avatar->stats.fill_ms = staged->fill_ms;
-    avatar->stats.staging_bytes = staged->staging_buf.size;
-    avatar->stats.pointer_identity_verified = staged->pointer_identity_verified;
+    avatar->requirements = staged.requirements;
+    avatar->desc = staged.desc;
+    avatar->source_path = std::move(staged.source_path);
+    avatar->stats.open_query_ms = staged.open_query_ms;
+    avatar->stats.fill_ms = staged.fill_ms;
+    avatar->stats.staging_bytes = staged.staging_buf.size;
+    avatar->stats.pointer_identity_verified = staged.pointer_identity_verified;
 
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_MORPH_RANGES],
-                    staged->requirements.stream_bytes[AETHER_STREAM_MORPH_RANGES], avatar->morph_ranges);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_SUBMESHES],
-                    staged->requirements.stream_bytes[AETHER_STREAM_SUBMESHES], avatar->submeshes);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_MATERIALS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_MATERIALS], avatar->materials);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_JOINTS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_JOINTS], avatar->joints);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_SPRINGS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_SPRINGS], avatar->springs);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_COLLIDERS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_COLLIDERS], avatar->colliders);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_EXPRESSIONS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_EXPRESSIONS], avatar->expressions);
-    copy_stream_pod(mapped, staged->stream_offsets[AETHER_STREAM_TEXTURE_DESCS],
-                    staged->requirements.stream_bytes[AETHER_STREAM_TEXTURE_DESCS], avatar->texture_descs);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_MORPH_RANGES],
+                    staged.requirements.stream_bytes[AETHER_STREAM_MORPH_RANGES], avatar->morph_ranges);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_SUBMESHES],
+                    staged.requirements.stream_bytes[AETHER_STREAM_SUBMESHES], avatar->submeshes);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_MATERIALS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_MATERIALS], avatar->materials);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_JOINTS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_JOINTS], avatar->joints);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_SPRINGS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_SPRINGS], avatar->springs);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_COLLIDERS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_COLLIDERS], avatar->colliders);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_EXPRESSIONS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_EXPRESSIONS], avatar->expressions);
+    copy_stream_pod(mapped, staged.stream_offsets[AETHER_STREAM_TEXTURE_DESCS],
+                    staged.requirements.stream_bytes[AETHER_STREAM_TEXTURE_DESCS], avatar->texture_descs);
 
-    const uint64_t str_bytes = staged->requirements.stream_bytes[AETHER_STREAM_STRINGS];
+    const uint64_t str_bytes = staged.requirements.stream_bytes[AETHER_STREAM_STRINGS];
     if (str_bytes > 0) {
-        avatar->strings.assign(reinterpret_cast<const char*>(mapped + staged->stream_offsets[AETHER_STREAM_STRINGS]),
+        avatar->strings.assign(reinterpret_cast<const char*>(mapped + staged.stream_offsets[AETHER_STREAM_STRINGS]),
                                static_cast<size_t>(str_bytes));
     }
 
     // Move PMX 2.0/2.1 auxiliary payload and initialize zero-alloc runtime buffers.
-    avatar->pmx_aux_header = staged->pmx_aux_header;
-    avatar->pmx_sdef_vertices = std::move(staged->pmx_sdef_vertices);
-    avatar->pmx_bone_exts = std::move(staged->pmx_bone_exts);
-    avatar->pmx_ik_links = std::move(staged->pmx_ik_links);
-    avatar->pmx_morph_channels = std::move(staged->pmx_morph_channels);
-    avatar->pmx_group_children = std::move(staged->pmx_group_children);
-    avatar->pmx_uv_morphs = std::move(staged->pmx_uv_morphs);
-    avatar->pmx_mat_morphs = std::move(staged->pmx_mat_morphs);
-    avatar->pmx_bone_morphs = std::move(staged->pmx_bone_morphs);
-    avatar->pmx_rigid_bodies = std::move(staged->pmx_rigid_bodies);
-    avatar->pmx_constraints_6dof = std::move(staged->pmx_constraints_6dof);
+    avatar->pmx_aux_header = staged.pmx_aux_header;
+    avatar->pmx_sdef_vertices = std::move(staged.pmx_sdef_vertices);
+    avatar->pmx_bone_exts = std::move(staged.pmx_bone_exts);
+    avatar->pmx_ik_links = std::move(staged.pmx_ik_links);
+    avatar->pmx_morph_channels = std::move(staged.pmx_morph_channels);
+    avatar->pmx_group_children = std::move(staged.pmx_group_children);
+    avatar->pmx_uv_morphs = std::move(staged.pmx_uv_morphs);
+    avatar->pmx_mat_morphs = std::move(staged.pmx_mat_morphs);
+    avatar->pmx_bone_morphs = std::move(staged.pmx_bone_morphs);
+    avatar->pmx_rigid_bodies = std::move(staged.pmx_rigid_bodies);
+    avatar->pmx_constraints_6dof = std::move(staged.pmx_constraints_6dof);
     avatar->morphed_materials_scratch = avatar->materials;
 
     if (avatar->pmx_aux_header.is_pmx != 0U) {
@@ -1374,14 +1379,88 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
             std::memcpy(&avatar->pmx_rest_inv_mats[j * 12U], avatar->joints[j].inverse_bind_matrix_row_major,
                         sizeof(float) * 12U);
         }
-        avatar->pmx_solver.init(avatar->joints, avatar->pmx_bone_exts, avatar->pmx_ik_links,
-                                avatar->pmx_rigid_bodies, avatar->pmx_constraints_6dof);
+        avatar->pmx_solver.init(avatar->joints, avatar->pmx_bone_exts, avatar->pmx_ik_links, avatar->pmx_rigid_bodies,
+                                avatar->pmx_constraints_6dof);
+    }
+
+    const uint64_t v25_bytes = staged.requirements.stream_bytes[AETHER_STREAM_VERTEX25D];
+    const uint64_t surf_bytes = staged.requirements.stream_bytes[AETHER_STREAM_SURFACE];
+    const uint64_t skin_bytes = staged.requirements.stream_bytes[AETHER_STREAM_SKIN];
+    const uint64_t idx_bytes = staged.requirements.stream_bytes[AETHER_STREAM_INDEX_U32];
+    const uint64_t morph_bytes = staged.requirements.stream_bytes[AETHER_STREAM_MORPH_DELTAS];
+
+    auto assign_stream_pod = [&](uint64_t off, uint64_t bytes, auto& out) {
+        using Elem = std::decay_t<decltype(out)>::value_type;
+        if (bytes >= sizeof(Elem)) {
+            const auto* src = reinterpret_cast<const Elem*>(mapped + off);
+            out.assign(src, src + (bytes / sizeof(Elem)));
+        }
+    };
+    assign_stream_pod(staged.stream_offsets[AETHER_STREAM_VERTEX25D], v25_bytes, avatar->rest_vertices);
+    assign_stream_pod(staged.stream_offsets[AETHER_STREAM_SURFACE], surf_bytes, avatar->rest_surfaces);
+    assign_stream_pod(staged.stream_offsets[AETHER_STREAM_INDEX_U32], idx_bytes, avatar->rest_indices);
+    assign_stream_pod(staged.stream_offsets[AETHER_STREAM_SKIN], skin_bytes, avatar->skin_vertices);
+    assign_stream_pod(staged.stream_offsets[AETHER_STREAM_MORPH_DELTAS], morph_bytes, avatar->morph_deltas);
+
+    const uint64_t tex_pix_bytes = staged.requirements.stream_bytes[AETHER_STREAM_TEXTURE_PIXELS];
+    if (!staged.cpu_texture_pixels.empty()) {
+        avatar->cpu_texture_pixels = std::move(staged.cpu_texture_pixels);
+    } else if (tex_pix_bytes > 0) {
+        const uint8_t* tp = mapped + staged.stream_offsets[AETHER_STREAM_TEXTURE_PIXELS];
+        avatar->cpu_texture_pixels.assign(tp, tp + static_cast<size_t>(tex_pix_bytes));
+    }
+
+    (void)prepare_vrm_and_pmx_parity(*avatar, true);
+    if (v25_bytes > 0 && !avatar->rest_vertices.empty()) {
+        std::memcpy(mapped_mut + staged.stream_offsets[AETHER_STREAM_VERTEX25D], avatar->rest_vertices.data(),
+                    static_cast<size_t>(v25_bytes));
     }
 
     // Populate fallback 1x1 white RGBA8 texel in the reserved staging tail.
-    std::array<uint8_t, 4> white_px{255U, 255U, 255U, 255U};
-    std::memcpy(static_cast<uint8_t*>(staged->staging_buf.info.pMappedData) + staged->fallback_white_offset,
-                white_px.data(), white_px.size());
+    static constexpr std::array<uint8_t, 4> kWhitePx{255U, 255U, 255U, 255U};
+    std::memcpy(mapped_mut + staged.fallback_white_offset, kWhitePx.data(), kWhitePx.size());
+
+    avatar->skinned_vertices_scratch.assign(avatar->rest_vertices.begin(), avatar->rest_vertices.end());
+    avatar->morph_weights_scratch.assign(avatar->morph_ranges.size(), 0.0f);
+
+    compute_rest_joint_world_positions(avatar->joints, avatar->joint_rest_world_pos);
+    avatar->joint_anim_world_pos = avatar->joint_rest_world_pos;
+    compute_face_skin_reference(*avatar);
+    build_joint_humanoid_sources(avatar->joints, avatar->desc, avatar->joint_humanoid_source);
+    build_joint_spring_sources(avatar->joints, avatar->springs, avatar->joint_spring_source);
+    build_deduped_expressions_and_morph_meta(avatar->expressions, avatar->morph_ranges, avatar->morph_deltas,
+                                             avatar->rest_vertices.size(), avatar->deduped_expressions,
+                                             avatar->morph_meta);
+    detect_brow_bone_bindings(avatar->joints, avatar->strings, avatar->joint_humanoid_source,
+                              avatar->joint_rest_world_pos, avatar->brow_bones);
+    avatar->has_split_brow_morphs = false;
+    for (const AetherExpressionBindingDesc& eb : avatar->deduped_expressions) {
+        if (eb.input_slot >= 41U && eb.input_slot <= 45U) {
+            avatar->has_split_brow_morphs = true;
+            break;
+        }
+    }
+    avatar->joint_skin_matrices.assign(avatar->joints.size(),
+                                       {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f});
+    avatar->bone_line_scratch.resize(avatar->joints.size() * 4U);
+    emit_bone_line_vertices(avatar->joints, avatar->joint_rest_world_pos, avatar->bone_line_scratch);
+
+    staged.prebuilt_avatar = std::move(avatar);
+}
+
+Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
+                                                          std::unique_ptr<StagedAvatarUpload> staged) {
+    if (!staged || staged->staging_buf.handle == VK_NULL_HANDLE || staged->staging_buf.info.pMappedData == nullptr) {
+        return fail(ErrorCode::InvalidArg, "Invalid StagedAvatarUpload payload");
+    }
+
+    const uint64_t upload_t0 = now_us();
+    if (!staged->prebuilt_avatar) {
+        prepare_cpu_avatar_payload(*staged);
+    }
+
+    auto avatar = std::move(staged->prebuilt_avatar);
+    avatar->device = &rhi;
 
     vmaFlushAllocation(rhi.allocator(), staged->staging_buf.allocation, 0, VK_WHOLE_SIZE);
 
@@ -1396,26 +1475,6 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     const uint64_t skin_bytes = staged->requirements.stream_bytes[AETHER_STREAM_SKIN];
     const uint64_t idx_bytes = staged->requirements.stream_bytes[AETHER_STREAM_INDEX_U32];
     const uint64_t morph_bytes = staged->requirements.stream_bytes[AETHER_STREAM_MORPH_DELTAS];
-
-    auto assign_stream_pod = [&](uint64_t off, uint64_t bytes, auto& out) {
-        using Elem = std::decay_t<decltype(out)>::value_type;
-        if (bytes >= sizeof(Elem)) {
-            const auto* src = reinterpret_cast<const Elem*>(mapped + off);
-            out.assign(src, src + (bytes / sizeof(Elem)));
-        }
-    };
-    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_VERTEX25D], v25_bytes, avatar->rest_vertices);
-    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_SURFACE], surf_bytes, avatar->rest_surfaces);
-    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_INDEX_U32], idx_bytes, avatar->rest_indices);
-    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_SKIN], skin_bytes, avatar->skin_vertices);
-    assign_stream_pod(staged->stream_offsets[AETHER_STREAM_MORPH_DELTAS], morph_bytes, avatar->morph_deltas);
-    const uint64_t tex_pix_bytes = staged->requirements.stream_bytes[AETHER_STREAM_TEXTURE_PIXELS];
-    if (tex_pix_bytes > 0) {
-        const uint8_t* tp = mapped + staged->stream_offsets[AETHER_STREAM_TEXTURE_PIXELS];
-        avatar->cpu_texture_pixels.assign(tp, tp + static_cast<size_t>(tex_pix_bytes));
-    }
-    avatar->skinned_vertices_scratch.assign(avatar->rest_vertices.begin(), avatar->rest_vertices.end());
-    avatar->morph_weights_scratch.assign(avatar->morph_ranges.size(), 0.0f);
 
     const VkBufferUsageFlags rt_bda_flags =
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
@@ -1433,9 +1492,9 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         avatar->vertex25d_buf = res.value();
 
         for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
-            auto dyn_res = rhi.create_uma_zero_copy_buffer(
-                v25_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            auto dyn_res = rhi.create_uma_zero_copy_buffer(v25_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
             if (!dyn_res) {
                 cleanup_staged();
                 return make_unexpected(dyn_res.error());
@@ -1494,27 +1553,6 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     }
 
     // Build static + double-buffered live skeleton overlay buffers (tiny, zero-sync-hazard).
-    compute_rest_joint_world_positions(avatar->joints, avatar->joint_rest_world_pos);
-    avatar->joint_anim_world_pos = avatar->joint_rest_world_pos;
-    compute_face_skin_reference(*avatar);
-    build_joint_humanoid_sources(avatar->joints, avatar->desc, avatar->joint_humanoid_source);
-    build_joint_spring_sources(avatar->joints, avatar->springs, avatar->joint_spring_source);
-    build_deduped_expressions_and_morph_meta(avatar->expressions, avatar->morph_ranges, avatar->morph_deltas,
-                                             avatar->rest_vertices.size(), avatar->deduped_expressions,
-                                             avatar->morph_meta);
-    detect_brow_bone_bindings(avatar->joints, avatar->strings, avatar->joint_humanoid_source,
-                              avatar->joint_rest_world_pos, avatar->brow_bones);
-    avatar->has_split_brow_morphs = false;
-    for (const AetherExpressionBindingDesc& eb : avatar->deduped_expressions) {
-        if (eb.input_slot >= 41U && eb.input_slot <= 45U) {
-            avatar->has_split_brow_morphs = true;
-            break;
-        }
-    }
-    avatar->joint_skin_matrices.assign(avatar->joints.size(),
-                                       {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f});
-    avatar->bone_line_scratch.resize(avatar->joints.size() * 4U);
-    emit_bone_line_vertices(avatar->joints, avatar->joint_rest_world_pos, avatar->bone_line_scratch);
     if (!avatar->bone_line_scratch.empty()) {
         const VkDeviceSize bone_bytes =
             static_cast<VkDeviceSize>(avatar->bone_line_scratch.size()) * sizeof(BoneLineVertex);
@@ -1545,8 +1583,8 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
     if (!avatar->pmx_sdef_vertices.empty()) {
         const VkDeviceSize sdef_bytes =
             static_cast<VkDeviceSize>(avatar->pmx_sdef_vertices.size()) * sizeof(AetherPmxSdefVertex);
-        auto r = rhi.create_uma_zero_copy_buffer(
-            sdef_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        auto r = rhi.create_uma_zero_copy_buffer(sdef_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         if (r) {
             avatar->pmx_sdef_buf = r.value();
             std::memcpy(avatar->pmx_sdef_buf.info.pMappedData, avatar->pmx_sdef_vertices.data(),
@@ -1555,11 +1593,10 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         }
     }
     if (!avatar->uv_deltas_scratch.empty()) {
-        const VkDeviceSize uv_bytes =
-            static_cast<VkDeviceSize>(avatar->uv_deltas_scratch.size()) * sizeof(float) * 2U;
+        const VkDeviceSize uv_bytes = static_cast<VkDeviceSize>(avatar->uv_deltas_scratch.size()) * sizeof(float) * 2U;
         for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
-            auto r = rhi.create_uma_zero_copy_buffer(
-                uv_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            auto r = rhi.create_uma_zero_copy_buffer(uv_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
             if (r) {
                 avatar->dynamic_uv_delta_bufs[s] = r.value();
                 std::memset(avatar->dynamic_uv_delta_bufs[s].info.pMappedData, 0, static_cast<size_t>(uv_bytes));
@@ -1571,8 +1608,8 @@ Expected<std::unique_ptr<GpuAvatar>> upload_staged_avatar(rhi::RhiDevice& rhi,
         const VkDeviceSize jm_bytes =
             static_cast<VkDeviceSize>(avatar->joint_skin_matrices.size()) * sizeof(float) * 12U;
         for (uint32_t s = 0; s < GpuAvatar::kPoseSlotCount; ++s) {
-            auto r = rhi.create_uma_zero_copy_buffer(
-                jm_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            auto r = rhi.create_uma_zero_copy_buffer(jm_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
             if (r) {
                 avatar->dynamic_joint_mat_bufs[s] = r.value();
                 std::memcpy(avatar->dynamic_joint_mat_bufs[s].info.pMappedData, avatar->joint_skin_matrices.data(),

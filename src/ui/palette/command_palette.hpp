@@ -55,6 +55,9 @@ enum class PaletteCommandTag : uint16_t {
     ToggleHandTracking,
     ToggleLightingQuadView,
     ToggleLightingPilotLight,
+    OpenProjectManager,
+    ExportAlfx,
+    ImportAlfx,
 };
 
 struct PaletteEntry {

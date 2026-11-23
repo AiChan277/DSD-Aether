@@ -97,22 +97,6 @@ ray_query = false
 max_push_constants = 128
 
 [[shader]]
-id = "orbit_orb_vs"
-file = "aether_live2d_npr.slang"
-entry = "vs_orb"
-stage = "vertex"
-ray_query = false
-max_push_constants = 128
-
-[[shader]]
-id = "orbit_orb_fs"
-file = "aether_live2d_npr.slang"
-entry = "ps_orb"
-stage = "fragment"
-ray_query = false
-max_push_constants = 128
-
-[[shader]]
 id = "outline_hull_vs"
 file = "aether_outline_hull.slang"
 entry = "vs_main"

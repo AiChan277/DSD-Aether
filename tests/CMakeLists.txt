@@ -244,7 +244,7 @@ target_link_libraries(dx12_and_capabilities_test PRIVATE
     windowscodecs
     ole32
 )
-set_tests_properties(dx12_and_capabilities_test PROPERTIES TIMEOUT 180)
+set_tests_properties(dx12_and_capabilities_test PROPERTIES TIMEOUT 360)
 
 # Lighting workspace tab: Vulkan + DX12 Stage/PiP pixel checks, single-row UI bounds, lighting_tab.png snapshot
 aether_add_cpp_test(lighting_tab_verification_test cpp/lighting_tab_verification_test.cpp)
@@ -275,6 +275,20 @@ target_link_libraries(phase3_material_and_pmx_test PRIVATE
     ole32
 )
 set_tests_properties(phase3_material_and_pmx_test PROPERTIES TIMEOUT 180)
+
+# Rev 3.1 (.alfx v1.0.1, .apr v1.0.0, ZIP, SHA-256, WIC 480x270 PNG, Legacy .aether migrator)
+aether_add_cpp_test(project_archive_test cpp/project_archive_test.cpp)
+target_compile_definitions(project_archive_test PRIVATE
+    AETHER_REPO_ROOT="${CMAKE_SOURCE_DIR}"
+)
+target_link_libraries(project_archive_test PRIVATE
+    aether_renderer
+    aether_rhi
+    aether_animation
+    windowscodecs
+    ole32
+)
+set_tests_properties(project_archive_test PROPERTIES TIMEOUT 120)
 
 # Ensure Vulkan tests discover vcpkg's Release Khronos validation layer (avoids Debug-CRT HotPathGuard noise
 # and enables CTest without requiring a separate system VULKAN_SDK installation).

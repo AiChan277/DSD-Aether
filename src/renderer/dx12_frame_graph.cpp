@@ -5,6 +5,7 @@
 #include "generated/phase4_shaders_dxil.hpp"
 #include "renderer/avatar_rt_classifier.hpp"
 #include "renderer/frame_globals_builder.hpp"
+#include "renderer/transparent_pass.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 
 namespace aether::renderer {
@@ -38,7 +40,7 @@ constexpr DXGI_FORMAT kCreaseFmt = DXGI_FORMAT_R16_FLOAT;
 constexpr DXGI_FORMAT kRgba8Fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kBgra8Fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
 
-static_assert(sizeof(D3D12_RAYTRACING_GEOMETRY_DESC) > 0);
+static_assert(alignof(D3D12_RAYTRACING_GEOMETRY_DESC) >= 4);
 static_assert(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) == 64);
 
 [[nodiscard]] DXGI_FORMAT map_dxgi_avatar_tex(uint32_t aether_fmt) noexcept {
@@ -101,6 +103,32 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
         hb.have_prev_view_proj = false;
     }
     rendered_frames_ = 0;
+    timing_snapshot_ = {};
+    timestamp_recorded_mask_.fill(0u);
+    timing_denoiser_hist_.fill(0.0f);
+    timing_denoiser_count_ = 0;
+    timing_denoiser_cursor_ = 0;
+
+    if (device_->direct_queue() != nullptr) {
+        (void)device_->direct_queue()->GetTimestampFrequency(&timestamp_freq_);
+    }
+    if (timestamp_freq_ > 0ULL && device_->device() != nullptr) {
+        D3D12_QUERY_HEAP_DESC qhd{};
+        qhd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qhd.Count = rhi::kD3D12FrameCount * rhi::GpuTimingRing::kQueriesPerSlot;
+        qhd.NodeMask = 0u;
+        if (SUCCEEDED(device_->device()->CreateQueryHeap(&qhd, IID_PPV_ARGS(&timestamp_heap_)))) {
+            const uint64_t q_bytes = static_cast<uint64_t>(qhd.Count) * sizeof(uint64_t);
+            if (auto qr = device_->create_buffer(q_bytes, rhi::D3D12BufferUsage::CopyDst,
+                                                 rhi::D3D12BufferHeap::ReadbackCpu, false, false);
+                qr) {
+                timestamp_readback_ = qr.value();
+            } else {
+                timestamp_heap_->Release();
+                timestamp_heap_ = nullptr;
+            }
+        }
+    }
 
     if (auto rc = create_pipelines(); !rc) {
         destroy();
@@ -111,9 +139,8 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
         return rc;
     }
     {
-        auto sob = device_->create_buffer(
-            4096ull * sizeof(GpuStageOverlayElem), rhi::D3D12BufferUsage::ShaderResource,
-            rhi::D3D12BufferHeap::UploadCpu, true, false);
+        auto sob = device_->create_buffer(4096ull * sizeof(GpuStageOverlayElem), rhi::D3D12BufferUsage::ShaderResource,
+                                          rhi::D3D12BufferHeap::UploadCpu, true, false);
         if (!sob) {
             destroy();
             return make_unexpected(sob.error());
@@ -140,8 +167,8 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
 
     // Heitz (2016) 64x64 LTC LUTs & 256x64 ANSI/IES LM-63-19 LUT (uploaded once at init)
     {
-        std::array<float, kLtcLutSize * kLtcLutSize * 4> inv_m{};
-        std::array<float, kLtcLutSize * kLtcLutSize * 4> amp{};
+        std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4> inv_m{};
+        std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4> amp{};
         generate_heitz_ltc_luts(inv_m, amp);
         const auto* inv_u8 = reinterpret_cast<const uint8_t*>(inv_m.data());
         const auto* amp_u8 = reinterpret_cast<const uint8_t*>(amp.data());
@@ -164,7 +191,7 @@ Expected<void> Dx12FrameGraph::init(rhi::D3D12Device& device, uint32_t width, ui
         ltc_amp_ = amp_r.value();
     }
     {
-        std::array<float, kIesLutWidth * kIesLutRows> ies{};
+        std::array<float, static_cast<size_t>(kIesLutWidth) * kIesLutRows> ies{};
         generate_ies_lm63_lut(ies);
         const auto* ies_u8 = reinterpret_cast<const uint8_t*>(ies.data());
         auto ies_r = device_->create_texture_2d_from_data(
@@ -214,11 +241,23 @@ void Dx12FrameGraph::destroy() noexcept {
             device_->destroy_buffer(sl.studio_lights_buf);
             sl.pose_vertex_cap = 0;
         }
+        device_->destroy_buffer(timestamp_readback_);
+        if (timestamp_heap_ != nullptr) {
+            timestamp_heap_->Release();
+            timestamp_heap_ = nullptr;
+        }
+        timestamp_freq_ = 0;
+        timestamp_recorded_mask_.fill(0u);
+        timing_snapshot_ = {};
         destroy_pipelines();
     }
     device_ = nullptr;
     width_ = 0;
     height_ = 0;
+    invalidate_temporal_history();
+}
+
+void Dx12FrameGraph::invalidate_temporal_history() noexcept {
     for (auto& hb : history_) {
         hb.have_prev_view_proj = false;
     }
@@ -418,6 +457,21 @@ Expected<void> Dx12FrameGraph::create_pipelines() {
         if (!r)
             return make_unexpected(r.error());
         pso_npr_blend_nocull_ = r.value();
+
+        d.alpha_blend = false;
+        d.premultiplied_alpha = false;
+        d.additive_blend = true;
+        d.cull_mode = D3D12_CULL_MODE_BACK;
+        r = device_->create_graphics_pso(d);
+        if (!r)
+            return make_unexpected(r.error());
+        pso_npr_additive_cull_ = r.value();
+
+        d.cull_mode = D3D12_CULL_MODE_NONE;
+        r = device_->create_graphics_pso(d);
+        if (!r)
+            return make_unexpected(r.error());
+        pso_npr_additive_nocull_ = r.value();
     }
 
     // Inverted Hull Outline PSO (FrontCounterClockwise + CullMode FRONT)
@@ -478,6 +532,8 @@ void Dx12FrameGraph::destroy_pipelines() noexcept {
     D3D12Device::destroy_pso(pso_npr_opaque_nocull_);
     D3D12Device::destroy_pso(pso_npr_blend_cull_);
     D3D12Device::destroy_pso(pso_npr_blend_nocull_);
+    D3D12Device::destroy_pso(pso_npr_additive_cull_);
+    D3D12Device::destroy_pso(pso_npr_additive_nocull_);
     D3D12Device::destroy_pso(pso_npr_wire_);
     D3D12Device::destroy_pso(pso_outline_hull_);
     D3D12Device::destroy_pso(pso_crease_lines_);
@@ -552,6 +608,10 @@ Expected<void> Dx12FrameGraph::create_size_dependent_targets(uint32_t w, uint32_
         return r;
 
     for (auto& hb : history_) {
+        auto pd_r = device_->create_depth_stencil_s8(w, h);
+        if (!pd_r)
+            return make_unexpected(pd_r.error());
+        hb.prev_depth = pd_r.value();
         if (auto r = mk(hb.prev_normal, w, h, kNormalFmt, false, false, false, false, nullptr); !r)
             return r;
         if (auto r = mk(hb.prev_rt_shadow, w, h, kRtFmt, false, false, false, false, nullptr); !r)
@@ -637,6 +697,8 @@ void Dx12FrameGraph::destroy_size_dependent_targets() noexcept {
         device_->destroy_texture(hb.prev_rim_occ);
         device_->destroy_texture(hb.prev_rt_shadow);
         device_->destroy_texture(hb.prev_normal);
+        device_->destroy_texture(hb.prev_depth);
+        hb.have_prev_view_proj = false;
     }
     device_->destroy_texture(aov_cornea_spec_);
     device_->destroy_texture(aov_backscatter_);
@@ -892,13 +954,13 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
     destroy_dxr_structures();
     std::array<std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>, 4> bucket_descs;
 
-    auto push_geom = [&](size_t bi, uint64_t ib_gpu_va, uint32_t idx_offset, uint32_t idx_count) {
+    auto push_geom = [&](size_t bi, uint64_t ib_gpu_va, uint32_t idx_offset, uint32_t idx_count, bool non_opaque) {
         if (idx_count < 3u || bi >= 4u) {
             return;
         }
         D3D12_RAYTRACING_GEOMETRY_DESC gd{};
         gd.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        gd.Flags = (bi == 1u || bi == 3u) ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        gd.Flags = non_opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_NONE : D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
         gd.Triangles.Transform3x4 = 0;
         gd.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -948,20 +1010,24 @@ Expected<void> Dx12FrameGraph::prepare_dxr_structures(const GpuAvatar& avatar) {
         for (size_t b = 0; b < 4u; ++b) {
             if (part.bucket_index_count[b] >= 3u) {
                 blas_buckets_[b].tri_offset = part.bucket_index_offset[b] / 3u;
-                push_geom(b, rt_index_buf_.gpu_va, part.bucket_index_offset[b], part.bucket_index_count[b]);
+                push_geom(b, rt_index_buf_.gpu_va, part.bucket_index_offset[b], part.bucket_index_count[b],
+                          part.bucket_has_cutout[b]);
             }
         }
     } else {
-        auto push_list = [&](const std::vector<uint32_t>& draws) {
+        auto push_list = [&](const std::vector<uint32_t>& draws, bool is_cutout) {
             for (const uint32_t idx : draws) {
                 const auto& sm = cached_submeshes_[idx];
                 const auto& gm = cached_materials_[sm.material_index];
+                if (!is_shadow_caster_submesh(sm, gm)) {
+                    continue;
+                }
                 const uint32_t rtb = (gm.extra_slots[2] & kMatExtraRtClassMask) >> kMatExtraRtClassShift;
-                push_geom(std::min<size_t>(rtb, 3u), index_buf_.gpu_va, sm.index_offset, sm.index_count);
+                push_geom(std::min<size_t>(rtb, 3u), index_buf_.gpu_va, sm.index_offset, sm.index_count, is_cutout);
             }
         };
-        push_list(opaque_draws_);
-        push_list(cutout_draws_);
+        push_list(opaque_draws_, false);
+        push_list(cutout_draws_, true);
     }
 
     UINT active_inst_count = 0u;
@@ -1119,7 +1185,73 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         return make_unexpected(cmd_res.error());
     }
     ID3D12GraphicsCommandList4* cmd = cmd_res.value();
-    FrameUploadSlice& sl = upload_slices_[frame_slot % rhi::kD3D12FrameCount];
+    const uint32_t slot = frame_slot % rhi::kD3D12FrameCount;
+    FrameUploadSlice& sl = upload_slices_[slot];
+
+    auto resolve_timestamp_slot = [&](uint32_t s) noexcept {
+        if (timestamp_heap_ == nullptr || timestamp_freq_ == 0ULL || timestamp_readback_.mapped_ptr == nullptr ||
+            timestamp_recorded_mask_[s] == 0u) {
+            return;
+        }
+        const auto* qdata = static_cast<const uint64_t*>(timestamp_readback_.mapped_ptr) +
+                            static_cast<size_t>(s) * rhi::GpuTimingRing::kQueriesPerSlot;
+        const double period_ms = 1000.0 / static_cast<double>(timestamp_freq_);
+        rhi::GpuPassTimingSnapshot snap{};
+        double sum_critical_ms = 0.0;
+        bool any_valid = false;
+        for (uint32_t p = 0; p < rhi::GpuTimingRing::kPassCount; ++p) {
+            if ((timestamp_recorded_mask_[s] & (1u << p)) == 0u) {
+                continue;
+            }
+            const uint64_t t0 = qdata[static_cast<size_t>(p) * 2u + 0u];
+            const uint64_t t1 = qdata[static_cast<size_t>(p) * 2u + 1u];
+            if (t1 >= t0) {
+                any_valid = true;
+                const float ms = static_cast<float>(static_cast<double>(t1 - t0) * period_ms);
+                snap.pass_ms[p] = ms;
+                if (p <= static_cast<uint32_t>(rhi::GpuPassId::OutputEncode)) {
+                    sum_critical_ms += ms;
+                }
+            }
+        }
+        timestamp_recorded_mask_[s] = 0u;
+        if (!any_valid) {
+            return;
+        }
+        snap.denoiser_ms = snap.pass_ms[static_cast<size_t>(rhi::GpuPassId::Denoise)];
+        const float frame_total = snap.pass_ms[static_cast<size_t>(rhi::GpuPassId::FrameTotal)];
+        snap.gpu_total_ms = (frame_total > 0.0f) ? frame_total : static_cast<float>(sum_critical_ms);
+        timing_denoiser_hist_[timing_denoiser_cursor_] = snap.denoiser_ms;
+        timing_denoiser_cursor_ = (timing_denoiser_cursor_ + 1u) % rhi::GpuTimingRing::kRollingWindowFrames;
+        if (timing_denoiser_count_ < rhi::GpuTimingRing::kRollingWindowFrames) {
+            ++timing_denoiser_count_;
+        }
+        std::array<float, rhi::GpuTimingRing::kRollingWindowFrames> scratch = timing_denoiser_hist_;
+        std::sort(scratch.begin(), scratch.begin() + timing_denoiser_count_);
+        const uint32_t p95_idx =
+            std::min(timing_denoiser_count_ - 1u,
+                     static_cast<uint32_t>(std::floor(0.95f * static_cast<float>(timing_denoiser_count_ - 1u))));
+        snap.denoiser_p95_120f_ms = scratch[p95_idx];
+        snap.valid = true;
+        timing_snapshot_ = snap;
+    };
+
+    resolve_timestamp_slot(slot);
+    auto t_begin = [&](rhi::GpuPassId id) noexcept {
+        if (timestamp_heap_ != nullptr) {
+            const uint32_t q = slot * rhi::GpuTimingRing::kQueriesPerSlot + static_cast<uint32_t>(id) * 2u;
+            cmd->EndQuery(timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP, q);
+        }
+    };
+    auto t_end = [&](rhi::GpuPassId id) noexcept {
+        if (timestamp_heap_ != nullptr) {
+            const uint32_t p = static_cast<uint32_t>(id);
+            const uint32_t q = slot * rhi::GpuTimingRing::kQueriesPerSlot + p * 2u + 1u;
+            cmd->EndQuery(timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP, q);
+            timestamp_recorded_mask_[slot] |= (1u << p);
+        }
+    };
+    t_begin(rhi::GpuPassId::FrameTotal);
 
     const uint32_t buf_w = width_;
     const uint32_t buf_h = height_;
@@ -1129,11 +1261,11 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
 
     const bool is_stage_view = (req.view_kind == RenderViewKind::LightingStage);
     const detail::StageRenderRegion sreg =
-        is_stage_view
-            ? detail::compute_stage_render_region(req, buf_w, buf_h, buf_w, buf_h)
-            : detail::StageRenderRegion{buf_w, buf_h, buf_w, buf_h,
-                                        static_cast<float>(buf_w) / static_cast<float>(buf_h),
-                                        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+        is_stage_view ? detail::compute_stage_render_region(req, buf_w, buf_h, buf_w, buf_h)
+                      : detail::StageRenderRegion{
+                            buf_w, buf_h, buf_w, buf_h, static_cast<float>(buf_w) / static_cast<float>(buf_h),
+                            1.0f,  1.0f,  1.0f,  1.0f,  1.0f,
+                            1.0f,  1.0f,  1.0f};
     const uint32_t w = sreg.scene_w;
     const uint32_t h = sreg.scene_h;
     const uint32_t gx = (w + 7u) / 8u;
@@ -1188,13 +1320,13 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     fg.gbuffer_extra_ids[3] = rim_occ_denoised_.srv_index;
     fg.gbuffer_extra_ids[4] = bounce_denoised_.srv_index;
     fg.gbuffer_extra_ids[5] = csm_depth_.srv_index;
-    fg.gbuffer_extra_ids[6] = depth_stencil_.srv_index;
-    fg.gbuffer_extra_ids[7] = hb.prev_normal.srv_index;
+    fg.gbuffer_extra_ids[6] = hist_valid ? hb.prev_depth.srv_index : depth_stencil_.srv_index;
+    fg.gbuffer_extra_ids[7] = hist_valid ? hb.prev_normal.srv_index : gb_n_.srv_index;
 
     fg.history_ids[0] = hb.prev_rt_shadow.srv_index;
     fg.history_ids[1] = hb.prev_rim_occ.srv_index;
     fg.history_ids[2] = rim_occ_raw_.srv_index;
-    fg.history_ids[3] = depth_stencil_.srv_index;
+    fg.history_ids[3] = fg.gbuffer_extra_ids[6];
 
     fg.output_storage_ids[0] = out_rgba16f_.uav_index;
     fg.output_storage_ids[1] =
@@ -1204,8 +1336,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
 
     const std::array<float, 3> head_target_ws = {fg.neck_seam_head_str[0], fg.neck_seam_head_str[1],
                                                  fg.neck_seam_head_str[2]};
-    const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1],
-                                             fg.camera_pos_world[2]};
+    const std::array<float, 3> eye_pos_ws = {fg.camera_pos_world[0], fg.camera_pos_world[1], fg.camera_pos_world[2]};
     {
         const LightingRig& active_rig = *req.rig;
         const uint32_t sl_count =
@@ -1262,6 +1393,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         const bool reuse_skin_and_tlas = req.skip_skin_and_blas && (!use_rt || dxr_has_built_once_);
         if (!reuse_skin_and_tlas) {
             // Pass 1: Compute Skin/Pack -> GpuSkinnedVertex
+            t_begin(rhi::GpuPassId::SkinMorph);
             device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
             device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             cmd->SetPipelineState(pso_skin_morph_);
@@ -1276,6 +1408,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->Dispatch((avatar_vertex_count_ + 63u) / 64u, 1u, 1u);
             device_->cmd_uav_barrier(cmd, skinned_vertices_buf_.resource);
             device_->cmd_transition_buffer(cmd, skinned_vertices_buf_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            t_end(rhi::GpuPassId::SkinMorph);
 
             // Pass 2: DXR Tier 1.1 BLAS/TLAS build or refit
             if (use_rt) {
@@ -1285,6 +1418,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         }
 
         // Pass 3: Depth + Stencil + G-Buffer Prepass (Strict positive D3D12 viewport + CCW front-face)
+        t_begin(rhi::GpuPassId::Prepass);
         const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
         const D3D12_RECT sc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
         device_->cmd_transition_texture(cmd, gb_n_, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1346,6 +1480,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, gb_misc_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, depth_stencil_,
                                         D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        t_end(rhi::GpuPassId::Prepass);
 
         // Pass 4: RayEffects (DXR Tier 1.1) OR CSM Fallback (Mode 0 Traditional)
         device_->cmd_transition_texture(cmd, rt_shadow_raw_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1359,6 +1494,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (use_rt) {
+            t_begin(rhi::GpuPassId::RayTrace);
             device_->cmd_bind_bindless_compute(cmd, true, tlas_buf_.gpu_va);
             cmd->SetPipelineState(pso_ray_effects_);
             GpuPushConstants p{};
@@ -1372,7 +1508,9 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.param3 = ((w / 2u) << 16u) | (hist_valid ? 1u : 0u);
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
+            t_end(rhi::GpuPassId::RayTrace);
         } else {
+            t_begin(rhi::GpuPassId::CsmFallback);
             if (req.render_csm_shadow) {
                 device_->cmd_transition_texture(cmd, csm_depth_, D3D12_RESOURCE_STATE_DEPTH_WRITE);
                 D3D12_CPU_DESCRIPTOR_HANDLE sdsv{};
@@ -1391,6 +1529,10 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                 cmd->SetPipelineState(pso_csm_shadow_);
                 for (const uint32_t idx : opaque_draws_) {
                     const auto& d = cached_submeshes_[idx];
+                    const auto& gm = active_materials_scratch_[d.material_index];
+                    if (!is_shadow_caster_submesh(d, gm)) {
+                        continue;
+                    }
                     GpuPushConstants p{};
                     p.frame_globals_bda = fg_handle;
                     p.vertex_buf_bda = skinned_vertices_buf_.srv_handle();
@@ -1409,6 +1551,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             p.param3 = req.render_csm_shadow ? csm_depth_.srv_index : 0xFFFFu;
             cmd_set_root_pc(cmd, true, p);
             cmd->Dispatch(gx, gy, 1u);
+            t_end(rhi::GpuPassId::CsmFallback);
         }
 
         device_->cmd_transition_texture(cmd, rt_shadow_raw_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
@@ -1418,6 +1561,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, aov_cornea_spec_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 5: SVGF Spatio-Temporal Denoise
+        t_begin(rhi::GpuPassId::Denoise);
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, rim_occ_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_transition_texture(cmd, bounce_denoised_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1426,9 +1570,8 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         {
             GpuPushConstants p{};
             p.frame_globals_bda = fg_handle;
-            p.param0 =
-                (rt_shadow_raw_.srv_index & 0xFFFFu) |
-                (((hist_valid ? hb.prev_rt_shadow.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
+            p.param0 = (rt_shadow_raw_.srv_index & 0xFFFFu) |
+                       (((hist_valid ? hb.prev_rt_shadow.srv_index : rt_shadow_raw_.srv_index) & 0xFFFFu) << 16u);
             p.param1 = (rt_shadow_denoised_.uav_index & 0xFFFFu) | ((hist_valid ? 1u : 0u) << 16u);
             p.param2 = w;
             p.param3 = h;
@@ -1458,8 +1601,10 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, rt_shadow_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, rim_occ_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         device_->cmd_transition_texture(cmd, bounce_denoised_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        t_end(rhi::GpuPassId::Denoise);
 
-        // Snapshot current view history immediately after Pass 5 so interleaved Broadcast <-> Stage never cross-contaminate
+        // Snapshot current view history immediately after Pass 5 so interleaved Broadcast <-> Stage never
+        // cross-contaminate
         if (allow_view_hist) {
             auto copy_tex = [&](rhi::D3D12Texture& src, rhi::D3D12Texture& dst) {
                 const int prev_s = src.current_state;
@@ -1469,6 +1614,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                 device_->cmd_transition_texture(cmd, src, prev_s);
                 device_->cmd_transition_texture(cmd, dst, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
             };
+            copy_tex(depth_stencil_, hb.prev_depth);
             copy_tex(gb_n_, hb.prev_normal);
             copy_tex(rt_shadow_denoised_, hb.prev_rt_shadow);
             copy_tex(rim_occ_denoised_, hb.prev_rim_occ);
@@ -1495,10 +1641,20 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             ID3D12PipelineState* cur = nullptr;
             for (const uint32_t idx : list) {
                 const auto& d = cached_submeshes_[idx];
-                ID3D12PipelineState* want =
-                    use_wire ? pso_npr_wire_
-                             : (is_blend ? ((d.cull_mode != 0u) ? pso_npr_blend_nocull_ : pso_npr_blend_cull_)
-                                         : ((d.cull_mode != 0u) ? pso_npr_opaque_nocull_ : pso_npr_opaque_cull_));
+                const auto& gm = active_materials_scratch_[d.material_index];
+                const bool is_add = is_blend && is_additive_submesh(d, gm);
+                ID3D12PipelineState* want = nullptr;
+                if (use_wire) {
+                    want = pso_npr_wire_;
+                } else if (is_blend) {
+                    if (is_add) {
+                        want = (d.cull_mode != 0u) ? pso_npr_additive_nocull_ : pso_npr_additive_cull_;
+                    } else {
+                        want = (d.cull_mode != 0u) ? pso_npr_blend_nocull_ : pso_npr_blend_cull_;
+                    }
+                } else {
+                    want = (d.cull_mode != 0u) ? pso_npr_opaque_nocull_ : pso_npr_opaque_cull_;
+                }
                 if (want != cur) {
                     cmd->SetPipelineState(want);
                     cur = want;
@@ -1509,20 +1665,25 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                 p.aux_buf_bda = material_buf_.srv_handle();
                 p.param0 = d.material_index;
                 p.param1 = d.flags | (is_cutout ? AETHER_SUBMESH_FLAG_ALPHA_CUTOUT : 0u) |
-                           (is_blend ? AETHER_SUBMESH_FLAG_TRANSPARENT : 0u);
+                           (is_blend ? AETHER_SUBMESH_FLAG_TRANSPARENT : 0u) |
+                           (is_add ? AETHER_SUBMESH_FLAG_ADDITIVE : 0u);
                 cmd_set_root_pc(cmd, false, p);
                 cmd->DrawIndexedInstanced(d.index_count, 1u, d.index_offset, 0, 0u);
             }
         };
+        t_begin(rhi::GpuPassId::Live2dNpr);
         draw_npr_list(opaque_draws_, false, false);
         draw_npr_list(cutout_draws_, true, false);
+        t_end(rhi::GpuPassId::Live2dNpr);
 
+        t_begin(rhi::GpuPassId::OutlineHull);
         const float outline_mul = std::max(0.0f, req.outline_width_scale) * std::max(0.0f, rig.outline_width_scale);
         if (!use_wire && outline_mul > 0.0f) {
             cmd->SetPipelineState(pso_outline_hull_);
             for (const uint32_t idx : opaque_draws_) {
                 const auto& d = cached_submeshes_[idx];
-                if (cached_materials_[d.material_index].outline_color_width[3] <= 0.0001f) {
+                const auto& gm = active_materials_scratch_[d.material_index];
+                if (!is_outline_enabled_submesh(d, gm)) {
                     continue;
                 }
                 GpuPushConstants p{};
@@ -1536,11 +1697,16 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
                 cmd->DrawIndexedInstanced(d.index_count, 1u, d.index_offset, 0, 0u);
             }
         }
+        t_end(rhi::GpuPassId::OutlineHull);
+
+        t_begin(rhi::GpuPassId::TransparentPass);
         draw_npr_list(transparent_draws_, false, true);
+        t_end(rhi::GpuPassId::TransparentPass);
 
         device_->cmd_transition_texture(cmd, hdr_scene_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
         // Pass 8: Crease Ink Lines
+        t_begin(rhi::GpuPassId::CreaseLines);
         device_->cmd_transition_texture(cmd, crease_mask_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
         cmd->SetPipelineState(pso_crease_lines_);
@@ -1555,8 +1721,10 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->Dispatch(gx, gy, 1u);
         }
         device_->cmd_transition_texture(cmd, crease_mask_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        t_end(rhi::GpuPassId::CreaseLines);
 
         // Pass 9: 6-Mip Dual-Kawase Bloom
+        t_begin(rhi::GpuPassId::PostBloom);
         const bool subrect_bloom = (w < buf_w) || (h < buf_h);
         auto pack_subrect = [](uint32_t psw, uint32_t psh, uint32_t asw, uint32_t ash) noexcept -> uint64_t {
             return static_cast<uint64_t>(std::min(psw, 0xFFFFu)) |
@@ -1606,10 +1774,9 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             const uint32_t mw = act_mip_w[dst_idx];
             const uint32_t mh = act_mip_h[dst_idx];
             GpuPushConstants p{};
-            p.vertex_buf_bda =
-                subrect_bloom ? pack_subrect(bloom_mips_[up_src].width, bloom_mips_[up_src].height,
-                                             act_mip_w[up_src], act_mip_h[up_src])
-                              : 0ULL;
+            p.vertex_buf_bda = subrect_bloom ? pack_subrect(bloom_mips_[up_src].width, bloom_mips_[up_src].height,
+                                                            act_mip_w[up_src], act_mip_h[up_src])
+                                             : 0ULL;
             p.param0 = bloom_mips_[up_src].srv_index;
             p.param1 = bloom_mips_[dst_idx].uav_index;
             p.param2 = mw;
@@ -1620,6 +1787,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
             cmd->Dispatch((mw + 7u) / 8u, (mh + 7u) / 8u, 1u);
             device_->cmd_transition_texture(cmd, bloom_mips_[dst_idx], D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         }
+        t_end(rhi::GpuPassId::PostBloom);
         if (allow_view_hist) {
             hb.have_prev_view_proj = true;
         }
@@ -1632,6 +1800,7 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     }
 
     // Pass 10: Tone Composite + 2D Filter Pro -> out_rgba16f_
+    t_begin(rhi::GpuPassId::ToneMap);
     device_->cmd_bind_bindless_compute(cmd, false, 0ULL);
     device_->cmd_transition_texture(cmd, out_rgba16f_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->SetPipelineState(pso_tone_composite_);
@@ -1646,8 +1815,10 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         cmd->Dispatch(gx, gy, 1u);
     }
     device_->cmd_transition_texture(cmd, out_rgba16f_, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    t_end(rhi::GpuPassId::ToneMap);
 
     // Pass 11: Encode out_rgba16f_ -> out_rgba8_ (universal RGBA8) & Broadcast-only out_bgra8_ (Spout2 D3D11On12)
+    t_begin(rhi::GpuPassId::OutputEncode);
     if (w < buf_w || h < buf_h) {
         device_->cmd_transition_texture(cmd, out_rgba8_, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const float clr[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -1725,6 +1896,13 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
         device_->cmd_transition_texture(cmd, out_bgra8_, D3D12_RESOURCE_STATE_COMMON);
     }
     device_->cmd_transition_texture(cmd, out_rgba16f_, D3D12_RESOURCE_STATE_COMMON);
+    t_end(rhi::GpuPassId::OutputEncode);
+    t_end(rhi::GpuPassId::FrameTotal);
+    if (timestamp_heap_ != nullptr && timestamp_readback_.resource != nullptr) {
+        cmd->ResolveQueryData(timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP, slot * rhi::GpuTimingRing::kQueriesPerSlot,
+                              rhi::GpuTimingRing::kQueriesPerSlot, timestamp_readback_.resource,
+                              static_cast<UINT64>(slot) * rhi::GpuTimingRing::kQueriesPerSlot * sizeof(uint64_t));
+    }
 
     auto sub_res = device_->submit_direct_frame(frame_slot);
     if (!sub_res) {
@@ -1732,8 +1910,11 @@ Expected<uint64_t> Dx12FrameGraph::render_frame(const FrameRenderRequest& req, b
     }
     if (wait_for_gpu) {
         (void)device_->wait_direct_fence(sub_res.value(), 5000u);
+        resolve_timestamp_slot(slot);
     }
-    last_render_ms_ = static_cast<float>(now_us() - t0_us) / 1000.0f;
+    last_render_ms_ = (timing_snapshot_.valid && timing_snapshot_.gpu_total_ms > 0.0f)
+                          ? timing_snapshot_.gpu_total_ms
+                          : (static_cast<float>(now_us() - t0_us) / 1000.0f);
     ++rendered_frames_;
     return sub_res.value();
 #endif

@@ -22,7 +22,7 @@ namespace aether::ui {
  *     Lit / Clay 18% Gray / False Color EL-Zone, Parallel Ray-Picking, 3D Gizmo,
  *     Pilot Light, Aim At Target, Dockable PiP Broadcast Monitor)
  *   - Light & Modifier Inspector (Full Photometry, CCT/Gels, Softbox/Grid/Barn Doors/Gobo/IES)
- *   - Light Mixer Console (16-Slot Table + 5 Built-in Presets + Save/Load `config/lighting_rigs.json`)
+ *   - Light Mixer Console (16-Slot Table + 5 Built-in Presets + Save/Load `.alfx` in `presets/alfx`)
  */
 class LightingStagePanels {
   public:
@@ -30,6 +30,7 @@ class LightingStagePanels {
 
     void set_config_dir(std::filesystem::path dir) noexcept { config_dir_ = std::move(dir); }
     void set_shipped_config_dir(std::filesystem::path dir) noexcept { shipped_config_dir_ = std::move(dir); }
+    void set_active_preset_index(int idx) noexcept { active_preset_idx_ = std::clamp(idx, 0, 4); }
     void ensure_initialized(DevShellViewportActions& vp_actions) noexcept;
 
     void set_stage_view(renderer::StageCameraView view, const std::array<float, 3>& pivot_ws) noexcept;
@@ -75,15 +76,15 @@ class LightingStagePanels {
                         UiSelection& selection, StudioActions& actions) noexcept;
 
     void draw_mixer_console(const DevShellAvatarView& avatar, const UiFontSet& fonts, UiSelection& selection,
-                            StudioActions& actions) noexcept;
+                            StudioActions& actions);
 
     void export_stage_actions(const DevShellAvatarView& avatar, DevShellViewportActions& vp_actions) noexcept;
 
   private:
     [[nodiscard]] renderer::LightingRig& active_rig(DevShellViewportActions& vp_actions) noexcept;
-    [[nodiscard]] std::filesystem::path rigs_json_path() const noexcept;
+    [[nodiscard]] std::filesystem::path rigs_json_path() const;
     void ensure_rigs_loaded() noexcept;
-    void sync_key_fill_rim_mirror(const renderer::LightingRig& rig, DevShellViewportActions& vp_actions) noexcept;
+    void sync_store_dirty(const renderer::LightingRig& rig, DevShellViewportActions& vp_actions) noexcept;
 
     std::filesystem::path config_dir_{};
     std::filesystem::path shipped_config_dir_{};

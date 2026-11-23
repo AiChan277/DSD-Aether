@@ -41,7 +41,8 @@ void KalmanScalar2State::correct(float z, float dt_s, float confidence, float si
     const float pp11 = p11_ + dt2 * q_var;
 
     if (confidence < cfg.low_conf_threshold) {
-        // Zero velocity immediately on low confidence and softly decay position toward `z` without runaway extrapolation
+        // Zero velocity immediately on low confidence and softly decay position toward `z` without runaway
+        // extrapolation
         const float decay_alpha = std::clamp(dt * 8.0f, 0.0f, 1.0f);
         p_ = p_ + (z - p_) * decay_alpha;
         v_ = 0.0f;

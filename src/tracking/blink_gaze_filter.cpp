@@ -19,7 +19,8 @@ constexpr float kDegToRad = 0.017453292519943295f;
     for (size_t i = 0; i < n; ++i) {
         scratch[i] = buf[i];
     }
-    const size_t k = std::min(n - 1U, static_cast<size_t>(static_cast<float>(n - 1U) * 0.85f + 0.5f));
+    const long rounded = std::lround(static_cast<float>(n - 1U) * 0.85f);
+    const size_t k = std::min<size_t>(n - 1U, rounded > 0L ? static_cast<size_t>(rounded) : 0U);
     std::nth_element(scratch.begin(), scratch.begin() + static_cast<ptrdiff_t>(k),
                      scratch.begin() + static_cast<ptrdiff_t>(n));
     return scratch[k];
@@ -103,8 +104,7 @@ void BlinkGazeStabilizer::ChannelState::reset() noexcept {
 void BlinkGazeStabilizer::ChannelState::step(float open_raw, float dt_s) noexcept {
     const float safe_dt = std::clamp(dt_s, 1.0f / 240.0f, 0.25f);
     // Wide-Open Lock Zone (> 0.68): snap openness to 1.0 before velocity checks so micro-jitter never triggers blinks.
-    const float open_locked =
-        (open_raw > BlinkGazeStabilizer::kWideOpenLock) ? 1.0f : std::clamp(open_raw, 0.0f, 1.0f);
+    const float open_locked = (open_raw > BlinkGazeStabilizer::kWideOpenLock) ? 1.0f : std::clamp(open_raw, 0.0f, 1.0f);
     const float vel = has_prev ? ((open_locked - prev_open) / safe_dt) : 0.0f;
     prev_open = open_locked;
     has_prev = true;

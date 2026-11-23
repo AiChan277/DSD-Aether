@@ -60,8 +60,7 @@ inline constexpr uint32_t kMatExtraAuthoredSdfBit = (1u << 15u);
     return out;
 }
 
-[[nodiscard]] inline bool contains_any(std::string_view hay,
-                                       std::initializer_list<std::string_view> needles) noexcept {
+[[nodiscard]] inline bool contains_any(std::string_view hay, std::initializer_list<std::string_view> needles) noexcept {
     for (const std::string_view n : needles) {
         if (!n.empty() && hay.find(n) != std::string_view::npos) {
             return true;
@@ -90,10 +89,10 @@ inline constexpr uint32_t kMatExtraAuthoredSdfBit = (1u << 15u);
 [[nodiscard]] inline bool is_genuine_eye_iris_name(std::string_view mat_raw, std::string_view sm_raw) {
     const std::string m_low = to_lower_ascii(mat_raw);
     const std::string s_low = to_lower_ascii(sm_raw);
-    if (contains_any(m_low, {"highlight", "eyeline", "eyelash", "eyebrow", "brow", "lash", "sclera", "skin",
-                             "body", "cloth", "hair", "face"}) ||
-        contains_any(s_low, {"highlight", "eyeline", "eyelash", "eyebrow", "brow", "lash", "sclera", "skin",
-                             "body", "cloth", "hair"})) {
+    if (contains_any(m_low, {"highlight", "eyeline", "eyelash", "eyebrow", "brow", "lash", "sclera", "skin", "body",
+                             "cloth", "hair", "face"}) ||
+        contains_any(s_low, {"highlight", "eyeline", "eyelash", "eyebrow", "brow", "lash", "sclera", "skin", "body",
+                             "cloth", "hair"})) {
         return false;
     }
     return contains_any(m_low, {"eyeiris", "iris", "pupil", "hitomi"}) ||
@@ -164,6 +163,7 @@ struct RtPartitionedIndices {
     std::vector<RtTriMeta> tri_meta{};
     std::array<uint32_t, 4> bucket_index_offset{};
     std::array<uint32_t, 4> bucket_index_count{};
+    std::array<bool, 4> bucket_has_cutout{};
 };
 
 /**
@@ -243,11 +243,12 @@ struct RtPartitionedIndices {
     }
 
     auto append_range = [&](uint32_t idx_off, uint32_t idx_cnt, uint32_t mat_idx, uint32_t sm_flags,
-                            std::string_view sm_name) {
+                            std::string_view sm_name, bool is_cutout) {
         uint32_t m_flags = 0u;
         std::string m_name;
         const uint32_t safe_mat =
-            avatar.materials.empty() ? 0u : std::min<uint32_t>(mat_idx, static_cast<uint32_t>(avatar.materials.size() - 1u));
+            avatar.materials.empty() ? 0u
+                                     : std::min<uint32_t>(mat_idx, static_cast<uint32_t>(avatar.materials.size() - 1u));
         if (safe_mat < avatar.materials.size()) {
             m_flags = avatar.materials[safe_mat].flags;
             m_name = read_material_cstr(avatar, avatar.materials[safe_mat].name_offset);
@@ -268,6 +269,9 @@ struct RtPartitionedIndices {
                 }
             }
             const size_t bi = static_cast<size_t>(b);
+            if (is_cutout) {
+                out.bucket_has_cutout[bi] = true;
+            }
             tmp_buckets[bi].push_back(i0);
             tmp_buckets[bi].push_back(i1);
             tmp_buckets[bi].push_back(i2);
@@ -276,20 +280,27 @@ struct RtPartitionedIndices {
     };
 
     if (avatar.submeshes.empty()) {
-        append_range(0u, static_cast<uint32_t>(avatar.rest_indices.size()), 0u, AETHER_SUBMESH_FLAG_OPAQUE, {});
+        append_range(0u, static_cast<uint32_t>(avatar.rest_indices.size()), 0u, AETHER_SUBMESH_FLAG_OPAQUE, {}, false);
     } else {
         for (const auto& sm : avatar.submeshes) {
             uint32_t alpha_mode = AETHER_ALPHA_MODE_OPAQUE;
+            uint32_t m_flags = 0u;
             if (sm.material_index < avatar.materials.size()) {
                 alpha_mode = avatar.materials[sm.material_index].alpha_mode;
+                m_flags = avatar.materials[sm.material_index].flags;
             }
-            const bool is_blend =
-                (alpha_mode == AETHER_ALPHA_MODE_BLEND) || ((sm.flags & AETHER_SUBMESH_FLAG_TRANSPARENT) != 0u);
-            if (is_blend) {
+            const bool is_transparent =
+                (alpha_mode == AETHER_ALPHA_MODE_BLEND) || (alpha_mode == AETHER_ALPHA_MODE_ADDITIVE) ||
+                ((sm.flags & (AETHER_SUBMESH_FLAG_TRANSPARENT | AETHER_SUBMESH_FLAG_ADDITIVE)) != 0u) ||
+                ((m_flags & AETHER_MAT_FLAG_NO_SHADOW_CAST) != 0u);
+            if (is_transparent) {
                 continue;
             }
+            const bool is_cutout = (alpha_mode == AETHER_ALPHA_MODE_MASK) ||
+                                   ((sm.flags & AETHER_SUBMESH_FLAG_ALPHA_CUTOUT) != 0u) ||
+                                   ((m_flags & AETHER_MAT_FLAG_ALPHA_CUTOUT) != 0u);
             const std::string sm_name = avatar.string_slice(sm.name_offset, sm.name_len);
-            append_range(sm.index_offset, sm.index_count, sm.material_index, sm.flags, sm_name);
+            append_range(sm.index_offset, sm.index_count, sm.material_index, sm.flags, sm_name, is_cutout);
         }
     }
 
@@ -298,7 +309,8 @@ struct RtPartitionedIndices {
         tmp_buckets[static_cast<size_t>(RtMaskBucket::BodyCloth)] = avatar.rest_indices;
         auto& m_dst = tmp_meta[static_cast<size_t>(RtMaskBucket::BodyCloth)];
         for (size_t t = 0; t + 2 < n; t += 3) {
-            m_dst.push_back(RtTriMeta{avatar.rest_indices[t], avatar.rest_indices[t + 1], avatar.rest_indices[t + 2], 0u});
+            m_dst.push_back(
+                RtTriMeta{avatar.rest_indices[t], avatar.rest_indices[t + 1], avatar.rest_indices[t + 2], 0u});
         }
     }
 

@@ -59,7 +59,7 @@ bool passes_rt_alpha_test(uint tri_id, float2 bary) {
     }
     uint4 meta = AETHER_LOAD(uint4, g_Pc.draw_data_bda, tri_id);
     GpuMaterial hmat = AETHER_LOAD(GpuMaterial, g_Pc.aux_buf_bda, meta.w);
-    if ((hmat.extra_slots[3] == 0u) && (hmat.toon_params.w <= 0.001)) {
+    if ((hmat.extra_slots[2] & (1u << 21u)) == 0u && hmat.extra_slots[3] != 1u) {
         return true;
     }
     GpuSkinnedVertex v0 = AETHER_LOAD(GpuSkinnedVertex, g_Pc.vertex_buf_bda, meta.x);

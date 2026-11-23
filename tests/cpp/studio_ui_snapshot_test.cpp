@@ -208,8 +208,7 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         rig.tracking.live_preview_keypoint_valid.fill(1U);
         for (uint32_t i = 0; i <= 16U; ++i) {
             const float t = static_cast<float>(i) / 16.0f;
-            rig.tracking.live_preview_keypoints[i] = {0.36f + t * 0.28f,
-                                                      0.45f + 0.24f * std::sin(t * 3.14159265f)};
+            rig.tracking.live_preview_keypoints[i] = {0.36f + t * 0.28f, 0.45f + 0.24f * std::sin(t * 3.14159265f)};
         }
         for (uint32_t i = 0; i < 5U; ++i) {
             const float t = static_cast<float>(i) / 4.0f;
@@ -231,10 +230,8 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         }
         for (uint32_t i = 0; i < 6U; ++i) {
             const float a = static_cast<float>(i) * 6.2831853f / 6.0f;
-            rig.tracking.live_preview_keypoints[36U + i] = {0.43f + 0.032f * std::cos(a),
-                                                            0.41f + 0.018f * std::sin(a)};
-            rig.tracking.live_preview_keypoints[42U + i] = {0.57f + 0.032f * std::cos(a),
-                                                            0.41f + 0.018f * std::sin(a)};
+            rig.tracking.live_preview_keypoints[36U + i] = {0.43f + 0.032f * std::cos(a), 0.41f + 0.018f * std::sin(a)};
+            rig.tracking.live_preview_keypoints[42U + i] = {0.57f + 0.032f * std::cos(a), 0.41f + 0.018f * std::sin(a)};
         }
         for (uint32_t i = 0; i < 8U; ++i) {
             const float a = static_cast<float>(i) * 6.2831853f / 8.0f;
@@ -248,13 +245,11 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
         rig.tracking.live_preview_gaze_vec = {0.14f, -0.04f};
         for (uint32_t i = 0; i < 12U; ++i) {
             const float a = static_cast<float>(i) * 6.2831853f / 12.0f;
-            rig.tracking.live_preview_keypoints[48U + i] = {0.50f + 0.055f * std::cos(a),
-                                                            0.60f + 0.030f * std::sin(a)};
+            rig.tracking.live_preview_keypoints[48U + i] = {0.50f + 0.055f * std::cos(a), 0.60f + 0.030f * std::sin(a)};
         }
         for (uint32_t i = 0; i < 8U; ++i) {
             const float a = static_cast<float>(i) * 6.2831853f / 8.0f;
-            rig.tracking.live_preview_keypoints[60U + i] = {0.50f + 0.038f * std::cos(a),
-                                                            0.60f + 0.018f * std::sin(a)};
+            rig.tracking.live_preview_keypoints[60U + i] = {0.50f + 0.038f * std::cos(a), 0.60f + 0.018f * std::sin(a)};
         }
         rig.tracking.live2d.param_angle_x = 4.2f;
         rig.tracking.live2d.param_angle_y = -1.8f;
@@ -299,9 +294,9 @@ TEST_CASE("Studio workspace headless snapshots (Live / Rigging / Nodes, 100% and
                     }
                     host.telemetry.pin_node_ids[pi] = n.id;
                     host.telemetry.pin_indices[pi] = oi;
-                    host.telemetry.pin_kinds[pi] =
-                        (std::string(n.kind.data()) == "aether.source.dsp_audio@1") ? AETHER_PIN_VALUE_VEC3
-                                                                                    : AETHER_PIN_VALUE_FLOAT;
+                    host.telemetry.pin_kinds[pi] = (std::string(n.kind.data()) == "aether.source.dsp_audio@1")
+                                                       ? AETHER_PIN_VALUE_VEC3
+                                                       : AETHER_PIN_VALUE_FLOAT;
                     host.telemetry.pin_values[pi][0] = 0.72f + static_cast<float>(oi) * 0.14f;
                     host.telemetry.pin_values[pi][1] = 0.58f;
                     host.telemetry.pin_values[pi][2] = 0.91f;

@@ -44,8 +44,6 @@ class OutlinerPanel {
   private:
     void draw_scene_well(const DevShellAvatarView& avatar, const UiFontSet& fonts, UiSelection& selection,
                          StudioActions& actions, float scale);
-    void draw_expression_grid(std::span<ExpressionSlotInfo> expressions, const UiFontSet& fonts, UiSelection& selection,
-                              float scale);
     void draw_outputs(const DevShellOutputView& output_view, ParamStore& params, UndoStack& undo,
                       const UiFontSet& fonts, UiSelection& selection, StudioActions& actions, float scale);
 

@@ -13,8 +13,6 @@ namespace aether::renderer {
 
 namespace {
 
-constexpr float kDegToRad = 0.017453292519943295f;
-
 /** Vulkan objects owned by the bridge, destroyed by the collector once the GPU has finished with them. */
 struct RetiredBridgeObjects {
     const rhi::RhiDevice* device{nullptr};
@@ -72,13 +70,13 @@ std::array<float, 3> studio_light_toward(const StudioLightSpec& s) noexcept {
 
 const char* render_backend_name(RenderBackend b) noexcept {
     switch (b) {
-        case RenderBackend::DirectX11:
-            return "DirectX 11";
-        case RenderBackend::DirectX12:
-            return "DirectX 12";
-        case RenderBackend::Vulkan:
-        default:
-            return "Vulkan";
+    case RenderBackend::DirectX11:
+        return "DirectX 11";
+    case RenderBackend::DirectX12:
+        return "DirectX 12";
+    case RenderBackend::Vulkan:
+    default:
+        return "Vulkan";
     }
 }
 

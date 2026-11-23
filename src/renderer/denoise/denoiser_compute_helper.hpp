@@ -100,8 +100,8 @@ inline void destroy_compute_denoiser_pipeline(const rhi::RhiDevice* device, VkPi
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &bindless_set, 0, nullptr);
 
-    auto record_channel = [&](uint32_t raw_slot, uint32_t hist_slot, uint32_t dst_slot, float alpha_scale,
-                              uint32_t cw, uint32_t ch) noexcept {
+    auto record_channel = [&](uint32_t raw_slot, uint32_t hist_slot, uint32_t dst_slot, float alpha_scale, uint32_t cw,
+                              uint32_t ch) noexcept {
         const uint32_t cgx = (cw + 7u) / 8u;
         const uint32_t cgy = (ch + 7u) / 8u;
         GpuPushConstants pc{};

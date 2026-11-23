@@ -346,11 +346,19 @@ fn eval_op(
         }
         Op::CopyMaterialOverride { src, dst } => {
             arena.mat_overrides[dst] = arena.mat_overrides[src];
-            if arena.mat_overrides[dst].valid { 1.0 } else { 0.0 }
+            if arena.mat_overrides[dst].valid {
+                1.0
+            } else {
+                0.0
+            }
         }
         Op::CopyTextureHandle { src, dst } => {
             arena.tex_handles[dst] = arena.tex_handles[src];
-            if arena.tex_handles[dst].handle != 0 { 1.0 } else { 0.0 }
+            if arena.tex_handles[dst].handle != 0 {
+                1.0
+            } else {
+                0.0
+            }
         }
         Op::CastBoolToFloat { src, dst } => {
             let v = if arena.bools[src] != 0 { 1.0 } else { 0.0 };
@@ -1479,15 +1487,7 @@ impl CompiledGraphPlan {
         let plan_start = Instant::now();
         for (op_idx, op) in self.ops.iter().enumerate() {
             let op_start = Instant::now();
-            let val = eval_op(
-                op,
-                arena,
-                states,
-                inputs,
-                host,
-                circadian_hour,
-                outputs,
-            );
+            let val = eval_op(op, arena, states, inputs, host, circadian_hour, outputs);
             let op_ns = u32::try_from(op_start.elapsed().as_nanos()).unwrap_or(u32::MAX);
             if let Some(node_slot) = self.op_to_node_slot.get(op_idx).copied().flatten() {
                 if node_slot < self.node_eval_us.len() {

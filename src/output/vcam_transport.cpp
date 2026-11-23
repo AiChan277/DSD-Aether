@@ -540,8 +540,7 @@ Expected<void> VcamTransport::publish_frame(VkImage src_bgra, VkImage src_nv12_y
 Expected<void> VcamTransport::publish_host_bgra8(std::span<const uint8_t> bgra, uint32_t width, uint32_t height,
                                                  uint32_t fps, bool is_bottom_up, uint64_t frame_sequence,
                                                  uint64_t present_qpc_us) noexcept {
-    if (shm_base_ == nullptr || width == 0u || height == 0u ||
-        bgra.size() < static_cast<size_t>(width) * height * 4u) {
+    if (shm_base_ == nullptr || width == 0u || height == 0u || bgra.size() < static_cast<size_t>(width) * height * 4u) {
         return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "VcamTransport::publish_host_bgra8 invalid args")};
     }
 

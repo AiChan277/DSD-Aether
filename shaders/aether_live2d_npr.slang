@@ -9,6 +9,7 @@ struct NprVsOut {
     float2 uv : TEXCOORD4;
     nointerpolation uint material_id : TEXCOORD5;
     nointerpolation uint submesh_flags : TEXCOORD6;
+    float3 hair_tangent : TEXCOORD7;
 };
 
 static const float kPi = 3.14159265;
@@ -72,6 +73,7 @@ NprVsOut vs_main(uint vid : SV_VertexID) {
     o.uv = v.uv;
     o.material_id = g_Pc.param0;
     o.submesh_flags = g_Pc.param1;
+    o.hair_tangent = (v.material_id != 0u) ? oct_decode_snorm16_u32(v.material_id) : float3(0.0, 0.0, 0.0);
     return o;
 }
 
@@ -136,6 +138,8 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     }
 
     uint mat_flags = mat.extra_slots.z;
+    bool is_additive = ((i.submesh_flags & 128u) != 0u) || ((mat_flags & 128u) != 0u);
+    bool is_pmx = ((mat_flags & (1u << 14u)) != 0u);
     uint debug_view = fg.state_u32.z;
     bool is_clay_diag = (uint(fg.stage_camera_params.z) == 1u);
     if (debug_view == 1u) {
@@ -150,8 +154,22 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         emissive_map = aether_sample(mat.extra_slots.y, kSamplerLinearClamp, i.uv).rgb;
     }
     float3 emissive_term = is_clay_diag ? float3(0.0, 0.0, 0.0) : (mat.emission_and_shift.rgb * emissive_map);
+    if (is_additive) {
+        float3 add_rgb = is_clay_diag ? float3(0.0, 0.0, 0.0) : (lit_rgba.rgb * alpha + emissive_term);
+        return float4(max(add_rgb, float3(0.0, 0.0, 0.0)), 0.0);
+    }
     if (is_clay_diag) {
         lit_rgba.rgb = float3(0.18, 0.18, 0.18);
+    } else if (!is_pmx && fg.vrm_parity_params0.w > 0.001) {
+        // VRM Pre-Cel Albedo Clarity: mild OKLab midtone separation and chroma crispness before toon ramp.
+        float clarity = clamp(fg.vrm_parity_params0.w, 0.0, 1.0);
+        float3 lab_pre = lin_srgb_to_oklab(lit_rgba.rgb);
+        float c_mag = length(lab_pre.yz);
+        if (c_mag > 0.004) {
+            lab_pre.yz *= (1.0 + 0.16 * clarity);
+            lab_pre.x = saturate(lab_pre.x + (lab_pre.x - 0.55) * (0.16 * clarity));
+            lit_rgba.rgb = oklab_to_lin_srgb(lab_pre);
+        }
     }
 
     // Unlit MToon materials preserve exact analytical emissive + base premul composite
@@ -160,8 +178,10 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         return float4(hdr_rgb, alpha);
     }
 
+    bool harm_on = (!is_pmx) && (fg.vrm_parity_params0.x > 0.5);
+    float crisp_scale = harm_on ? max(0.35, 1.0 - clamp(fg.vrm_parity_params0.y, 0.0, 1.0) * 0.45) : 1.0;
     float face_norm_flatten = saturate(fg.npr_style_params.x);
-    float cel_feather = clamp(fg.npr_style_params.y, 0.008, 0.20);
+    float cel_feather = clamp(fg.npr_style_params.y * crisp_scale, 0.008, 0.20);
     float shadow_shift = saturate(fg.npr_style_params.z);
     float hair_hl_intensity = max(fg.npr_style_params2.y, 0.0);
     float rim_step_strength = max(fg.npr_style_params2.z, 0.0);
@@ -564,10 +584,15 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
     float3 bleed_chroma = normalize_chroma(e_bounce);
     float gi_tint_w = saturate(gi_luma * k_gi * 1.25) * 0.45;
     float3 eff_shade = lerp(base_shade, base_shade * bleed_chroma, gi_tint_w) * lerp(1.0, 0.90, deep_shadow);
-    // Boost cloth shadow chroma by +20% in OKLab so bright knitwear / outfits retain rich illustration color
+    // Boost shadow chroma in OKLab via `vrm_shadow_chroma_lift` so illustrations retain rich color without muddy grey
+    float sh_chroma_lift = harm_on ? clamp(fg.vrm_parity_params0.z, 0.0, 1.0) : 0.22;
     if (!is_skin_pixel && !is_eye_iris && !is_hair) {
         float3 lab_sh = lin_srgb_to_oklab(eff_shade);
-        lab_sh.yz *= 1.20;
+        lab_sh.yz *= (1.0 + sh_chroma_lift * 0.909);
+        eff_shade = oklab_to_lin_srgb(lab_sh);
+    } else if (harm_on && !is_eye_iris && sh_chroma_lift > 0.001) {
+        float3 lab_sh = lin_srgb_to_oklab(eff_shade);
+        lab_sh.yz *= (1.0 + sh_chroma_lift * 0.35);
         eff_shade = oklab_to_lin_srgb(lab_sh);
     }
 
@@ -615,12 +640,20 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
                        (mat.rim_color_power.rgb * (fresnel_soft * rim_occ * 0.22))) *
                       backface_atten * dark_albedo_atten * (has_active_key ? 1.0 : 0.0);
 
-    // Matcap term
+    // Matcap / PMX Sphere map (.spa Additive when mat.shade_color.w >= 0.5, .sph Multiplicative when < 0.5)
     float3 matcap_term = float3(0.0, 0.0, 0.0);
-    if (mat.toon_params.y > 0.001 && mat.tex_slots.w != 0xFFFFFFFFu) {
+    float3 sph_mul_tint = float3(1.0, 1.0, 1.0);
+    if (mat.toon_params.y > 0.001 && mat.tex_slots.w != 0xFFFFFFFFu && !is_clay_diag) {
         float3 vn = normalize_safe(mul_col3(fg.view, shade_n), float3(0.0, 0.0, 1.0));
         float2 mc_uv = vn.xy * 0.48 + 0.5;
-        matcap_term = aether_sample(mat.tex_slots.w, kSamplerLinearClamp, mc_uv).rgb * mat.toon_params.y;
+        float3 mc_sample = aether_sample(mat.tex_slots.w, kSamplerLinearClamp, mc_uv).rgb;
+        float mc_add_mix = saturate(mat.shade_color.w);
+        if (mc_add_mix >= 0.5) {
+            matcap_term = mc_sample * (mat.toon_params.y * mc_add_mix);
+        } else {
+            float sph_str = clamp(mat.toon_params.y, 0.0, 1.0) * (1.0 - mc_add_mix);
+            sph_mul_tint = lerp(float3(1.0, 1.0, 1.0), mc_sample, sph_str);
+        }
     }
 
     // Hybrid Micro-PBR Differentiation:
@@ -678,25 +711,34 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         }
     }
 
-    // Kajiya-Kay / Anisotropic Hair Angel Ring (crown-smoothed tangent flow + thin-slab Backscatter)
+    // Kajiya-Kay / Anisotropic Hair Angel Ring (preferring baked crown-smoothed tangent T_hair, + thin-slab Backscatter)
     float3 angel_term = float3(0.0, 0.0, 0.0);
-    if (is_hair && is_front_face && hair_hl_intensity > 0.001) {
-        float3 dp_dx = ddx(i.world_pos);
-        float3 dp_dy = ddy(i.world_pos);
-        float2 duv_dx = ddx(i.uv);
-        float2 duv_dy = ddy(i.uv);
-        float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
+    float angel_parity = is_pmx ? 1.0 : clamp(fg.vrm_parity_params1.x / 0.75, 0.0, 2.0);
+    float eff_hair_hl =
+        max(hair_hl_intensity, (!is_pmx && mat.hair_specular_params.x > 0.5) ? 0.65 : 0.0) * angel_parity;
+    if (is_hair && is_front_face && eff_hair_hl > 0.001) {
         float3 h_up = normalize_safe(cross(fg.head_fwd_world.xyz, fg.head_right_world.xyz), float3(0.0, 1.0, 0.0));
         float3 apex = fg.neck_seam_head_str.xyz + h_up * 0.14;
         float3 crown_dir = normalize_safe(apex - i.world_pos, h_up);
         float3 crown_tangent = normalize_safe(crown_dir - true_n * dot(crown_dir, true_n), h_up);
         float3 t_crown_tip = crown_tangent;
-        if (abs(det) > 1e-8) {
-            float3 bitan = (-duv_dy.x * dp_dx + duv_dx.x * dp_dy) / det;
-            float3 t_uv = normalize_safe(bitan - true_n * dot(bitan, true_n), crown_tangent);
-            // Smoothly replace jagged UV facets at coarse crown blocks with continuous azimuthal crown flow
-            float crown_w = clamp(smoothstep(0.20, 0.72, dot(true_n, h_up)), 0.45, 0.90);
-            t_crown_tip = normalize_safe(lerp(t_uv, crown_tangent, crown_w), crown_tangent);
+        if (length(i.hair_tangent) > 0.15) {
+            // `tangent_oct` stores crown-smoothed bitangent (true_n x strand_flow); recover strand flow cleanly.
+            float3 t_baked_flow = normalize_safe(cross(true_n, i.hair_tangent), crown_tangent);
+            t_crown_tip = normalize_safe(lerp(crown_tangent, t_baked_flow, 0.78), crown_tangent);
+        } else {
+            float3 dp_dx = ddx(i.world_pos);
+            float3 dp_dy = ddy(i.world_pos);
+            float2 duv_dx = ddx(i.uv);
+            float2 duv_dy = ddy(i.uv);
+            float det = duv_dx.x * duv_dy.y - duv_dy.x * duv_dx.y;
+            if (abs(det) > 1e-8) {
+                float3 bitan = (-duv_dy.x * dp_dx + duv_dx.x * dp_dy) / det;
+                float3 t_uv = normalize_safe(bitan - true_n * dot(bitan, true_n), crown_tangent);
+                // Smoothly replace jagged UV facets at coarse crown blocks with continuous azimuthal crown flow
+                float crown_w = clamp(smoothstep(0.20, 0.72, dot(true_n, h_up)), 0.45, 0.90);
+                t_crown_tip = normalize_safe(lerp(t_uv, crown_tangent, crown_w), crown_tangent);
+            }
         }
         float strand_shift = 0.085 * sin(i.uv.x * 52.0) + 0.04 * cos(i.uv.x * 104.0);
         float3 hair_vel = clamp(fg.hair_velocity_ws.xyz, float3(-1.5, -1.5, -1.5), float3(1.5, 1.5, 1.5));
@@ -719,7 +761,7 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
         float3 hl_tint = lerp(float3(1.0, 1.0, 1.0), lit_rgba.rgb * 1.45 + 0.22, 0.38);
         float3 edge_col = lerp(hl_tint, hl_tint * float3(1.12, 0.90, 1.08), ring_edge_chroma);
         angel_term = hair_l_col * edge_col *
-                     ((ring_step * 0.34 + ring_edge_chroma * 0.14) * hair_hl_intensity * lerp(0.45, 1.0, cel_lit));
+                     ((ring_step * 0.34 + ring_edge_chroma * 0.14) * eff_hair_hl * lerp(0.45, 1.0, cel_lit));
     }
     // Thin-slab RT Backscatter (or backlit silhouette fallback on iGPU)
     float3 backscatter_term = float3(0.0, 0.0, 0.0);
@@ -758,53 +800,8 @@ float4 ps_main(NprVsOut i, bool is_front_face : SV_IsFrontFace) : SV_Target0 {
 
     float3 hdr = is_clay_diag
                      ? (direct_term + rim_term * 0.35 + micro_pbr_term * 0.25)
-                     : (direct_term + rim_term + micro_pbr_term + matcap_term + catchlight_term + angel_term +
-                        backscatter_term + emissive_term);
+                     : ((direct_term * sph_mul_tint) + rim_term + micro_pbr_term + matcap_term + catchlight_term +
+                        angel_term + backscatter_term + emissive_term);
     return float4(hdr * alpha, alpha);
 }
 
-// Pass 13 helper: 128x128 3D interactive Light Orbit Orb shader (§12.7).
-[shader("vertex")]
-NprVsOut vs_orb(uint vid : SV_VertexID) {
-    NprVsOut o = {};
-#ifdef __TARGET_SPIRV__
-    float2 quad[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
-    o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
-    o.uv = o.clip_pos.xy * 0.5 + 0.5;
-#else
-    float2 quad[3] = {float2(-1.0, 1.0), float2(3.0, 1.0), float2(-1.0, -3.0)};
-    o.clip_pos = float4(quad[vid % 3u], 0.0, 1.0);
-    o.uv = float2(o.clip_pos.x * 0.5 + 0.5, 0.5 - o.clip_pos.y * 0.5);
-#endif
-    return o;
-}
-
-[shader("fragment")]
-float4 ps_orb(NprVsOut i) : SV_Target0 {
-    float2 p = i.uv * 2.0 - 1.0;
-    p.y = -p.y;
-    float r2 = dot(p, p);
-    if (r2 > 0.90) {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
-    float radius = 0.88;
-    float2 q = p / radius;
-    float q2 = dot(q, q);
-    float edge_aa = smoothstep(1.0, 0.94, q2);
-    if (edge_aa <= 0.001) {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
-
-    float3 n = float3(q.x, q.y, sqrt(max(0.0, 1.0 - q2)));
-    GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
-    float3 key_dir = normalize_safe(fg.photometric_params0.xyz, float3(0.42, 0.56, 0.71));
-    float3 key_col = fg.photometric_params1.xyz;
-
-    float cel = smoothstep(-0.08, 0.12, dot(n, key_dir));
-    float3 col = lerp(float3(0.16, 0.19, 0.26), float3(0.76, 0.80, 0.88) * clamp(key_col, 0.2, 1.4), cel);
-    float3 h = normalize(key_dir + float3(0.0, 0.0, 1.0));
-    col += key_col * pow(saturate(dot(n, h)), 36.0) * 0.45;
-    float dot_dist = length(q - key_dir.xy * 0.82);
-    col = lerp(col, float3(0.24, 0.55, 0.96), smoothstep(0.16, 0.10, dot_dist));
-    return float4(linear_to_srgb(col) * edge_aa, edge_aa);
-}

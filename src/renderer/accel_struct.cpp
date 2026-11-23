@@ -107,15 +107,16 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
         return Unexpected<Error>{Error::make(ErrorCode::VulkanError, "GpuAvatar index buffer lacks device address")};
     }
 
-    auto append_geom = [&](size_t bucket_idx, VkDeviceAddress idx_bda, uint32_t idx_offset, uint32_t idx_count) {
+    auto append_geom = [&](size_t bucket_idx, VkDeviceAddress idx_bda, uint32_t idx_offset, uint32_t idx_count,
+                           bool non_opaque) {
         if (idx_count < 3u || bucket_idx >= buckets_.size()) {
             return;
         }
         const uint32_t tri_cnt = idx_count / 3u;
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        // Hair (1) and BodyCloth (3) allow non-opaque alpha-test checks so cutouts (bangs/lace) never cast solid quad shadows.
-        g.flags = (bucket_idx == 1u || bucket_idx == 3u) ? 0u : VK_GEOMETRY_OPAQUE_BIT_KHR;
+        // Mark NON_OPAQUE only when bucket/submesh contains AlphaCutout geometry (including FaceSkin lashes/brows).
+        g.flags = non_opaque ? 0u : VK_GEOMETRY_OPAQUE_BIT_KHR;
         g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
         g.geometry.triangles.vertexStride = sizeof(GpuSkinnedVertex);
@@ -137,12 +138,12 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
     const RtPartitionedIndices part = build_rt_partitioned_indices(avatar);
     if (!part.sorted_indices.empty()) {
         const VkDeviceSize rt_idx_bytes = static_cast<VkDeviceSize>(part.sorted_indices.size()) * sizeof(uint32_t);
-        auto ib_res = device_->create_buffer(
-            rt_idx_bytes,
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-            VMA_MEMORY_USAGE_AUTO,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        auto ib_res = device_->create_buffer(rt_idx_bytes,
+                                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                             VMA_MEMORY_USAGE_AUTO,
+                                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                                 VMA_ALLOCATION_CREATE_MAPPED_BIT);
         if (!ib_res) {
             destroy_avatar_structures();
             return Unexpected<Error>{ib_res.error()};
@@ -154,8 +155,7 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
         if (!part.tri_meta.empty()) {
             const VkDeviceSize tm_bytes = static_cast<VkDeviceSize>(part.tri_meta.size()) * sizeof(RtTriMeta);
             auto tm_res = device_->create_buffer(
-                tm_bytes,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                tm_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                 VMA_MEMORY_USAGE_AUTO,
                 VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
             if (!tm_res) {
@@ -172,11 +172,12 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
         for (size_t b = 0; b < kBucketCount; ++b) {
             if (part.bucket_index_count[b] >= 3u) {
                 buckets_[b].tri_offset = part.bucket_index_offset[b] / 3u;
-                append_geom(b, rt_idx_bda, part.bucket_index_offset[b], part.bucket_index_count[b]);
+                append_geom(b, rt_idx_bda, part.bucket_index_offset[b], part.bucket_index_count[b],
+                            part.bucket_has_cutout[b]);
             }
         }
     } else if (avatar.submeshes.empty()) {
-        append_geom(static_cast<size_t>(RtMaskBucket::BodyCloth), rt_idx_bda, 0u, index_count);
+        append_geom(static_cast<size_t>(RtMaskBucket::BodyCloth), rt_idx_bda, 0u, index_count, false);
     } else {
         for (const auto& sm : avatar.submeshes) {
             uint32_t alpha_mode = AETHER_ALPHA_MODE_OPAQUE;
@@ -187,21 +188,26 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
                 m_flags = avatar.materials[sm.material_index].flags;
                 m_name = read_material_cstr(avatar, avatar.materials[sm.material_index].name_offset);
             }
-            const bool is_blend =
-                (alpha_mode == AETHER_ALPHA_MODE_BLEND) || ((sm.flags & AETHER_SUBMESH_FLAG_TRANSPARENT) != 0u);
-            if (is_blend) {
+            const bool is_transparent =
+                (alpha_mode == AETHER_ALPHA_MODE_BLEND) || (alpha_mode == AETHER_ALPHA_MODE_ADDITIVE) ||
+                ((sm.flags & (AETHER_SUBMESH_FLAG_TRANSPARENT | AETHER_SUBMESH_FLAG_ADDITIVE)) != 0u) ||
+                ((m_flags & AETHER_MAT_FLAG_NO_SHADOW_CAST) != 0u);
+            if (is_transparent) {
                 continue;
             }
+            const bool is_cutout = (alpha_mode == AETHER_ALPHA_MODE_MASK) ||
+                                   ((sm.flags & AETHER_SUBMESH_FLAG_ALPHA_CUTOUT) != 0u) ||
+                                   ((m_flags & AETHER_MAT_FLAG_ALPHA_CUTOUT) != 0u);
             const std::string sm_name = avatar.string_slice(sm.name_offset, sm.name_len);
             const RtMaskBucket rtb = classify_rt_bucket(m_name, sm_name, m_flags, sm.flags);
-            append_geom(static_cast<size_t>(rtb), rt_idx_bda, sm.index_offset, sm.index_count);
+            append_geom(static_cast<size_t>(rtb), rt_idx_bda, sm.index_offset, sm.index_count, is_cutout);
         }
         bool any = false;
         for (const auto& b : buckets_) {
             any = any || !b.geoms.empty();
         }
         if (!any) {
-            append_geom(static_cast<size_t>(RtMaskBucket::BodyCloth), rt_idx_bda, 0u, index_count);
+            append_geom(static_cast<size_t>(RtMaskBucket::BodyCloth), rt_idx_bda, 0u, index_count, false);
         }
     }
 
@@ -238,10 +244,9 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
         b.size = sizes.accelerationStructureSize;
         max_scratch = std::max(max_scratch, std::max(sizes.buildScratchSize, sizes.updateScratchSize));
 
-        auto buf_res = device_->create_buffer(b.size,
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                                                  VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                                              VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+        auto buf_res = device_->create_buffer(
+            b.size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
         if (!buf_res) {
             return Unexpected<Error>{buf_res.error()};
         }
@@ -342,11 +347,10 @@ Expected<void> AccelStructManager::prepare_avatar(const GpuAvatar& avatar) {
     prepared_index_count_ = index_count;
     ready_ = true;
     has_built_once_ = false;
-    AETHER_LOG_INFO("rt",
-                    "AccelStruct prepared (4-mask): face=%u hair=%u hands=%u body=%u tris, blas_kb=%.1f scratch_kb=%.1f",
-                    buckets_[0].tri_count, buckets_[1].tri_count, buckets_[2].tri_count, buckets_[3].tri_count,
-                    static_cast<double>(total_blas_bytes) / 1024.0,
-                    static_cast<double>(scratch_size_) / 1024.0);
+    AETHER_LOG_INFO(
+        "rt", "AccelStruct prepared (4-mask): face=%u hair=%u hands=%u body=%u tris, blas_kb=%.1f scratch_kb=%.1f",
+        buckets_[0].tri_count, buckets_[1].tri_count, buckets_[2].tri_count, buckets_[3].tri_count,
+        static_cast<double>(total_blas_bytes) / 1024.0, static_cast<double>(scratch_size_) / 1024.0);
     return {};
 }
 

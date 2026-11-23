@@ -50,7 +50,7 @@ struct PmxJointClearancePair {
 ///      exponential damping, and velocity clamping (`max_lin_vel = 6.0 m/s`,
 ///      `max_ang_vel = 15.0 rad/s`).
 class PmxSkeletonAndPhysicsSolver {
-public:
+  public:
     static constexpr float kFixedDt = 1.0f / 60.0f;
     static constexpr float kGravityY = -9.8f;
     static constexpr float kMaxLinearVel = 6.0f;
@@ -59,74 +59,48 @@ public:
 
     PmxSkeletonAndPhysicsSolver() = default;
 
-    void init(std::span<const AetherJointDesc> bones,
-              std::span<const AetherPmxBoneExt> bone_exts,
-              std::span<const AetherPmxIkLink> ik_links,
-              std::span<const AetherPmxRigidBodyDesc> rigid_bodies,
-              std::span<const AetherPmxConstraint6DofDesc> constraints_6dof) noexcept;
+    void init(std::span<const AetherJointDesc> bones, std::span<const AetherPmxBoneExt> bone_exts,
+              std::span<const AetherPmxIkLink> ik_links, std::span<const AetherPmxRigidBodyDesc> rigid_bodies,
+              std::span<const AetherPmxConstraint6DofDesc> constraints_6dof);
 
-    void reset_to_rest_pose(std::span<const AetherJointDesc> bones,
-                            std::span<const float> rest_world_mats16) noexcept;
+    void reset_to_rest_pose(std::span<const AetherJointDesc> bones, std::span<const float> rest_world_mats16) noexcept;
 
-    [[nodiscard]] bool empty() const noexcept {
-        return bone_exts_.empty() && rigid_bodies_.empty();
-    }
+    [[nodiscard]] bool empty() const noexcept { return bone_exts_.empty() && rigid_bodies_.empty(); }
 
     /// Evaluates CCD-IK, Append Transform, and fixed-timestep 60 Hz RigidBody +
     /// 6-DOF Spring Joint simulation in-place on `local_t` (N*3), `local_r` (N*4),
     /// and `world_mats16` (N*16 column-major 4x4 matrices).
     /// Zero heap allocations occur inside `step()`.
-    void step(float dt_sec,
-              std::span<const AetherJointDesc> bones,
-              std::span<float> local_t,
-              std::span<float> local_r,
-              std::span<const float> local_s,
-              std::span<float> world_mats16) noexcept;
+    void step(float dt_sec, std::span<const AetherJointDesc> bones, std::span<float> local_t, std::span<float> local_r,
+              std::span<const float> local_s, std::span<float> world_mats16) noexcept;
 
     /// Evaluates spherical deform (`SDEF`) vertex skinning on CPU for verification
     /// and fallback when needed, returning deformed position and normal.
-    static void evaluate_sdef_vertex(const float in_pos[3],
-                                     const float in_nrm[3],
-                                     const uint16_t joints[4],
-                                     const float weights[4],
-                                     const AetherPmxSdefVertex& sdef,
-                                     std::span<const float> skin_mats16,
-                                     std::span<const float> world_mats16,
-                                     std::span<const float> inv_bind_mats16,
-                                     float out_pos[3],
+    static void evaluate_sdef_vertex(const float in_pos[3], const float in_nrm[3], const uint16_t joints[4],
+                                     const float weights[4], const AetherPmxSdefVertex& sdef,
+                                     std::span<const float> skin_mats16, std::span<const float> world_mats16,
+                                     std::span<const float> inv_bind_mats16, float out_pos[3],
                                      float out_nrm[3]) noexcept;
 
-    [[nodiscard]] std::span<const PmxRigidBodyRuntime> rigid_body_states() const noexcept {
-        return rb_states_;
-    }
+    [[nodiscard]] std::span<const PmxRigidBodyRuntime> rigid_body_states() const noexcept { return rb_states_; }
 
-private:
-    void recompute_world_matrices(std::span<const AetherJointDesc> bones,
-                                  std::span<const float> local_t,
-                                  std::span<const float> local_r,
-                                  std::span<const float> local_s,
+  private:
+    void recompute_world_matrices(std::span<const AetherJointDesc> bones, std::span<const float> local_t,
+                                  std::span<const float> local_r, std::span<const float> local_s,
                                   std::span<float> world_mats16) const noexcept;
 
-    void solve_ccd_ik(std::span<const AetherJointDesc> bones,
-                      std::span<const float> local_t,
-                      std::span<float> local_r,
-                      std::span<const float> local_s,
-                      std::span<float> world_mats16) const noexcept;
+    void solve_ccd_ik(std::span<const AetherJointDesc> bones, std::span<const float> local_t, std::span<float> local_r,
+                      std::span<const float> local_s, std::span<float> world_mats16) const noexcept;
 
-    void solve_append_transforms(std::span<const AetherJointDesc> bones,
-                                 std::span<float> local_t,
-                                 std::span<float> local_r,
-                                 std::span<const float> local_s,
+    void solve_append_transforms(std::span<const AetherJointDesc> bones, std::span<float> local_t,
+                                 std::span<float> local_r, std::span<const float> local_s,
                                  std::span<float> world_mats16) noexcept;
 
-    void step_physics_fixed(float fixed_dt,
-                            std::span<const AetherJointDesc> bones,
+    void step_physics_fixed(float fixed_dt, std::span<const AetherJointDesc> bones,
                             std::span<const float> world_mats16) noexcept;
 
-    void write_dynamic_bodies_to_bones(std::span<const AetherJointDesc> bones,
-                                       std::span<float> local_t,
-                                       std::span<float> local_r,
-                                       std::span<const float> local_s,
+    void write_dynamic_bodies_to_bones(std::span<const AetherJointDesc> bones, std::span<float> local_t,
+                                       std::span<float> local_r, std::span<const float> local_s,
                                        std::span<float> world_mats16) const noexcept;
 
     std::vector<AetherPmxBoneExt> bone_exts_;
@@ -141,4 +115,4 @@ private:
     bool initialized_from_pose_{false};
 };
 
-}  // namespace aether::animation
+} // namespace aether::animation

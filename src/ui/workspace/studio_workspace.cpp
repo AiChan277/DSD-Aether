@@ -95,12 +95,15 @@ StudioWorkspace::StudioWorkspace() {
 }
 
 void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& hw, float dpi_scale,
-                           const char* initial_avatar_path, bool allow_disk_config) {
+                           const char* initial_avatar_path, bool allow_disk_config, core::SessionManager* session_mgr) {
     paths_ = paths;
     hw_ = hw;
     os_dpi_scale_ = std::max(0.75f, dpi_scale);
     allow_disk_config_ = allow_disk_config;
+    session_mgr_ = session_mgr;
     config_dir_ = paths_.app_data_dir.empty() ? default_config_dir() : std::filesystem::path(paths_.app_data_dir);
+    // Warm up the static `.alfx` preset catalog once off the hot path so Frame 0 performs 0 allocations.
+    (void)core::AlfxSerializer::builtin_preset_catalog();
 
     std::string ref_vrm = resolve_asset_path(paths_, "samples/reference.vrm");
     if (!std::filesystem::exists(ref_vrm) && allow_disk_config_) {
@@ -130,10 +133,15 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
     if (allow_disk_config_) {
         std::error_code ec;
         std::filesystem::create_directories(config_dir_ / "layouts", ec);
-        (void)load_app_settings_toml(config_dir_ / "settings.toml", settings_, params_);
+        if (session_mgr_ != nullptr) {
+            load_app_settings_from_session(session_mgr_->state(), settings_, params_);
+        } else {
+            (void)load_app_settings_toml(config_dir_ / "settings.toml", settings_, params_);
+        }
         (void)keymap_.load_toml(config_dir_ / "keymap.toml");
         viewport_panel_.set_persist_presets(true);
         viewport_panel_.preset_bank().set_storage_path(resolve_camera_presets_json_path(paths_));
+        viewport_panel_.set_persist_presets(false);
         if (!viewport_panel_.preset_bank().load_default() && !paths_.assets_dir.empty()) {
             const auto shipped_cam =
                 std::filesystem::path(paths_.assets_dir).parent_path() / "config" / "camera_presets.json";
@@ -175,6 +183,7 @@ void StudioWorkspace::init(const RuntimePaths& paths, const HardwareInventory& h
     if (!paths_.assets_dir.empty()) {
         lighting_stage_.set_shipped_config_dir(std::filesystem::path(paths_.assets_dir).parent_path() / "config");
     }
+    reset_dirty_tracking();
     synced_param_epoch_ = 0; // force initial ParamStore -> actions sync
     dock_layout_dirty_ = true;
 }
@@ -192,7 +201,12 @@ void StudioWorkspace::save_app_config_files() {
     }
     std::error_code ec;
     std::filesystem::create_directories(config_dir_ / "layouts", ec);
-    (void)save_app_settings_toml(config_dir_ / "settings.toml", settings_, params_);
+    if (session_mgr_ != nullptr) {
+        save_app_settings_to_session(settings_, params_, session_mgr_->state());
+        (void)session_mgr_->save_session_state();
+    } else {
+        (void)save_app_settings_toml(config_dir_ / "settings.toml", settings_, params_);
+    }
     (void)keymap_.save_toml(config_dir_ / "keymap.toml");
     settings_dirty_ = false;
 }
@@ -385,6 +399,51 @@ void StudioWorkspace::build_dock_layout(ImGuiID dockspace_id, StudioMode mode) {
     safe_copy_cstr(focus_tab_after_layout_.data(), focus_tab_after_layout_.size(), focus_bottom);
 }
 
+namespace {
+
+[[nodiscard]] aether::DirtyDomain dirty_domain_for_param(std::string_view id) noexcept {
+    using aether::DirtyDomain;
+    if (id.starts_with("avatar.") || id.starts_with("sim.")) {
+        return DirtyDomain::AvatarState;
+    }
+    if (id.starts_with("render.circadian_") || id == "render.light_scale") {
+        return DirtyDomain::LightingRig;
+    }
+    if (id == "render.denoiser" || id == "render.backend" || id == "render.target_fps" || id == "render.vsync" ||
+        id == "render.background_eco" || id == "render.resolution_scale_pct" || id == "render.aa_mode" ||
+        id == "render.debug_view") {
+        return DirtyDomain::None; // Global workstation / display preferences
+    }
+    if (id.starts_with("render.")) {
+        return DirtyDomain::EffectsFx;
+    }
+    if (id == "dsp.user_offset_ms") {
+        return DirtyDomain::OutputsCfg;
+    }
+    if (id.starts_with("output.")) {
+        return (id == "output.spout_cpu_fallback" || id == "output.osc_enabled" || id == "output.ws_enabled")
+                   ? DirtyDomain::None
+                   : DirtyDomain::OutputsCfg;
+    }
+    if (id == "tracking.hand_enabled" || id == "tracking.smoothing_cutoff_hz" || id == "tracking.audio_assist" ||
+        id.starts_with("tracking.mic_") || id.starts_with("tracking.npu_")) {
+        return DirtyDomain::TrackingCfg;
+    }
+    if (id == "app.viewport_aspect" || id == "app.camera_transition_speed") {
+        return DirtyDomain::CameraState;
+    }
+    return DirtyDomain::None;
+}
+
+} // namespace
+
+void StudioWorkspace::reset_dirty_tracking() noexcept {
+    dirty_param_epoch_ = params_.epoch();
+    for (size_t i = 0; i < kParamCount; ++i) {
+        dirty_param_snapshot_[i] = params_.get(static_cast<ParamId>(i));
+    }
+}
+
 void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     // Wireframe, Rigging collider overlays, and live AvatarRoot transform stay synced every frame
     // even when StudioActions was freshly default-constructed without a ParamStore epoch bump.
@@ -408,16 +467,6 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
 
     auto& v = actions.viewport;
     v.live2d_flatness = params_.get_float(ParamId::RenderFlatness);
-    v.key_azimuth_deg = params_.get_float(ParamId::RenderKeyAzimuthDeg);
-    v.key_elevation_deg = params_.get_float(ParamId::RenderKeyElevationDeg);
-    // Fill / Rim orbit rigidly with the key (Light Orbit Gizmo handles drive the same rig).
-    v.fill_azimuth_deg = wrap_degrees(v.key_azimuth_deg + LightRigOffsets::kFillAzDeg);
-    v.fill_elevation_deg = std::clamp(v.key_elevation_deg + LightRigOffsets::kFillElDeg, -85.0f, 85.0f);
-    v.rim_azimuth_deg = wrap_degrees(v.key_azimuth_deg + LightRigOffsets::kRimAzDeg);
-    v.rim_elevation_deg = std::clamp(v.key_elevation_deg + LightRigOffsets::kRimElDeg, -85.0f, 85.0f);
-    v.key_intensity = params_.get_float(ParamId::RenderKeyIntensity);
-    v.fill_intensity = params_.get_float(ParamId::RenderFillIntensity);
-    v.rim_intensity = params_.get_float(ParamId::RenderRimIntensity);
     v.outline_scale = params_.get_float(ParamId::RenderOutlineScale);
     v.bloom_intensity = params_.get_float(ParamId::RenderBloomIntensity);
     v.face_normal_flatten = params_.get_float(ParamId::RenderFaceNormalFlatten);
@@ -436,8 +485,6 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.filter_dog_ink_boost = params_.get_float(ParamId::RenderFilterDogInkBoost);
     v.filter_paper_warmth = params_.get_bool(ParamId::RenderFilterPaperWarmth);
     v.filter_paper_warmth_strength = params_.get_float(ParamId::RenderFilterPaperWarmthStrength);
-    v.lighting_fixture = std::clamp(params_.get_int(ParamId::RenderLightingFixture), 0, 5);
-    v.photometric_beam_angle_deg = params_.get_float(ParamId::RenderPhotometricBeamAngleDeg);
     v.eye_catchlight_intensity = params_.get_float(ParamId::RenderEyeCatchlightIntensity);
     v.eye_catchlight_size = params_.get_float(ParamId::RenderEyeCatchlightSize);
     v.crease_disguise_enabled = params_.get_bool(ParamId::RenderCreaseDisguiseEnabled);
@@ -445,15 +492,6 @@ void StudioWorkspace::sync_params_to_actions(StudioActions& actions) noexcept {
     v.circadian_enabled = params_.get_bool(ParamId::RenderCircadianEnabled);
     v.circadian_timezone_idx = params_.get_int(ParamId::RenderCircadianTimezone);
     v.circadian_time_override_min = params_.get_int(ParamId::RenderCircadianTimeMinutes);
-    v.studio_fixture = std::clamp(params_.get_int(ParamId::RenderStudioFixture), 0, 11);
-    v.key_softbox_enabled = params_.get_bool(ParamId::RenderSoftboxEnabled);
-    v.key_grid_enabled = params_.get_bool(ParamId::RenderGridEnabled);
-    v.key_grid_angle_deg = params_.get_float(ParamId::RenderGridAngleDeg);
-    v.key_barn_doors_enabled = params_.get_bool(ParamId::RenderBarnDoorsEnabled);
-    v.key_diffusion_enabled = params_.get_bool(ParamId::RenderDiffusionEnabled);
-    v.key_diffusion_density = params_.get_float(ParamId::RenderDiffusionDensity);
-    v.key_gel_enabled = params_.get_bool(ParamId::RenderGelEnabled);
-    v.key_gel_preset = std::clamp(params_.get_int(ParamId::RenderGelPreset), 0, 11);
     v.satsuei_light_wrap = params_.get_float(ParamId::RenderSatsueiLightWrap);
     v.satsuei_halation = params_.get_float(ParamId::RenderSatsueiHalation);
     v.satsuei_backscatter = params_.get_float(ParamId::RenderSatsueiBackscatter);
@@ -554,6 +592,17 @@ void StudioWorkspace::execute_palette_command(const PaletteInvokeResult& res, do
         lighting_stage_.toggle_pilot_light(actions.viewport, {0.0f, 1.32f, 0.0f}, {0.716f, 1.110f, 1.961f});
         break;
     }
+    case PaletteCommandTag::OpenProjectManager:
+        if (!host_status_.on_air) {
+            actions.request_open_project_manager = true;
+        }
+        break;
+    case PaletteCommandTag::ExportAlfx:
+        actions.request_export_alfx_dialog = true;
+        break;
+    case PaletteCommandTag::ImportAlfx:
+        actions.request_import_alfx_dialog = true;
+        break;
     case PaletteCommandTag::ProjectNew:
         if (!host_status_.on_air) {
             actions.request_new_project = true;
@@ -703,7 +752,9 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatar
     }
 
     const bool typing = ImGui::GetIO().WantTextInput;
-    if (keymap_.is_pressed(ActionId::ProjectSave)) {
+    if (keymap_.is_pressed(ActionId::OpenProjectManager) && !host_status_.on_air) {
+        actions.request_open_project_manager = true;
+    } else if (keymap_.is_pressed(ActionId::ProjectSave)) {
         actions.request_save_project = true;
     } else if (keymap_.is_pressed(ActionId::ProjectSaveAs)) {
         actions.request_save_project_as = true;
@@ -714,10 +765,7 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatar
     } else if (keymap_.is_pressed(ActionId::Undo) && !typing) {
         PaletteInvokeResult r{true, PaletteCommandTag::Undo, {}};
         execute_palette_command(r, now_s, actions);
-    } else if ((keymap_.is_pressed(ActionId::Redo) ||
-                (ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift && !ImGui::GetIO().KeyAlt &&
-                 ImGui::IsKeyPressed(ImGuiKey_Z, false))) &&
-               !typing) {
+    } else if ((keymap_.is_pressed(ActionId::Redo) || keymap_.is_pressed(ActionId::RedoAlt)) && !typing) {
         PaletteInvokeResult r{true, PaletteCommandTag::Redo, {}};
         execute_palette_command(r, now_s, actions);
     } else if (keymap_.is_pressed(ActionId::Preferences)) {
@@ -811,8 +859,14 @@ void StudioWorkspace::handle_global_shortcuts(double now_s, const DevShellAvatar
                 const auto store_aid = static_cast<ActionId>(static_cast<size_t>(ActionId::ViewportStoreCam1) + i);
                 if (keymap_.is_pressed(store_aid)) {
                     viewport_panel_.store_camera_bookmark(i);
+                    if (state_store_ != nullptr) {
+                        state_store_->mark_dirty(aether::DirtyDomain::CameraState);
+                    }
                 } else if (keymap_.is_pressed(cam_aid)) {
                     viewport_panel_.recall_camera_bookmark(i, actions);
+                    if (state_store_ != nullptr) {
+                        state_store_->mark_dirty(aether::DirtyDomain::CameraState);
+                    }
                 }
             }
         }
@@ -927,6 +981,17 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         break;
     case TopMenuAction::OpenShortcuts:
         shortcut_overlay_.open();
+        break;
+    case TopMenuAction::OpenProjectManager:
+        if (!host_status_.on_air) {
+            actions.request_open_project_manager = true;
+        }
+        break;
+    case TopMenuAction::ExportAlfx:
+        actions.request_export_alfx_dialog = true;
+        break;
+    case TopMenuAction::ImportAlfx:
+        actions.request_import_alfx_dialog = true;
         break;
     case TopMenuAction::NewProject:
         if (!host_status_.on_air) {
@@ -1070,7 +1135,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         ImGui::End();
     } else {
         viewport_panel_.draw(mode_, hw_, avatar, tracking, render_view, input_echo, host_status_.tracking_paused,
-                             params_, undo_, settings_, settings_dirty_, fonts_, scale, actions);
+                             params_, undo_, settings_, settings_dirty_, fonts_, scale, actions,
+                             host_status_.active_alfx_name.data());
     }
 
     // Z3 Inspector
@@ -1084,7 +1150,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     } else {
         inspector_panel_.draw(mode_, host_status_.on_air, hw_, rhi, ffi_layout_ok, avatar, tracking, render_view,
                               output_view, host_status_, plugins_, selection_, params_, undo_, settings_,
-                              settings_dirty_, fonts_, row_actions, actions, &viewport_panel_);
+                              settings_dirty_, fonts_, row_actions, actions, &viewport_panel_, bones_, materials_,
+                              &node_canvas_);
     }
     if (const ImGuiWindow* hov = GImGui != nullptr ? GImGui->HoveredWindow : nullptr;
         hov != nullptr && hov->RootWindow != nullptr) {
@@ -1161,7 +1228,8 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
     update_expression_ramps(now_s, actions);
 
     // Z5 Bottom Status Strip (4 Hz sampling + 500 ms color hysteresis)
-    telemetry_bar_.draw_bottom_bar(now_s, telemetry, arena, rhi, tracking, render_view, output_view, fonts_, scale);
+    telemetry_bar_.draw_bottom_bar(now_s, telemetry, arena, rhi, tracking, render_view, output_view, host_status_,
+                                   fonts_, scale, actions);
 
     // Modals & Overlays
     const PaletteInvokeResult pal_res = command_palette_.draw(keymap_, host_status_.on_air, fonts_, scale);
@@ -1213,6 +1281,43 @@ void StudioWorkspace::render(double now_s, const rhi::RhiDevice& rhi, const Tele
         set_high_contrast_theme(hc);
         apply_precision_dark_style(ImGui::GetStyle(), effective_dpi_scale(), hc);
         actions.request_reapply_theme_or_dpi = true;
+    }
+
+    // Mode transition requests triggered by Inspector cards or panels.
+    if (actions.request_switch_mode) {
+        switch_mode(actions.target_mode);
+        actions.request_switch_mode = false;
+    }
+
+    // Track project-scoped DirtyDomain changes cleanly on StudioStateStore.
+    if (state_store_ != nullptr) {
+        if (dirty_param_epoch_ != params_.epoch()) {
+            for (size_t i = 0; i < kParamCount; ++i) {
+                const double cur = params_.get(static_cast<ParamId>(i));
+                if (cur != dirty_param_snapshot_[i]) {
+                    dirty_param_snapshot_[i] = cur;
+                    const aether::DirtyDomain dd = dirty_domain_for_param(kParamSpecs[i].id);
+                    if (dd != aether::DirtyDomain::None) {
+                        state_store_->mark_dirty(dd);
+                    }
+                }
+            }
+            dirty_param_epoch_ = params_.epoch();
+        }
+        if (actions.viewport.lighting_dirty) {
+            state_store_->mark_dirty(aether::DirtyDomain::LightingRig);
+        }
+        if (actions.request_apply_graph_json) {
+            state_store_->mark_dirty(aether::DirtyDomain::NodeGraph);
+        }
+        if (actions.viewport.request_apply_camera_preset) {
+            state_store_->mark_dirty(aether::DirtyDomain::CameraState);
+        }
+        if (actions.viewport.output_config_dirty) {
+            state_store_->mark_dirty(aether::DirtyDomain::OutputsCfg);
+        }
+    } else if (dirty_param_epoch_ != params_.epoch()) {
+        dirty_param_epoch_ = params_.epoch();
     }
 
     // Go Live (top bar, Ctrl+Shift+L or palette) starts the Spout2 + Virtual Cam transmitters.

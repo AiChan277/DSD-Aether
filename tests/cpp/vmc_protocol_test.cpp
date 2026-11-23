@@ -142,8 +142,8 @@ TEST_CASE("VMC frame: normalized identity rest bones, Unity handedness, all bone
     engine.export_vmc_pose(skin, 4.0f, frame);
     REQUIRE(frame.valid);
 
-    // Untracked legs export identity (normalized rest) and the A-pose arm exports only its ~69 deg relaxed fold, even though
-    // the raw VRM bind rotation of LeftUpperArm is 90 deg.
+    // Untracked legs export identity (normalized rest) and the A-pose arm exports only its ~69 deg relaxed fold, even
+    // though the raw VRM bind rotation of LeftUpperArm is 90 deg.
     CHECK(std::abs(frame.local_rot[AETHER_BONE_LEFT_UPPER_LEG][3]) > 0.9999f);
     const float arm_angle_deg =
         2.0f * std::acos(std::min(1.0f, std::abs(frame.local_rot[AETHER_BONE_LEFT_UPPER_ARM][3]))) * kRadToDeg;
@@ -166,11 +166,7 @@ TEST_CASE("VMC frame: normalized identity rest bones, Unity handedness, all bone
     } sink;
     VmcSender sender;
     const uint32_t grams = sender.send_frame(
-        frame,
-        [](const uint8_t* d, size_t n, void* u) {
-            static_cast<Sink*>(u)->grams.emplace_back(d, d + n);
-        },
-        &sink);
+        frame, [](const uint8_t* d, size_t n, void* u) { static_cast<Sink*>(u)->grams.emplace_back(d, d + n); }, &sink);
     REQUIRE(grams == sink.grams.size());
     REQUIRE(grams >= 2U);
     std::vector<std::string> bones;

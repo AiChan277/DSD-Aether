@@ -197,9 +197,8 @@ inline void build_camera_matrices(const PreviewCamera& cam, float aspect, GpuMat
     return mul_mat4(p, v);
 }
 
-[[nodiscard]] inline Mat4Vec3 studio_light_dir_to_light(const StudioLightSpec& s,
-                                                    const std::array<float, 3>& pivot_ws,
-                                                    const std::array<float, 3>& eye_pos_ws) noexcept {
+[[nodiscard]] inline Mat4Vec3 studio_light_dir_to_light(const StudioLightSpec& s, const std::array<float, 3>& pivot_ws,
+                                                        const std::array<float, 3>& eye_pos_ws) noexcept {
     const StudioLightWorldPose pose = resolve_studio_light_world_pose(s, pivot_ws, eye_pos_ws);
     return normalize3({pose.position_ws[0] - pose.target_ws[0], pose.position_ws[1] - pose.target_ws[1],
                        pose.position_ws[2] - pose.target_ws[2]});
@@ -261,17 +260,16 @@ struct StageRenderRegion {
  * Shared Vulkan / DirectX 12 `GpuFrameGlobals` assembly guaranteeing identical projection,
  * lighting rig, Live2D flattening pivot, and Tasks 3-6 shader parameters (`anti-flip contract`).
  */
-[[nodiscard]] inline uint8_t populate_shared_frame_globals(const FrameRenderRequest& req, uint32_t w, uint32_t h,
-                                                           bool has_avatar, bool rt_hardware_ready,
-                                                           bool have_prev_view_proj, const GpuMat4& prev_view_proj,
-                                                           GpuFrameGlobals& fg, GpuMat4& out_next_prev_vp,
-                                                           float aspect_override = 0.0f,
-                                                           const std::array<float, 4>* target_uv_scale = nullptr,
-                                                           const std::array<float, 4>* target_half_uv_scale = nullptr) noexcept {
+[[nodiscard]] inline uint8_t
+populate_shared_frame_globals(const FrameRenderRequest& req, uint32_t w, uint32_t h, bool has_avatar,
+                              bool rt_hardware_ready, bool have_prev_view_proj, const GpuMat4& prev_view_proj,
+                              GpuFrameGlobals& fg, GpuMat4& out_next_prev_vp, float aspect_override = 0.0f,
+                              const std::array<float, 4>* target_uv_scale = nullptr,
+                              const std::array<float, 4>* target_half_uv_scale = nullptr) noexcept {
     const LightingRig& rig = *req.rig;
     fg = {};
-    const float proj_aspect = (aspect_override > 0.05f) ? aspect_override
-                                                        : (static_cast<float>(w) / static_cast<float>(std::max(1u, h)));
+    const float proj_aspect =
+        (aspect_override > 0.05f) ? aspect_override : (static_cast<float>(w) / static_cast<float>(std::max(1u, h)));
     Mat4Vec3 eye{};
     build_camera_matrices(req.camera, proj_aspect, fg.view, fg.inv_view, fg.proj, fg.inv_proj, fg.view_proj, eye);
     fg.prev_view_proj = have_prev_view_proj ? prev_view_proj : fg.view_proj;
@@ -374,10 +372,9 @@ struct StageRenderRegion {
     // Single Lighting Authority: derive photometric catchlight/sky metadata from dominant key in StudioLightingStore
     const StudioLightSpec* dom_key = rig.dominant_key_light();
     const uint32_t dom_fix_id = (dom_key != nullptr) ? static_cast<uint32_t>(dom_key->fixture) : 0u;
-    const float emitter_aspect =
-        (dom_key != nullptr && dom_key->height_or_inner_m > 1e-4f)
-            ? std::clamp(dom_key->width_or_outer_m / dom_key->height_or_inner_m, 0.25f, 4.0f)
-            : 1.5f;
+    const float emitter_aspect = (dom_key != nullptr && dom_key->height_or_inner_m > 1e-4f)
+                                     ? std::clamp(dom_key->width_or_outer_m / dom_key->height_or_inner_m, 0.25f, 4.0f)
+                                     : 1.5f;
     const float amb_scale = std::max(0.0f, rig.ambient_floor);
     const bool has_sun_sky =
         (dom_key != nullptr && dom_key->fixture == StudioFixtureProfile::NaturalSunCieSky && !dom_key->window_portal);
@@ -399,8 +396,9 @@ struct StageRenderRegion {
     fg.eye_catchlight_params[2] =
         rig.crease_disguise_enabled ? std::clamp(rig.crease_disguise_strength, 0.0f, 1.0f) : 0.0f;
     fg.eye_catchlight_params[3] =
-        (dom_key != nullptr && (dom_key->coaxial_lock || dom_key->fixture == StudioFixtureProfile::BroadcastRing)) ? 1.0f
-                                                                                                               : 0.0f;
+        (dom_key != nullptr && (dom_key->coaxial_lock || dom_key->fixture == StudioFixtureProfile::BroadcastRing))
+            ? 1.0f
+            : 0.0f;
 
     // Eye sphere centers for curved optical cornea catchlight reflections (from humanoid bones when present)
     auto resolve_eye_world = [&](uint32_t hbone, float side_sign, float out_c[4]) {
@@ -482,6 +480,15 @@ struct StageRenderRegion {
     fg.satsuei_params[2] = rig.satsuei.halation_threshold;
     fg.satsuei_params[3] = rig.satsuei.backscatter_strength;
 
+    fg.vrm_parity_params0[0] = rig.vrm_mmd_parity.auto_toon_harmonizer_enabled ? 1.0f : 0.0f;
+    fg.vrm_parity_params0[1] = std::clamp(rig.vrm_mmd_parity.vrm_cel_crispness_boost, 0.0f, 1.0f);
+    fg.vrm_parity_params0[2] = std::clamp(rig.vrm_mmd_parity.vrm_shadow_chroma_lift, 0.0f, 1.0f);
+    fg.vrm_parity_params0[3] = std::clamp(rig.vrm_mmd_parity.vrm_pre_cel_clarity_strength, 0.0f, 1.0f);
+    fg.vrm_parity_params1[0] = std::clamp(rig.vrm_mmd_parity.vrm_hair_angel_ring_boost, 0.0f, 1.5f);
+    fg.vrm_parity_params1[1] = rig.vrm_mmd_parity.unified_surface_group_crease ? 1.0f : 0.0f;
+    fg.vrm_parity_params1[2] = rig.vrm_mmd_parity.vrm_auto_edge_scale_enabled ? 1.0f : 0.0f;
+    fg.vrm_parity_params1[3] = rig.vrm_mmd_parity.pmx_strict_material_draw_order ? 1.0f : 0.0f;
+
     const std::array<float, 3> piv_arr{pivot_ws.x, pivot_ws.y, pivot_ws.z};
     const std::array<float, 3> eye_arr{eye.x, eye.y, eye.z};
     const Mat4Vec3 key_for_sky =
@@ -491,8 +498,8 @@ struct StageRenderRegion {
     std::array<std::array<float, 4>, 9> sh9{};
     if (amb_scale > 0.0f || has_sun_sky) {
         const float sky_str = std::max(amb_scale, cie_sky_w);
-        compute_hillaire_sky_sh9({key_for_sky.x, key_for_sky.y, key_for_sky.z}, key_sky_col, sky_str,
-                                 ground_bounce_w, sh9);
+        compute_hillaire_sky_sh9({key_for_sky.x, key_for_sky.y, key_for_sky.z}, key_sky_col, sky_str, ground_bounce_w,
+                                 sh9);
     }
     for (int k = 0; k < 9; ++k) {
         for (int c = 0; c < 4; ++c) {
@@ -570,7 +577,7 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             gm.shade_color[0] = m.shade_color_gi[0];
             gm.shade_color[1] = m.shade_color_gi[1];
             gm.shade_color[2] = m.shade_color_gi[2];
-            gm.shade_color[3] = 1.0f;
+            gm.shade_color[3] = m.matcap_color[3]; // PMX/VRM sphere_mode mix: 1.0=.spa additive, 0.0=.sph multiply
             gm.rim_color_power[0] = m.rim_color_mix[0];
             gm.rim_color_power[1] = m.rim_color_mix[1];
             gm.rim_color_power[2] = m.rim_color_mix[2];
@@ -602,8 +609,14 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             const std::string mat_name = read_material_cstr(avatar, m.name_offset);
             const RtMaskBucket rtb = classify_rt_bucket(mat_name, mat_sm_names[i], m.flags, mat_sm_flags[i]);
             uint32_t packed_flags =
-                (m.flags & (0xFFu | AETHER_MAT_FLAG_HAS_PROFILE | (0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT)));
+                (m.flags & (0xFFu | AETHER_MAT_FLAG_NO_SHADOW_CAST | AETHER_MAT_FLAG_NO_OUTLINE |
+                            AETHER_MAT_FLAG_EYE_IRIS | AETHER_MAT_FLAG_BODY_SKIN | AETHER_MAT_FLAG_IS_PMX |
+                            AETHER_MAT_FLAG_HAS_PROFILE | (0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT) |
+                            AETHER_MAT_FLAG_STRICT_DRAW_ORDER | AETHER_MAT_FLAG_ALPHA_CUTOUT));
             packed_flags |= (static_cast<uint32_t>(rtb) & 3u) << kMatExtraRtClassShift;
+            if ((m.flags & AETHER_MAT_FLAG_IS_PMX) == 0u && rtb == RtMaskBucket::Hair) {
+                gm.hair_specular_params[0] = 1.0f; // Enable baked T_hair Angel Ring on VRM hair by default
+            }
             if (is_genuine_eye_iris_name(mat_name, mat_sm_names[i])) {
                 packed_flags |= kMatExtraEyeIrisBit;
             }
@@ -612,6 +625,12 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             }
             if ((m.flags & AETHER_MAT_FLAG_SDF_FACE) != 0u) {
                 packed_flags |= kMatExtraAuthoredSdfBit;
+            }
+            if (m.alpha_mode == AETHER_ALPHA_MODE_MASK) {
+                packed_flags |= AETHER_MAT_FLAG_ALPHA_CUTOUT;
+            }
+            if (m.alpha_mode == AETHER_ALPHA_MODE_ADDITIVE) {
+                packed_flags |= AETHER_MAT_FLAG_ADDITIVE;
             }
             gm.extra_slots[2] = packed_flags;
             gm.extra_slots[3] = m.alpha_mode;
@@ -719,14 +738,26 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
             d.stencil_ref = st;
             d.cull_mode = ((gm.extra_slots[2] & AETHER_MAT_FLAG_DOUBLE_SIDED) != 0u) ? 1u : 0u;
             d.alpha_mode = gm.extra_slots[3];
-            d.flags = sm.flags;
+            uint32_t group_id = 0u;
+            if ((sm.flags & AETHER_SUBMESH_FLAG_FACE) != 0u || rtb == static_cast<uint32_t>(RtMaskBucket::FaceSkin) ||
+                (gm.extra_slots[2] & kMatExtraBodySkinAtlasBit) != 0u) {
+                group_id = 1u;
+            } else if (is_hair_mesh) {
+                group_id = 2u;
+            } else if ((sm.flags & AETHER_SUBMESH_FLAG_EYE_OR_BROW) != 0u) {
+                group_id = 3u;
+            } else {
+                group_id = 4u + (d.material_index & 0xFBu);
+            }
+            d.flags = (sm.flags & 0x00FFFFFFu) | ((group_id & 0xFFu) << 24u);
             out_submeshes.push_back(d);
         }
     }
 
     for (uint32_t i = 0; i < static_cast<uint32_t>(out_submeshes.size()); ++i) {
         const auto& d = out_submeshes[i];
-        if (d.alpha_mode == AETHER_ALPHA_MODE_BLEND || (d.flags & AETHER_SUBMESH_FLAG_TRANSPARENT) != 0u) {
+        if (d.alpha_mode == AETHER_ALPHA_MODE_BLEND || d.alpha_mode == AETHER_ALPHA_MODE_ADDITIVE ||
+            (d.flags & (AETHER_SUBMESH_FLAG_TRANSPARENT | AETHER_SUBMESH_FLAG_ADDITIVE)) != 0u) {
             out_transparent.push_back(i);
         } else if (d.alpha_mode == AETHER_ALPHA_MODE_MASK || (d.flags & AETHER_SUBMESH_FLAG_ALPHA_CUTOUT) != 0u) {
             out_cutout.push_back(i);
@@ -746,12 +777,11 @@ inline void populate_materials_and_submeshes(const GpuAvatar& avatar, std::span<
     return h;
 }
 
-inline void update_gpu_materials_with_overrides(
-    const GpuAvatar& avatar,
-    const std::vector<GpuMaterial>& base_gpu_materials,
-    const AetherMaterialOverrideBuffer* overrides,
-    std::vector<GpuMaterial>& out_gpu_materials,
-    std::vector<GpuMaterialGrade>& out_grades) noexcept {
+inline void update_gpu_materials_with_overrides(const GpuAvatar& avatar,
+                                                const std::vector<GpuMaterial>& base_gpu_materials,
+                                                const AetherMaterialOverrideBuffer* overrides,
+                                                std::vector<GpuMaterial>& out_gpu_materials,
+                                                std::vector<GpuMaterialGrade>& out_grades) noexcept {
     const size_t n = base_gpu_materials.size();
     if (out_gpu_materials.size() != n || out_grades.size() != n || n == 0) {
         return;
@@ -816,12 +846,11 @@ inline void update_gpu_materials_with_overrides(
             GpuMaterialGrade& grade = out_grades[mi];
             const uint32_t mask = ovr.override_mask;
 
-            if ((mask & AETHER_MAT_OVR_PROFILE) != 0U &&
-                ovr.shader_profile != AETHER_MAT_PROFILE_KEEP &&
+            if ((mask & AETHER_MAT_OVR_PROFILE) != 0U && ovr.shader_profile != AETHER_MAT_PROFILE_KEEP &&
                 ovr.shader_profile <= AETHER_MAT_PROFILE_EMISSIVE) {
                 gm.extra_slots[2] &= ~(0x7u << AETHER_MAT_FLAG_PROFILE_SHIFT);
-                gm.extra_slots[2] |= AETHER_MAT_FLAG_HAS_PROFILE |
-                                     ((ovr.shader_profile & 0x7u) << AETHER_MAT_FLAG_PROFILE_SHIFT);
+                gm.extra_slots[2] |=
+                    AETHER_MAT_FLAG_HAS_PROFILE | ((ovr.shader_profile & 0x7u) << AETHER_MAT_FLAG_PROFILE_SHIFT);
             }
             if ((mask & AETHER_MAT_OVR_SHADE_COLOR) != 0U) {
                 gm.shade_color[0] = ovr.shade_color[0];

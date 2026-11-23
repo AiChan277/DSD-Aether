@@ -38,7 +38,10 @@ class AudioLipSyncProcessor {
         float b0{1.0f}, b1{0.0f}, b2{0.0f}, a1{0.0f}, a2{0.0f};
         float z1{0.0f}, z2{0.0f};
 
-        void reset_state() noexcept { z1 = 0.0f; z2 = 0.0f; }
+        void reset_state() noexcept {
+            z1 = 0.0f;
+            z2 = 0.0f;
+        }
         [[nodiscard]] float step(float x) noexcept {
             const float y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;

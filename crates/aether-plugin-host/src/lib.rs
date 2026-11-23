@@ -131,6 +131,7 @@ pub struct PluginHost {
     latched: Arc<LatchedBridge>,
     cmd_tx: mpsc::Sender<ActorMsg>,
     snapshot_tx: watch::Sender<Vec<u8>>,
+    graph_json_tx: watch::Sender<String>,
     ws_enable_tx: watch::Sender<bool>,
     shutdown_tx: watch::Sender<bool>,
     ws_token: String,
@@ -209,7 +210,10 @@ impl PluginHost {
             false,
             false,
         );
+        let initial_graph_json =
+            serde_json::to_string_pretty(&default_bundle.graph).unwrap_or_else(|_| "{}".to_owned());
         let (snapshot_tx, _) = watch::channel(initial_json);
+        let (graph_json_tx, _) = watch::channel(initial_graph_json);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<ActorMsg>(256);
         let (ws_enable_tx, ws_enable_rx) = watch::channel(ws_enabled);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -364,6 +368,7 @@ impl PluginHost {
             let ev = Arc::clone(&events);
             let la = Arc::clone(&latched);
             let sn_tx = snapshot_tx.clone();
+            let gj_tx = graph_json_tx.clone();
             let p_count = Arc::clone(&plugin_count);
             let osc_in_port = Arc::clone(&osc_in_port);
             let tel_tx = telemetry_tx.clone();
@@ -414,6 +419,10 @@ impl PluginHost {
                                             );
                                             state.bundle.graph = doc;
                                             state.dirty = true;
+                                            let _ = gj_tx.send_replace(
+                                                serde_json::to_string_pretty(&state.bundle.graph)
+                                                    .unwrap_or_else(|_| "{}".to_owned()),
+                                            );
                                             // §7.1: 50 ms debounced recompile (`REQ-PLG-001 <= 100 ms`).
                                             compile_deadline = Some(
                                                 tokio::time::Instant::now()
@@ -436,9 +445,8 @@ impl PluginHost {
                                     if let Ok(val) =
                                         serde_json::from_str::<serde_json::Value>(&json_str)
                                     {
-                                        if let Some(fmt) = val
-                                            .get("format")
-                                            .and_then(serde_json::Value::as_u64)
+                                        if let Some(fmt) =
+                                            val.get("format").and_then(serde_json::Value::as_u64)
                                         {
                                             state.model_format = u32::try_from(fmt).unwrap_or(0);
                                         }
@@ -458,9 +466,12 @@ impl PluginHost {
                                             &state.model_material_slots,
                                             state.model_format,
                                         );
+                                        let _ = gj_tx.send_replace(
+                                            serde_json::to_string_pretty(&state.bundle.graph)
+                                                .unwrap_or_else(|_| "{}".to_owned()),
+                                        );
                                         compile_deadline = Some(
-                                            tokio::time::Instant::now()
-                                                + Duration::from_millis(20),
+                                            tokio::time::Instant::now() + Duration::from_millis(20),
                                         );
                                     }
                                 }
@@ -499,6 +510,10 @@ impl PluginHost {
                                         state.bundle = bundle;
                                         state.last_project_dir = Some(dir.clone());
                                         state.dirty = false;
+                                        let _ = gj_tx.send_replace(
+                                            serde_json::to_string_pretty(&state.bundle.graph)
+                                                .unwrap_or_else(|_| "{}".to_owned()),
+                                        );
                                         publish_snapshot(
                                             &state,
                                             &pr,
@@ -708,6 +723,7 @@ impl PluginHost {
             latched,
             cmd_tx,
             snapshot_tx,
+            graph_json_tx,
             ws_enable_tx,
             shutdown_tx,
             ws_token,
@@ -903,6 +919,24 @@ impl PluginHost {
         }
         out[..len].copy_from_slice(&data);
         Ok(len)
+    }
+
+    /// Serializes the active [`GraphDocument`] into pretty canonical UTF-8 JSON `[any]`.
+    #[must_use]
+    pub fn serialize_graph_json(&self) -> String {
+        self.graph_json_tx.borrow().clone()
+    }
+
+    /// Validates, normalizes, and applies UTF-8 graph JSON synchronously on `graph_json_tx`,
+    /// queueing debounced `T2` recompilation onto the actor `[any]`.
+    pub fn deserialize_graph_json(&self, json_bytes: &[u8]) -> Result<(), HostError> {
+        let doc = parse_graph_json(json_bytes)?;
+        let canonical = serde_json::to_string_pretty(&doc)
+            .map_err(|e| HostError::Internal(format!("serialize graph json failed: {e}")))?;
+        let _ = self.graph_json_tx.send_replace(canonical.clone());
+        self.cmd_tx
+            .try_send(ActorMsg::SetGraphJson(canonical))
+            .map_err(|e| HostError::Internal(format!("command queue full: {e}")))
     }
 
     /// Populates live compiled node graph stats & per-node live values for Z4 UI inspection.
@@ -1140,11 +1174,7 @@ fn serialize_snapshot(
     serde_json::to_vec(&view).unwrap_or_else(|_| b"{}".to_vec())
 }
 
-fn inject_model_metadata_into_graph(
-    doc: &mut GraphDocument,
-    slots: &[String],
-    model_format: u32,
-) {
+fn inject_model_metadata_into_graph(doc: &mut GraphDocument, slots: &[String], model_format: u32) {
     if slots.is_empty() && model_format == 0 {
         return;
     }

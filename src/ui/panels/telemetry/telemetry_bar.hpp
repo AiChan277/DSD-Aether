@@ -20,6 +20,9 @@ enum class TopMenuAction : uint8_t {
     SaveProject,
     SaveProjectAs,
     ImportAvatar,
+    OpenProjectManager,
+    ExportAlfx,
+    ImportAlfx,
     ResetLayout,
     Undo,
     Redo,
@@ -40,7 +43,8 @@ class TelemetryBar {
     void draw_bottom_bar(double now_s, const TelemetrySnapshot& telemetry, const ImGuiArenaAllocator& arena,
                          const rhi::RhiDevice& rhi, const DevShellTrackingView& tracking,
                          const DevShellRenderView& render_view, const DevShellOutputView& output_view,
-                         const UiFontSet& fonts, float dpi_scale);
+                         const StudioHostStatus& host_status, const UiFontSet& fonts, float dpi_scale,
+                         StudioActions& actions);
 
   private:
     double on_air_since_s_{-1.0};

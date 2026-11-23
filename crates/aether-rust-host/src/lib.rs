@@ -692,6 +692,91 @@ pub unsafe extern "C" fn aether_graph_release(plan: AetherPlanHandle) {
     }));
 }
 
+/// Serializes the active node graph document into canonical UTF-8 JSON (`*out_json_utf8`),
+/// which must be freed with [`aether_string_free`]. `[any]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_graph_serialize_json(
+    host: AetherHostHandle,
+    out_json_utf8: *mut *mut c_char,
+    out_len: *mut usize,
+) -> AetherStatus {
+    ffi_guard_cow(AETHER_THREAD_ROLE_ANY, || {
+        if !out_json_utf8.is_null() {
+            // SAFETY: Valid writable output slot checked non-null.
+            unsafe { *out_json_utf8 = ptr::null_mut() };
+        }
+        if !out_len.is_null() {
+            // SAFETY: Valid writable length pointer checked non-null.
+            unsafe { *out_len = 0 };
+        }
+        if host.is_null() || out_json_utf8.is_null() {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                Cow::Borrowed("null host or out_json_utf8 pointer"),
+            ));
+        }
+        // SAFETY: Valid `host` handle guaranteed by caller for this call.
+        let host_ref = unsafe { &*host.cast::<PluginHost>() };
+        let json = host_ref.serialize_graph_json();
+        let json_len = json.len();
+        let c_str = std::ffi::CString::new(json).map_err(|_| {
+            (
+                AETHER_E_INTERNAL,
+                Cow::Borrowed("serialized graph JSON contained interior NUL"),
+            )
+        })?;
+        // SAFETY: Caller receives ownership and frees with `aether_string_free`.
+        unsafe { *out_json_utf8 = c_str.into_raw() };
+        if !out_len.is_null() {
+            // SAFETY: Valid writable counter pointer checked non-null.
+            unsafe { *out_len = json_len };
+        }
+        Ok(())
+    })
+}
+
+/// Parses and applies a node graph JSON document cleanly onto `host`. `[any]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_graph_deserialize_json(
+    host: AetherHostHandle,
+    json_utf8: *const c_char,
+    len: usize,
+) -> AetherStatus {
+    ffi_guard_cow(AETHER_THREAD_ROLE_ANY, || {
+        if host.is_null() || json_utf8.is_null() {
+            return Err((
+                AETHER_E_INVALID_ARG,
+                Cow::Borrowed("null host or json_utf8 pointer"),
+            ));
+        }
+        // SAFETY: Valid `host` handle guaranteed by caller for this call.
+        let host_ref = unsafe { &*host.cast::<PluginHost>() };
+        let bytes = if len == 0 {
+            // SAFETY: Caller guarantees NUL-terminated `json_utf8` string when `len == 0`.
+            unsafe { CStr::from_ptr(json_utf8) }.to_bytes()
+        } else {
+            // SAFETY: Caller guarantees `[json_utf8, json_utf8 + len)` readable for this call.
+            unsafe { slice::from_raw_parts(json_utf8.cast::<u8>(), len) }
+        };
+        host_ref
+            .deserialize_graph_json(bytes)
+            .map_err(|e| map_host_error(&e))
+    })
+}
+
+/// Frees a NUL-terminated UTF-8 string returned by `aether_graph_serialize_json`. `[any]`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_string_free(ptr_str: *mut c_char) {
+    if ptr_str.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `ptr_str` originated exclusively from `CString::into_raw` and is freed at most once.
+        let owned = unsafe { std::ffi::CString::from_raw(ptr_str) };
+        drop(owned);
+    }));
+}
+
 /// Wait-free, allocation-free evaluation of the host's currently published graph plan. `[T2]`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aether_host_evaluate_active(
@@ -997,12 +1082,15 @@ pub unsafe extern "C" fn aether_texture_decode_file(
             || out_format.is_null()
             || out_len.is_null()
         {
-            return Err((AETHER_E_INVALID_ARG, "null argument in aether_texture_decode_file"));
+            return Err((
+                AETHER_E_INVALID_ARG,
+                "null argument in aether_texture_decode_file",
+            ));
         }
         // SAFETY: Valid NUL-terminated UTF-8 path guaranteed by caller.
         let path_str = unsafe { borrow_utf8_cstr(path_utf8) }.map_err(|e| map_loader_error(&e))?;
-        let (w, h, fmt, rgba) =
-            decode_image_file_rgba(Path::new(path_str), srgb != 0).map_err(|e| map_loader_error(&e))?;
+        let (w, h, fmt, rgba) = decode_image_file_rgba(Path::new(path_str), srgb != 0)
+            .map_err(|e| map_loader_error(&e))?;
         // SAFETY: Non-null output pointers verified above.
         unsafe {
             *out_width = w;

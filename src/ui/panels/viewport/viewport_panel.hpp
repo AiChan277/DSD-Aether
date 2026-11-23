@@ -11,18 +11,6 @@
 
 namespace aether::ui {
 
-/**
- * Fill / Rim lights orbit rigidly with the Key light: their azimuth/elevation are fixed offsets from
- * the key (defaults reproduce the renderer rig: key 32/26, fill -52/12, rim 148/22). The Light Orbit
- * Gizmo and `StudioWorkspace` both derive fill/rim directions from these offsets.
- */
-struct LightRigOffsets {
-    static constexpr float kFillAzDeg = -84.0f;
-    static constexpr float kFillElDeg = -14.0f;
-    static constexpr float kRimAzDeg = 116.0f;
-    static constexpr float kRimElDeg = -4.0f;
-};
-
 /** Wraps an angle in degrees into `[-180, 180)`. */
 [[nodiscard]] float wrap_degrees(float deg) noexcept;
 
@@ -50,15 +38,15 @@ class ViewportPanel {
 
     void recall_camera_bookmark(size_t idx, StudioActions& actions);
     void store_camera_bookmark(size_t idx);
-    void reset_camera(StudioActions& actions) noexcept;
+    void reset_camera(StudioActions& actions);
 
     [[nodiscard]] CameraPresetBank& preset_bank() noexcept { return preset_bank_; }
     [[nodiscard]] const CameraPresetBank& preset_bank() const noexcept { return preset_bank_; }
     void set_persist_presets(bool persist) noexcept { persist_presets_ = persist; }
     [[nodiscard]] bool persist_presets() const noexcept { return persist_presets_; }
     void apply_builtin_preset(int32_t preset_idx, const DevShellAvatarView& avatar, const ParamStore& params,
-                              StudioActions& actions) noexcept;
-    void apply_custom_preset(size_t custom_idx, ParamStore& params, UndoStack& undo, StudioActions& actions) noexcept;
+                              StudioActions& actions);
+    void apply_custom_preset(size_t custom_idx, ParamStore& params, UndoStack& undo, StudioActions& actions);
     void save_custom_preset_from_current(std::string name, const DevShellAvatarView& avatar, const ParamStore& params);
     void open_save_preset_modal(const std::string& initial_name = {});
 
@@ -90,11 +78,12 @@ class ViewportPanel {
               const DevShellTrackingView& tracking, const DevShellRenderView& render_view,
               const DevShellInputEcho& input_echo, bool tracking_paused, ParamStore& params, UndoStack& undo,
               AppSettings& settings, bool& settings_dirty, const UiFontSet& fonts, float dpi_scale,
-              StudioActions& actions);
+              StudioActions& actions, const char* active_alfx_name = nullptr);
 
   private:
     ImVec2 draw_toolbar(ImVec2 anchor, float max_width, StudioMode mode, const DevShellAvatarView& avatar,
-                        ParamStore& params, UndoStack& undo, bool& settings_dirty, float scale, StudioActions& actions);
+                        ParamStore& params, UndoStack& undo, bool& settings_dirty, float scale, StudioActions& actions,
+                        const char* active_alfx_name);
     bool draw_transform_gizmo(const DevShellAvatarView& avatar, ParamStore& params, UndoStack& undo,
                               const UiFontSet& fonts, ImVec2 frame_p0, ImVec2 frame_p1, float effective_fovy_rad,
                               float dpi_scale);
@@ -105,7 +94,7 @@ class ViewportPanel {
     void draw_save_preset_modal(const DevShellAvatarView& avatar, const ParamStore& params, float scale);
     void draw_composition_grid(ImVec2 p0, ImVec2 p1, float scale) const;
     void handle_camera_input(bool hovered, bool active, float scale, StudioActions& actions);
-    void draw_light_orbit_gizmo(ParamStore& params, UndoStack& undo, const UiFontSet& fonts, float dpi_scale,
+    void draw_light_orbit_gizmo(const DevShellRenderView& render_view, const UiFontSet& fonts, float dpi_scale,
                                 ImVec2 orb_pos, StudioActions& actions);
     void draw_confidence_heatmap_legend(const DevShellTrackingView& tracking, const UiFontSet& fonts, float dpi_scale,
                                         ImVec2 pos);
@@ -122,7 +111,7 @@ class ViewportPanel {
     // 3D Transform Gizmo hover/drag state (zero per-frame heap allocations)
     uint32_t viewport_input_id_{0};
     bool gizmo_dragging_{false};
-    int gizmo_hover_handle_{-1};  // -1=none, 0=X, 1=Y, 2=Z, 3=center/rotY
+    int gizmo_hover_handle_{-1}; // -1=none, 0=X, 1=Y, 2=Z, 3=center/rotY
     int gizmo_active_handle_{-1};
     GizmoTool gizmo_drag_tool_{GizmoTool::Select};
     float gizmo_drag_start_t_{0.0f};
@@ -132,12 +121,9 @@ class ViewportPanel {
     float gizmo_drag_start_vals_[5]{0.0f, 0.0f, 0.0f, 0.0f, 1.0f}; // px, py, pz, rot_y, scale
     std::array<char, 128> gizmo_before_payload_{};
 
-    // Light orbit gizmo drag state (0 = key, 1 = fill, 2 = rim)
+    // Quick Key Orb proxy drag state (orbits StudioLightingStore dominant_key_light_id directly)
     bool orb_dragging_{false};
-    int orb_drag_handle_{0};
     bool orb_drag_back_hemisphere_{false};
-    double orb_drag_start_az_{0.0};
-    double orb_drag_start_el_{0.0};
 
     // UI-side camera estimate (radians, mirrors the app's PreviewCamera defaults) for bookmarks.
     float cam_yaw_rad_{0.35f};

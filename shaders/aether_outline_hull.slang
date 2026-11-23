@@ -20,9 +20,15 @@ HullVsOut vs_main(uint vid : SV_VertexID) {
     float4 clip = project_live2d_flat(fg.proj, view_pos, fg.head_pivot_view_and_flatness.z,
                                       z_flat_weight, fg.head_pivot_view_and_flatness.w);
 
-    float raw_width = mat.outline_color_width.w * g_Pc.fparam0 * v.proxy_norm_out.w;
+    bool is_pmx = ((mat.extra_slots.z & (1u << 14u)) != 0u);
+    float vert_edge = v.proxy_norm_out.w;
+    if (!is_pmx && vert_edge > 0.05 && fg.vrm_parity_params1.z < 0.5) {
+        vert_edge = 1.0;
+    }
+    float raw_width = mat.outline_color_width.w * g_Pc.fparam0 * vert_edge;
     bool screen_mode = (mat.extra_slots.z & 16u) != 0u;
-    if (raw_width <= 0.0001) {
+    bool no_outline = (mat.extra_slots.z & (1u << 9u)) != 0u;
+    if (no_outline || raw_width <= 0.0001) {
         o.clip_pos = float4(0.0, 0.0, 2.0, 1.0);
         o.valid = 0.0;
         return o;

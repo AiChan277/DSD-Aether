@@ -82,10 +82,22 @@
     </StandardDirectory>
     <StandardDirectory Id="DesktopFolder" />
 
-    <!-- Application: exe, plugin runner, runtime DLLs, models/, assets/fonts/, config/, docs (staged tree) -->
+    <!-- Application: exe, plugin runner, runtime DLLs, models/, assets/fonts/, config/, presets/alfx/, docs (staged tree) -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component Id="AetherStudioExe" Guid="E129B7B2-6F08-4F6F-B2A7-42B646D8A401" Bitness="always64">
         <File Id="AetherStudioMainExe" Source="$(var.StageDir)\aether_studio.exe" KeyPath="yes" />
+        <ProgId Id="AetherStudio.Project" Description="AETHER-2.5D Studio Project Archive" Icon="AetherStudioMainExe"
+                IconIndex="0" Advertise="no">
+          <Extension Id="apr" ContentType="application/vnd.aether-studio.project">
+            <Verb Id="open" Command="Open in AETHER-2.5D Studio" TargetFile="AetherStudioMainExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="AetherStudio.Alfx" Description="AETHER-2.5D Studio Lighting &amp; FX Preset" Icon="AetherStudioMainExe"
+                IconIndex="0" Advertise="no">
+          <Extension Id="alfx" ContentType="application/vnd.aether-studio.alfx+json">
+            <Verb Id="open" Command="Open in AETHER-2.5D Studio" TargetFile="AetherStudioMainExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
       </Component>
       <Files Include="$(var.StageDir)\**">
         <Exclude Files="$(var.StageDir)\aether_studio.exe" />

@@ -54,6 +54,8 @@ class DenoiserManager {
 
     void inject_failure_next_execute() noexcept { inject_failure_ = true; }
     void reset_budget_monitor() noexcept;
+    /** Invalidates temporal history state on avatar swap, resize, or camera cut. */
+    void invalidate_temporal_history() noexcept;
 
     [[nodiscard]] DenoiserKind active_kind() const noexcept;
     [[nodiscard]] const char* active_name() const noexcept;

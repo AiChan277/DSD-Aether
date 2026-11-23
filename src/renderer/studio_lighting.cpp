@@ -3,13 +3,10 @@
 #include "renderer/circadian_lighting.hpp"
 #include "renderer/lighting_rig.hpp"
 
-#include <nlohmann/json.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 
 namespace aether::renderer {
 
@@ -413,8 +410,8 @@ uint32_t pack_studio_lights_gpu(const LightingRig& rig, const std::array<float, 
     return 0u;
 }
 
-void generate_heitz_ltc_luts(std::array<float, kLtcLutSize * kLtcLutSize * 4>& out_inv_m,
-                             std::array<float, kLtcLutSize * kLtcLutSize * 4>& out_amp) noexcept {
+void generate_heitz_ltc_luts(std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4>& out_inv_m,
+                             std::array<float, static_cast<size_t>(kLtcLutSize) * kLtcLutSize * 4>& out_amp) noexcept {
     // Analytic GGX -> Clamped-Cosine LTC inverse matrix & norm tables (Heitz et al. 2016 §4)
     // u = sqrt(alpha) in [0.02..1.0], v = 1.0 - cos(theta) in [0..1] (N.V -> 1 at v=0, 0 at v=1)
     for (uint32_t y = 0; y < kLtcLutSize; ++y) {
@@ -452,7 +449,7 @@ void generate_heitz_ltc_luts(std::array<float, kLtcLutSize * kLtcLutSize * 4>& o
     }
 }
 
-void generate_ies_lm63_lut(std::array<float, kIesLutWidth * kIesLutRows>& out_ies_r32f) noexcept {
+void generate_ies_lm63_lut(std::array<float, static_cast<size_t>(kIesLutWidth) * kIesLutRows>& out_ies_r32f) noexcept {
     // 256 polar angle samples (0..pi radians) x 64 IES profiles
     out_ies_r32f.fill(1.0f);
     for (uint32_t row = 0; row < kIesLutRows; ++row) {
@@ -731,10 +728,16 @@ bool remove_studio_light(LightingRig& rig, uint32_t index) noexcept {
     --rig.studio_light_count;
     if (rig.studio_light_count == 0u) {
         rig.dominant_key_light_id = 0u;
+        rig.circadian_sun_slot_id = -1;
     } else if (rig.dominant_key_light_id == index) {
         rig.dominant_key_light_id = 0u;
     } else if (rig.dominant_key_light_id > index) {
         --rig.dominant_key_light_id;
+    }
+    if (rig.circadian_sun_slot_id == static_cast<int32_t>(index)) {
+        rig.circadian_sun_slot_id = -1;
+    } else if (rig.circadian_sun_slot_id > static_cast<int32_t>(index)) {
+        --rig.circadian_sun_slot_id;
     }
     return true;
 }
@@ -909,266 +912,6 @@ void builtin_studio_rig_presets(std::array<StudioRigPresetRecord, 5>& out_preset
         out_presets[i].rig = LightingRig::default_three_point();
         set_preset_name_buf(out_presets[i].name, studio_rig_preset_name(kIds[i]));
         apply_studio_rig_preset(out_presets[i].rig, kIds[i], pivot_ws);
-    }
-}
-
-namespace {
-
-[[nodiscard]] nlohmann::json serialize_studio_light(const StudioLightSpec& s) {
-    return nlohmann::json{
-        {"name", std::string(s.name.data())},
-        {"fixture", static_cast<int>(s.fixture)},
-        {"enabled", s.enabled},
-        {"solo", s.solo},
-        {"cast_shadow", s.cast_shadow},
-        {"aim_lock", s.aim_lock},
-        {"use_orbit_angles", s.use_orbit_angles},
-        {"orbit_azimuth_deg", s.orbit_azimuth_deg},
-        {"orbit_elevation_deg", s.orbit_elevation_deg},
-        {"orbit_distance_m", s.orbit_distance_m},
-        {"roll_deg", s.roll_deg},
-        {"position_ws", {s.position_ws[0], s.position_ws[1], s.position_ws[2]}},
-        {"target_ws", {s.target_ws[0], s.target_ws[1], s.target_ws[2]}},
-        {"intensity_ev100", s.intensity_ev100},
-        {"exposure_stops", s.exposure_stops},
-        {"kelvin_cct", s.kelvin_cct},
-        {"tint_rgb", {s.tint_rgb[0], s.tint_rgb[1], s.tint_rgb[2]}},
-        {"green_magenta", s.green_magenta},
-        {"channel_mask", s.channel_mask},
-        {"catchlight_weight", s.catchlight_weight},
-        {"shadow_bias_scale", s.shadow_bias_scale},
-        {"width_or_outer_m", s.width_or_outer_m},
-        {"height_or_inner_m", s.height_or_inner_m},
-        {"spot_inner_deg", s.spot_inner_deg},
-        {"spot_outer_deg", s.spot_outer_deg},
-        {"softbox_enabled", s.softbox_enabled},
-        {"grid_enabled", s.grid_enabled},
-        {"grid_angle_deg", s.grid_angle_deg},
-        {"barn_doors_enabled", s.barn_doors_enabled},
-        {"barn_door_cuts_deg",
-         {s.barn_door_cuts_deg[0], s.barn_door_cuts_deg[1], s.barn_door_cuts_deg[2], s.barn_door_cuts_deg[3]}},
-        {"diffusion_enabled", s.diffusion_enabled},
-        {"diffusion_density", s.diffusion_density},
-        {"gel_enabled", s.gel_enabled},
-        {"gel", static_cast<int>(s.gel)},
-        {"coaxial_lock", s.coaxial_lock},
-        {"window_portal", s.window_portal},
-        {"gobo", static_cast<int>(s.gobo)},
-        {"ies_profile", static_cast<int>(s.ies_profile)},
-        {"passive_flag", static_cast<int>(s.passive_flag)},
-    };
-}
-
-void deserialize_studio_light(const nlohmann::json& j, StudioLightSpec& s) {
-    s = StudioLightSpec{};
-    if (const auto it = j.find("name"); it != j.end() && it->is_string()) {
-        set_name_buf(s.name, it->get<std::string>().c_str());
-    }
-    const int fix_raw = std::clamp(j.value("fixture", 0), 0, 11);
-    s.fixture = static_cast<StudioFixtureProfile>(fix_raw);
-    configure_fixture_defaults(s, s.fixture);
-    s.enabled = j.value("enabled", s.enabled);
-    s.solo = j.value("solo", s.solo);
-    s.cast_shadow = j.value("cast_shadow", s.cast_shadow);
-    s.aim_lock = j.value("aim_lock", s.aim_lock);
-    s.use_orbit_angles = j.value("use_orbit_angles", s.use_orbit_angles);
-    s.orbit_azimuth_deg = j.value("orbit_azimuth_deg", s.orbit_azimuth_deg);
-    s.orbit_elevation_deg = j.value("orbit_elevation_deg", s.orbit_elevation_deg);
-    s.orbit_distance_m = j.value("orbit_distance_m", s.orbit_distance_m);
-    s.roll_deg = j.value("roll_deg", s.roll_deg);
-    if (const auto it = j.find("position_ws"); it != j.end() && it->is_array() && it->size() == 3u) {
-        for (size_t k = 0; k < 3u; ++k) {
-            s.position_ws[k] = (*it)[k].get<float>();
-        }
-    }
-    if (const auto it = j.find("target_ws"); it != j.end() && it->is_array() && it->size() == 3u) {
-        for (size_t k = 0; k < 3u; ++k) {
-            s.target_ws[k] = (*it)[k].get<float>();
-        }
-    }
-    s.intensity_ev100 = j.value("intensity_ev100", s.intensity_ev100);
-    s.exposure_stops = j.value("exposure_stops", s.exposure_stops);
-    s.kelvin_cct = j.value("kelvin_cct", s.kelvin_cct);
-    if (const auto it = j.find("tint_rgb"); it != j.end() && it->is_array() && it->size() == 3u) {
-        for (size_t k = 0; k < 3u; ++k) {
-            s.tint_rgb[k] = (*it)[k].get<float>();
-        }
-    }
-    s.green_magenta = j.value("green_magenta", s.green_magenta);
-    s.channel_mask = j.value("channel_mask", s.channel_mask);
-    s.catchlight_weight = j.value("catchlight_weight", s.catchlight_weight);
-    s.shadow_bias_scale = j.value("shadow_bias_scale", s.shadow_bias_scale);
-    s.width_or_outer_m = j.value("width_or_outer_m", s.width_or_outer_m);
-    s.height_or_inner_m = j.value("height_or_inner_m", s.height_or_inner_m);
-    s.spot_inner_deg = j.value("spot_inner_deg", s.spot_inner_deg);
-    s.spot_outer_deg = j.value("spot_outer_deg", s.spot_outer_deg);
-    s.softbox_enabled = j.value("softbox_enabled", s.softbox_enabled);
-    s.grid_enabled = j.value("grid_enabled", s.grid_enabled);
-    s.grid_angle_deg = j.value("grid_angle_deg", s.grid_angle_deg);
-    s.barn_doors_enabled = j.value("barn_doors_enabled", s.barn_doors_enabled);
-    if (const auto it = j.find("barn_door_cuts_deg"); it != j.end() && it->is_array() && it->size() == 4u) {
-        for (size_t k = 0; k < 4u; ++k) {
-            s.barn_door_cuts_deg[k] = (*it)[k].get<float>();
-        }
-    }
-    s.diffusion_enabled = j.value("diffusion_enabled", s.diffusion_enabled);
-    s.diffusion_density = j.value("diffusion_density", s.diffusion_density);
-    s.gel_enabled = j.value("gel_enabled", s.gel_enabled);
-    s.gel = static_cast<StudioGelPreset>(std::clamp(j.value("gel", 0), 0, 11));
-    s.coaxial_lock = j.value("coaxial_lock", s.coaxial_lock);
-    s.window_portal = j.value("window_portal", s.window_portal);
-    s.gobo = static_cast<StudioGoboPattern>(std::clamp(j.value("gobo", 0), 0, 4));
-    s.ies_profile = static_cast<int8_t>(std::clamp(j.value("ies_profile", -1), -1, 7));
-    s.passive_flag = static_cast<PassiveFlagMode>(std::clamp(j.value("passive_flag", 0), 0, 4));
-}
-
-} // namespace
-
-bool load_lighting_rigs_json(const std::filesystem::path& path,
-                             std::vector<StudioRigPresetRecord>& out_presets) noexcept {
-    try {
-        std::ifstream ifs(path);
-        if (!ifs.is_open()) {
-            return false;
-        }
-        const nlohmann::json root = nlohmann::json::parse(ifs);
-        const auto it_presets = root.find("presets");
-        if (it_presets == root.end() || !it_presets->is_array()) {
-            return false;
-        }
-        std::vector<StudioRigPresetRecord> parsed;
-        parsed.reserve(it_presets->size());
-        for (const auto& pj : *it_presets) {
-            if (!pj.is_object()) {
-                continue;
-            }
-            StudioRigPresetRecord rec{};
-            rec.rig = LightingRig::default_three_point();
-            set_preset_name_buf(rec.name, pj.value("name", std::string("Untitled Rig")).c_str());
-            rec.rig.lighting_mode = static_cast<uint8_t>(std::clamp(pj.value("lighting_mode", 1), 0, 2));
-            rec.rig.global_live2d_flatness = pj.value("global_live2d_flatness", rec.rig.global_live2d_flatness);
-            rec.rig.eye_catchlight_intensity = pj.value("eye_catchlight_intensity", rec.rig.eye_catchlight_intensity);
-            rec.rig.eye_catchlight_size = pj.value("eye_catchlight_size", rec.rig.eye_catchlight_size);
-            if (const auto sg = pj.find("split_grading"); sg != pj.end() && sg->is_object()) {
-                rec.rig.split_grading.avatar_contrast = sg->value("avatar_contrast", 1.04f);
-                rec.rig.split_grading.avatar_saturation = sg->value("avatar_saturation", 1.05f);
-                rec.rig.split_grading.avatar_warmth = sg->value("avatar_warmth", 0.0f);
-                rec.rig.split_grading.avatar_ev_bias = sg->value("avatar_ev_bias", 0.0f);
-                rec.rig.split_grading.bg_contrast = sg->value("bg_contrast", 1.02f);
-                rec.rig.split_grading.bg_saturation = sg->value("bg_saturation", 0.96f);
-                rec.rig.split_grading.bg_exposure = sg->value("bg_exposure", 1.00f);
-                rec.rig.split_grading.master_grade_strength = sg->value("master_grade_strength", 1.0f);
-            }
-            if (const auto st = pj.find("satsuei"); st != pj.end() && st->is_object()) {
-                rec.rig.satsuei.light_wrap_strength = st->value("light_wrap_strength", 0.22f);
-                rec.rig.satsuei.halation_strength = st->value("halation_strength", 0.18f);
-                rec.rig.satsuei.halation_threshold = st->value("halation_threshold", 0.95f);
-                rec.rig.satsuei.backscatter_strength = st->value("backscatter_strength", 0.55f);
-            }
-            rec.rig.studio_light_count = 0u;
-            if (const auto lj = pj.find("lights"); lj != pj.end() && lj->is_array()) {
-                for (const auto& item : *lj) {
-                    if (rec.rig.studio_light_count >= kMaxStudioLights) {
-                        break;
-                    }
-                    if (item.is_object()) {
-                        deserialize_studio_light(item, rec.rig.studio_lights[rec.rig.studio_light_count++]);
-                    }
-                }
-            }
-            parsed.push_back(rec);
-        }
-        if (parsed.empty()) {
-            return false;
-        }
-        out_presets = std::move(parsed);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-bool save_lighting_rigs_json(const std::filesystem::path& path,
-                             std::span<const StudioRigPresetRecord> presets) noexcept {
-    try {
-        if (path.has_parent_path()) {
-            std::filesystem::create_directories(path.parent_path());
-        }
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& rec : presets) {
-            LightingRig copy = rec.rig;
-            ensure_studio_lights_initialized(copy);
-            nlohmann::json lights = nlohmann::json::array();
-            const uint32_t count = std::min(copy.studio_light_count, kMaxStudioLights);
-            for (uint32_t i = 0; i < count; ++i) {
-                lights.push_back(serialize_studio_light(copy.studio_lights[i]));
-            }
-            arr.push_back(nlohmann::json{
-                {"name", std::string(rec.name.data())},
-                {"lighting_mode", static_cast<int>(copy.lighting_mode)},
-                {"global_live2d_flatness", copy.global_live2d_flatness},
-                {"eye_catchlight_intensity", copy.eye_catchlight_intensity},
-                {"eye_catchlight_size", copy.eye_catchlight_size},
-                {"split_grading",
-                 {{"avatar_contrast", copy.split_grading.avatar_contrast},
-                  {"avatar_saturation", copy.split_grading.avatar_saturation},
-                  {"avatar_warmth", copy.split_grading.avatar_warmth},
-                  {"avatar_ev_bias", copy.split_grading.avatar_ev_bias},
-                  {"bg_contrast", copy.split_grading.bg_contrast},
-                  {"bg_saturation", copy.split_grading.bg_saturation},
-                  {"bg_exposure", copy.split_grading.bg_exposure},
-                  {"master_grade_strength", copy.split_grading.master_grade_strength}}},
-                {"satsuei",
-                 {{"light_wrap_strength", copy.satsuei.light_wrap_strength},
-                  {"halation_strength", copy.satsuei.halation_strength},
-                  {"halation_threshold", copy.satsuei.halation_threshold},
-                  {"backscatter_strength", copy.satsuei.backscatter_strength}}},
-                {"lights", lights},
-            });
-        }
-        std::error_code ec;
-        if (path.has_parent_path()) {
-            std::filesystem::create_directories(path.parent_path(), ec);
-        }
-        const nlohmann::json root{{"version", 1}, {"presets", arr}};
-        std::ofstream ofs(path);
-        if (!ofs.is_open()) {
-            return false;
-        }
-        ofs << root.dump(2) << '\n';
-        return ofs.good();
-    } catch (...) {
-        return false;
-    }
-}
-
-bool save_or_update_lighting_rig_preset(const std::filesystem::path& path, const char* preset_name,
-                                        const LightingRig& rig) noexcept {
-    try {
-        std::vector<StudioRigPresetRecord> list;
-        if (!load_lighting_rigs_json(path, list)) {
-            std::array<StudioRigPresetRecord, 5> builtins{};
-            builtin_studio_rig_presets(builtins);
-            list.assign(builtins.begin(), builtins.end());
-        }
-        const char* safe_name = (preset_name != nullptr && preset_name[0] != '\0') ? preset_name : "Custom Rig";
-        bool updated = false;
-        for (auto& rec : list) {
-            if (std::strncmp(rec.name.data(), safe_name, rec.name.size()) == 0) {
-                rec.rig = rig;
-                updated = true;
-                break;
-            }
-        }
-        if (!updated) {
-            StudioRigPresetRecord entry{};
-            set_preset_name_buf(entry.name, safe_name);
-            entry.rig = rig;
-            list.push_back(entry);
-        }
-        return save_lighting_rigs_json(path, list);
-    } catch (...) {
-        return false;
     }
 }
 

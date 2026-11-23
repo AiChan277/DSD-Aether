@@ -332,14 +332,15 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
     CHECK(std::abs(solver.last_head_euler_deg().yaw) < 0.25f);
     CHECK(std::abs(solver.last_head_euler_deg().roll) < 0.25f);
 
-    // Stage 1 3-frame median rejects a 1-frame landmark spike cleanly, then sustained EAR close & MAR open drive blink + jawOpen
+    // Stage 1 3-frame median rejects a 1-frame landmark spike cleanly, then sustained EAR close & MAR open drive blink
+    // + jawOpen
     lm[160 * 3 + 1] = lm[144 * 3 + 1];
     lm[158 * 3 + 1] = lm[153 * 3 + 1];
     lm[13 * 3 + 1] -= 4.0f;
     lm[14 * 3 + 1] += 18.0f;
     solver.populate_tracking_frame(roi, lm.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
-                                   nullptr, nullptr, 566661ULL, 568661ULL, EpTier::NpuOpenVino, 17U, false, tf,
-                                   kCamW, kCamH);
+                                   nullptr, nullptr, 566661ULL, 568661ULL, EpTier::NpuOpenVino, 17U, false, tf, kCamW,
+                                   kCamH);
     CHECK(tf.arkit_blendshapes[17] < 0.05f); // 1-frame spike suppressed by 3-frame median!
 
     for (uint32_t f = 18U; f <= 29U; ++f) {
@@ -357,8 +358,9 @@ TEST_CASE("Classic solvePnP rigid skull, 2.5% ROI hysteresis, 15-frame auto-neut
     CHECK(tf.webcam_visemes[0] > tf.webcam_visemes[1]);
 }
 
-TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed), 0.25 deg lock, and 3-pt brow tracking",
-          "[tracking][live2d][brow]") {
+TEST_CASE(
+    "Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed), 0.25 deg lock, and 3-pt brow tracking",
+    "[tracking][live2d][brow]") {
     constexpr uint32_t kCamW = 1280U;
     constexpr uint32_t kCamH = 720U;
     constexpr float kFocalPx = 900.0f;
@@ -368,7 +370,7 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
                                        float mouth_corner_dx_m, float brow_dy_m) {
         std::array<float, 478 * 3> lm{};
         auto is_brow_pt = [](uint32_t idx) -> bool {
-            constexpr uint32_t kBrows[] = {46, 52, 53, 55, 63, 65, 66, 70, 105, 107,
+            constexpr uint32_t kBrows[] = {46,  52,  53,  55,  63,  65,  66,  70,  105, 107,
                                            276, 282, 283, 285, 293, 295, 296, 300, 334, 336};
             for (const uint32_t b : kBrows) {
                 if (idx == b) {
@@ -378,10 +380,9 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
             return false;
         };
         for (uint32_t i = 0; i < 478U; ++i) {
-            const float* base =
-                (i < kCanonicalFaceVertexCount)
-                    ? kCanonicalFaceVerticesM[i]
-                    : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
+            const float* base = (i < kCanonicalFaceVertexCount)
+                                    ? kCanonicalFaceVerticesM[i]
+                                    : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
             float p3[3]{base[0], base[1], base[2]};
             if (i == 13U || i == 312U || i == 82U) {
                 p3[1] += mouth_open_m * 0.45f;
@@ -429,8 +430,8 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
         for (int f = 0; f < 6; ++f) {
             const uint64_t ts = static_cast<uint64_t>(30 + f) * 33333ULL;
             solver.populate_tracking_frame(roi, lm_tiny.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
-                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(30 + f),
-                                           false, tf, kCamW, kCamH);
+                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu,
+                                           static_cast<uint32_t>(30 + f), false, tf, kCamW, kCamH);
         }
         CHECK(std::abs(solver.last_head_euler_deg().yaw) < 0.25f);
         CHECK(std::abs(solver.last_head_euler_deg().pitch) < 0.25f);
@@ -445,8 +446,8 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
                                                         s * 10.0f * 0.01745329f, 0.0f, 0.0f, 0.0f);
             const uint64_t ts = static_cast<uint64_t>(40 + f) * 33333ULL;
             solver.populate_tracking_frame(roi, lm_rot.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
-                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(40 + f),
-                                           false, tf, kCamW, kCamH);
+                                           nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu,
+                                           static_cast<uint32_t>(40 + f), false, tf, kCamW, kCamH);
         }
         REQUIRE(aether::animation::has_packed_live2d(tf));
         aether::animation::Live2DParameters l2d{};
@@ -460,9 +461,9 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
     for (int f = 0; f < 25; ++f) {
         const auto lm_up = make_face_roi_landmarks(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.010f);
         const uint64_t ts = static_cast<uint64_t>(80 + f) * 33333ULL;
-        solver.populate_tracking_frame(roi, lm_up.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
-                                       nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(80 + f),
-                                       false, tf, kCamW, kCamH);
+        solver.populate_tracking_frame(roi, lm_up.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(80 + f), false, tf,
+                                       kCamW, kCamH);
     }
     aether::animation::Live2DParameters brow_up{};
     REQUIRE(aether::animation::has_packed_live2d(tf));
@@ -474,9 +475,9 @@ TEST_CASE("Task 2-4: Live2D 68-pt overlay, rigid head unprojection (<0.01 bleed)
     for (int f = 0; f < 25; ++f) {
         const auto lm_dn = make_face_roi_landmarks(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.010f);
         const uint64_t ts = static_cast<uint64_t>(110 + f) * 33333ULL;
-        solver.populate_tracking_frame(roi, lm_dn.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
-                                       nullptr, nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(110 + f),
-                                       false, tf, kCamW, kCamH);
+        solver.populate_tracking_frame(roi, lm_dn.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false, nullptr,
+                                       nullptr, nullptr, ts, ts, EpTier::Cpu, static_cast<uint32_t>(110 + f), false, tf,
+                                       kCamW, kCamH);
     }
     aether::animation::Live2DParameters brow_dn{};
     REQUIRE(aether::animation::has_packed_live2d(tf));
@@ -504,8 +505,22 @@ TEST_CASE("Full-res eye ROI dark-iris refinement rejects specular glare across N
     const float iris_true_x = 562.0f;
     const float iris_true_y = 324.0f;
     const std::array<float, 16> eye_poly = {{
-        544.0f, 323.0f, 551.0f, 317.0f, 560.0f, 316.0f, 569.0f, 317.0f,
-        576.0f, 323.0f, 569.0f, 329.0f, 560.0f, 330.0f, 551.0f, 329.0f,
+        544.0f,
+        323.0f,
+        551.0f,
+        317.0f,
+        560.0f,
+        316.0f,
+        569.0f,
+        317.0f,
+        576.0f,
+        323.0f,
+        569.0f,
+        329.0f,
+        560.0f,
+        330.0f,
+        551.0f,
+        329.0f,
     }};
 
     auto luma_at = [&](uint32_t x, uint32_t y) -> uint8_t {

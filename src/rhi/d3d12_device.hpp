@@ -150,11 +150,12 @@ struct D3D12GraphicsPipelineDesc {
     int stencil_pass_op{3}; // D3D12_STENCIL_OP_REPLACE (3), KEEP (1)
     int stencil_func{8};    // D3D12_COMPARISON_FUNC_ALWAYS (8), EQUAL (3), NOT_EQUAL (6)
     bool color_write_disable{false};
-    int cull_mode{3};  // D3D12_CULL_MODE_BACK (3), FRONT (2), NONE (1)
+    int cull_mode{3}; // D3D12_CULL_MODE_BACK (3), FRONT (2), NONE (1)
     bool front_counter_clockwise{true};
     bool wireframe{false};
     bool alpha_blend{false};
     bool premultiplied_alpha{false};
+    bool additive_blend{false};
     bool use_vertex_input_vertex25d{false};
     bool use_vertex_input_pos3{false};
 };
@@ -163,8 +164,7 @@ struct D3D12GraphicsPipelineDesc {
  * Fixed-capacity, allocation-free descriptor heap slot pool (`HR-01`, `HR-02`).
  * Slot 0 on CBV_SRV_UAV is permanently reserved for the safe null buffer SRV.
  */
-template <size_t Capacity>
-class D3D12DescriptorPool {
+template <size_t Capacity> class D3D12DescriptorPool {
   public:
     void reset(size_t reserve_low = 0) noexcept {
         next_free_ = reserve_low;
@@ -257,7 +257,8 @@ class D3D12Device {
                                                            bool allow_rtv, bool allow_dsv, bool allow_uav,
                                                            bool shared_nt = false, bool wrap_d3d11 = false,
                                                            const float* clear_rgba = nullptr) noexcept;
-    /** Creates `D32_FLOAT_S8X24_UINT` with separate depth SRV (`srv_index`) and stencil `.x` SRV (`stencil_srv_index`). */
+    /** Creates `D32_FLOAT_S8X24_UINT` with separate depth SRV (`srv_index`) and stencil `.x` SRV (`stencil_srv_index`).
+     */
     [[nodiscard]] Expected<D3D12Texture> create_depth_stencil_s8(uint32_t width, uint32_t height) noexcept;
     void destroy_texture(D3D12Texture& tex) noexcept;
 
@@ -281,10 +282,10 @@ class D3D12Device {
     void cmd_uav_barrier(ID3D12GraphicsCommandList4* cmd, ID3D12Resource* res = nullptr) noexcept;
 
     /** Executes one synchronous upload/transfer command list cleanly (used only during asset upload/init). */
-    template <typename Fn>
-    [[nodiscard]] Expected<void> execute_immediate(Fn&& record_fn) noexcept {
+    template <typename Fn> [[nodiscard]] Expected<void> execute_immediate(Fn&& record_fn) noexcept {
         if (device_ == nullptr || direct_queue_ == nullptr || imm_alloc_ == nullptr || imm_list_ == nullptr) {
-            return make_unexpected(Error::make(ErrorCode::InvalidArg, "D3D12Device::execute_immediate not initialized"));
+            return make_unexpected(
+                Error::make(ErrorCode::InvalidArg, "D3D12Device::execute_immediate not initialized"));
         }
         if (auto r = reset_immediate_list(); !r) {
             return r;

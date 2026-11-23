@@ -76,8 +76,8 @@ class VmcSender {
     [[nodiscard]] uint64_t packets_sent() const noexcept { return osc_.packets_sent(); }
 
     /** Encodes one frame into bundles; with `sink == nullptr` they go to the socket. Returns datagram count. */
-    uint32_t send_frame(const animation::VmcPoseFrame& frame,
-                        void (*sink)(const uint8_t*, size_t, void*) = nullptr, void* sink_user = nullptr) noexcept;
+    uint32_t send_frame(const animation::VmcPoseFrame& frame, void (*sink)(const uint8_t*, size_t, void*) = nullptr,
+                        void* sink_user = nullptr) noexcept;
 
   private:
     OscSender osc_{};

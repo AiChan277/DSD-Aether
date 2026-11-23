@@ -475,12 +475,12 @@ TEST_CASE("FFI boundary handles stubs, thread roles, and Rust panics cleanly", "
     REQUIRE(loader == nullptr);
 
 #if !defined(NDEBUG)
-    char err_buf[256]{};
     aether_set_thread_role(AETHER_THREAD_ROLE_UI);
     REQUIRE(aether_loader_open(&req, &loader) == AETHER_E_INTERNAL);
 #endif
 
 #ifdef AETHER_ENABLE_TEST_HOOKS
+    char err_buf[256]{};
     aether_set_thread_role(AETHER_THREAD_ROLE_ANY);
     REQUIRE(aether_test_inject_panic() == AETHER_E_PANIC);
     const size_t panic_len = aether_last_error(err_buf, sizeof(err_buf));

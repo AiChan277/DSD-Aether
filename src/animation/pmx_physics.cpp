@@ -9,7 +9,6 @@ namespace aether::animation {
 namespace {
 
 constexpr float kEps = 1e-6f;
-constexpr float kPi = 3.14159265358979323846f;
 
 [[nodiscard]] PmxVec3 v3_add(PmxVec3 a, PmxVec3 b) noexcept {
     return {a.x + b.x, a.y + b.y, a.z + b.z};
@@ -203,11 +202,8 @@ void mat4_mul(const float a[16], const float b[16], float out[16]) noexcept {
     float tmp[16]{};
     for (int c = 0; c < 4; ++c) {
         for (int r = 0; r < 4; ++r) {
-            tmp[c * 4 + r] =
-                a[0 * 4 + r] * b[c * 4 + 0] +
-                a[1 * 4 + r] * b[c * 4 + 1] +
-                a[2 * 4 + r] * b[c * 4 + 2] +
-                a[3 * 4 + r] * b[c * 4 + 3];
+            tmp[c * 4 + r] = a[0 * 4 + r] * b[c * 4 + 0] + a[1 * 4 + r] * b[c * 4 + 1] + a[2 * 4 + r] * b[c * 4 + 2] +
+                             a[3 * 4 + r] * b[c * 4 + 3];
         }
     }
     std::memcpy(out, tmp, sizeof(tmp));
@@ -273,28 +269,20 @@ void mat4_mul(const float a[16], const float b[16], float out[16]) noexcept {
     const float sy = std::max(rb.size[1], 0.002f);
     const float sz = std::max(rb.size[2], 0.002f);
     switch (rb.shape_kind) {
-        case AETHER_PMX_SHAPE_SPHERE:
-            return sx;
-        case AETHER_PMX_SHAPE_BOX:
-            return std::sqrt(sx * sx + sy * sy + sz * sz) * 0.65f;
-        case AETHER_PMX_SHAPE_CAPSULE:
-        default:
-            return sx + 0.5f * sy;
+    case AETHER_PMX_SHAPE_SPHERE:
+        return sx;
+    case AETHER_PMX_SHAPE_BOX:
+        return std::sqrt(sx * sx + sy * sy + sz * sz) * 0.65f;
+    case AETHER_PMX_SHAPE_CAPSULE:
+    default:
+        return sx + 0.5f * sy;
     }
 }
 
-void closest_points_on_body_pair(const AetherPmxRigidBodyDesc& desc_a,
-                                 const PmxRigidBodyRuntime& state_a,
-                                 const AetherPmxRigidBodyDesc& desc_b,
-                                 const PmxRigidBodyRuntime& state_b,
-                                 PmxVec3& pt_a,
-                                 PmxVec3& pt_b,
-                                 float& radius_a,
-                                 float& radius_b) noexcept {
-    auto eval_segment = [](const AetherPmxRigidBodyDesc& d,
-                           const PmxRigidBodyRuntime& s,
-                           PmxVec3& p0,
-                           PmxVec3& p1,
+void closest_points_on_body_pair(const AetherPmxRigidBodyDesc& desc_a, const PmxRigidBodyRuntime& state_a,
+                                 const AetherPmxRigidBodyDesc& desc_b, const PmxRigidBodyRuntime& state_b,
+                                 PmxVec3& pt_a, PmxVec3& pt_b, float& radius_a, float& radius_b) noexcept {
+    auto eval_segment = [](const AetherPmxRigidBodyDesc& d, const PmxRigidBodyRuntime& s, PmxVec3& p0, PmxVec3& p1,
                            float& r) noexcept {
         const float sx = std::max(d.size[0], 0.002f);
         const float sy = std::max(d.size[1], 0.002f);
@@ -360,14 +348,13 @@ void closest_points_on_body_pair(const AetherPmxRigidBodyDesc& desc_a,
     pt_b = v3_add(b0, v3_scale(d2, t));
 }
 
-}  // namespace
+} // namespace
 
-void PmxSkeletonAndPhysicsSolver::init(
-    std::span<const AetherJointDesc> bones,
-    std::span<const AetherPmxBoneExt> bone_exts,
-    std::span<const AetherPmxIkLink> ik_links,
-    std::span<const AetherPmxRigidBodyDesc> rigid_bodies,
-    std::span<const AetherPmxConstraint6DofDesc> constraints_6dof) noexcept {
+void PmxSkeletonAndPhysicsSolver::init(std::span<const AetherJointDesc> bones,
+                                       std::span<const AetherPmxBoneExt> bone_exts,
+                                       std::span<const AetherPmxIkLink> ik_links,
+                                       std::span<const AetherPmxRigidBodyDesc> rigid_bodies,
+                                       std::span<const AetherPmxConstraint6DofDesc> constraints_6dof) {
     bone_exts_.assign(bone_exts.begin(), bone_exts.end());
     ik_links_.assign(ik_links.begin(), ik_links.end());
     rigid_bodies_.assign(rigid_bodies.begin(), rigid_bodies.end());
@@ -442,9 +429,8 @@ void PmxSkeletonAndPhysicsSolver::init(
     initialized_from_pose_ = false;
 }
 
-void PmxSkeletonAndPhysicsSolver::reset_to_rest_pose(
-    std::span<const AetherJointDesc> bones,
-    std::span<const float> rest_world_mats16) noexcept {
+void PmxSkeletonAndPhysicsSolver::reset_to_rest_pose(std::span<const AetherJointDesc> bones,
+                                                     std::span<const float> rest_world_mats16) noexcept {
     for (size_t i = 0; i < rigid_bodies_.size(); ++i) {
         const auto& rb = rigid_bodies_[i];
         auto& st = rb_states_[i];
@@ -455,8 +441,7 @@ void PmxSkeletonAndPhysicsSolver::reset_to_rest_pose(
         st.lin_vel = {0.0f, 0.0f, 0.0f};
         st.ang_vel = {0.0f, 0.0f, 0.0f};
 
-        if (rb.bone_index >= 0 &&
-            static_cast<size_t>(rb.bone_index) < bones.size() &&
+        if (rb.bone_index >= 0 && static_cast<size_t>(rb.bone_index) < bones.size() &&
             static_cast<size_t>(rb.bone_index) * 16 + 16 <= rest_world_mats16.size()) {
             const float* bm = &rest_world_mats16[static_cast<size_t>(rb.bone_index) * 16];
             const PmxVec3 b_pos = mat4_get_pos(bm);
@@ -473,12 +458,11 @@ void PmxSkeletonAndPhysicsSolver::reset_to_rest_pose(
     initialized_from_pose_ = true;
 }
 
-void PmxSkeletonAndPhysicsSolver::recompute_world_matrices(
-    std::span<const AetherJointDesc> bones,
-    std::span<const float> local_t,
-    std::span<const float> local_r,
-    std::span<const float> local_s,
-    std::span<float> world_mats16) const noexcept {
+void PmxSkeletonAndPhysicsSolver::recompute_world_matrices(std::span<const AetherJointDesc> bones,
+                                                           std::span<const float> local_t,
+                                                           std::span<const float> local_r,
+                                                           std::span<const float> local_s,
+                                                           std::span<float> world_mats16) const noexcept {
     const size_t n = bones.size();
     for (size_t i = 0; i < n; ++i) {
         float local_m[16];
@@ -492,12 +476,9 @@ void PmxSkeletonAndPhysicsSolver::recompute_world_matrices(
     }
 }
 
-void PmxSkeletonAndPhysicsSolver::solve_ccd_ik(
-    std::span<const AetherJointDesc> bones,
-    std::span<const float> local_t,
-    std::span<float> local_r,
-    std::span<const float> local_s,
-    std::span<float> world_mats16) const noexcept {
+void PmxSkeletonAndPhysicsSolver::solve_ccd_ik(std::span<const AetherJointDesc> bones, std::span<const float> local_t,
+                                               std::span<float> local_r, std::span<const float> local_s,
+                                               std::span<float> world_mats16) const noexcept {
     const size_t n = std::min(bones.size(), bone_exts_.size());
     if (n == 0 || ik_links_.empty()) {
         return;
@@ -505,9 +486,7 @@ void PmxSkeletonAndPhysicsSolver::solve_ccd_ik(
 
     for (size_t i = 0; i < n; ++i) {
         const auto& ext = bone_exts_[i];
-        if (ext.ik_target < 0 ||
-            static_cast<size_t>(ext.ik_target) >= n ||
-            ext.ik_link_count == 0) {
+        if (ext.ik_target < 0 || static_cast<size_t>(ext.ik_target) >= n || ext.ik_link_count == 0) {
             continue;
         }
         const size_t effector_idx = static_cast<size_t>(ext.ik_target);
@@ -578,12 +557,10 @@ void PmxSkeletonAndPhysicsSolver::solve_ccd_ik(
     }
 }
 
-void PmxSkeletonAndPhysicsSolver::solve_append_transforms(
-    std::span<const AetherJointDesc> bones,
-    std::span<float> local_t,
-    std::span<float> local_r,
-    std::span<const float> local_s,
-    std::span<float> world_mats16) noexcept {
+void PmxSkeletonAndPhysicsSolver::solve_append_transforms(std::span<const AetherJointDesc> bones,
+                                                          std::span<float> local_t, std::span<float> local_r,
+                                                          std::span<const float> local_s,
+                                                          std::span<float> world_mats16) noexcept {
     const size_t n = std::min(bones.size(), bone_exts_.size());
     if (n == 0) {
         return;
@@ -656,10 +633,8 @@ void PmxSkeletonAndPhysicsSolver::solve_append_transforms(
     }
 }
 
-void PmxSkeletonAndPhysicsSolver::step_physics_fixed(
-    float fixed_dt,
-    std::span<const AetherJointDesc> bones,
-    std::span<const float> world_mats16) noexcept {
+void PmxSkeletonAndPhysicsSolver::step_physics_fixed(float fixed_dt, std::span<const AetherJointDesc> bones,
+                                                     std::span<const float> world_mats16) noexcept {
     if (rigid_bodies_.empty()) {
         return;
     }
@@ -706,8 +681,7 @@ void PmxSkeletonAndPhysicsSolver::step_physics_fixed(
     constexpr int kConstraintIterations = 4;
     for (int iter = 0; iter < kConstraintIterations; ++iter) {
         for (const auto& c : constraints_6dof_) {
-            if (c.rb_a < 0 || c.rb_b < 0 ||
-                static_cast<size_t>(c.rb_a) >= rigid_bodies_.size() ||
+            if (c.rb_a < 0 || c.rb_b < 0 || static_cast<size_t>(c.rb_a) >= rigid_bodies_.size() ||
                 static_cast<size_t>(c.rb_b) >= rigid_bodies_.size()) {
                 continue;
             }
@@ -725,8 +699,10 @@ void PmxSkeletonAndPhysicsSolver::step_physics_fixed(
             const auto& rbb = rigid_bodies_[ib];
             const PmxVec3 rest_a{rba.pos_ms[0], rba.pos_ms[1], rba.pos_ms[2]};
             const PmxVec3 rest_b{rbb.pos_ms[0], rbb.pos_ms[1], rbb.pos_ms[2]};
-            const PmxQuat rest_rot_a = q_from_euler_yxz({rba.rot_euler_rh[0], rba.rot_euler_rh[1], rba.rot_euler_rh[2]});
-            const PmxQuat rest_rot_b = q_from_euler_yxz({rbb.rot_euler_rh[0], rbb.rot_euler_rh[1], rbb.rot_euler_rh[2]});
+            const PmxQuat rest_rot_a =
+                q_from_euler_yxz({rba.rot_euler_rh[0], rba.rot_euler_rh[1], rba.rot_euler_rh[2]});
+            const PmxQuat rest_rot_b =
+                q_from_euler_yxz({rbb.rot_euler_rh[0], rbb.rot_euler_rh[1], rbb.rot_euler_rh[2]});
             const PmxVec3 rest_local_diff = q_rotate(q_conj(rest_rot_a), v3_sub(rest_b, rest_a));
 
             const PmxVec3 target_b_in_a = v3_add(a.pos, q_rotate(a.rot, rest_local_diff));
@@ -774,7 +750,8 @@ void PmxSkeletonAndPhysicsSolver::step_physics_fixed(
                     e_arr[axis] *= (1.0f - k);
                 }
             }
-            const PmxQuat clamped_rel = q_normalize(q_mul(rest_rel_q, q_from_euler_yxz({e_arr[0], e_arr[1], e_arr[2]})));
+            const PmxQuat clamped_rel =
+                q_normalize(q_mul(rest_rel_q, q_from_euler_yxz({e_arr[0], e_arr[1], e_arr[2]})));
             const PmxQuat target_rot_b = q_normalize(q_mul(a.rot, clamped_rel));
             if (b.inv_mass > 0.0f) {
                 b.rot = q_slerp(b.rot, target_rot_b, 0.65f);
@@ -847,12 +824,10 @@ void PmxSkeletonAndPhysicsSolver::step_physics_fixed(
     }
 }
 
-void PmxSkeletonAndPhysicsSolver::write_dynamic_bodies_to_bones(
-    std::span<const AetherJointDesc> bones,
-    std::span<float> local_t,
-    std::span<float> local_r,
-    std::span<const float> local_s,
-    std::span<float> world_mats16) const noexcept {
+void PmxSkeletonAndPhysicsSolver::write_dynamic_bodies_to_bones(std::span<const AetherJointDesc> bones,
+                                                                std::span<float> local_t, std::span<float> local_r,
+                                                                std::span<const float> local_s,
+                                                                std::span<float> world_mats16) const noexcept {
     if (rigid_bodies_.empty()) {
         return;
     }
@@ -861,17 +836,15 @@ void PmxSkeletonAndPhysicsSolver::write_dynamic_bodies_to_bones(
     for (size_t i = 0; i < rigid_bodies_.size(); ++i) {
         const auto& rb = rigid_bodies_[i];
         const auto& st = rb_states_[i];
-        if (rb.phys_mode == AETHER_PMX_RB_KINEMATIC ||
-            rb.bone_index < 0 ||
+        if (rb.phys_mode == AETHER_PMX_RB_KINEMATIC || rb.bone_index < 0 ||
             static_cast<size_t>(rb.bone_index) >= bones.size()) {
             continue;
         }
         const size_t bi = static_cast<size_t>(rb.bone_index);
         const PmxQuat target_world_rot = q_normalize(q_mul(st.rot, q_conj(st.bone_local_rot)));
-        const PmxVec3 target_world_pos =
-            (rb.phys_mode == AETHER_PMX_RB_DYNAMIC)
-                ? v3_sub(st.pos, q_rotate(target_world_rot, st.bone_local_offset))
-                : mat4_get_pos(&world_mats16[bi * 16]);
+        const PmxVec3 target_world_pos = (rb.phys_mode == AETHER_PMX_RB_DYNAMIC)
+                                             ? v3_sub(st.pos, q_rotate(target_world_rot, st.bone_local_offset))
+                                             : mat4_get_pos(&world_mats16[bi * 16]);
 
         const int32_t parent = bones[bi].parent_index;
         if (parent >= 0 && static_cast<size_t>(parent) < bones.size()) {
@@ -910,13 +883,9 @@ void PmxSkeletonAndPhysicsSolver::write_dynamic_bodies_to_bones(
     }
 }
 
-void PmxSkeletonAndPhysicsSolver::step(
-    float dt_sec,
-    std::span<const AetherJointDesc> bones,
-    std::span<float> local_t,
-    std::span<float> local_r,
-    std::span<const float> local_s,
-    std::span<float> world_mats16) noexcept {
+void PmxSkeletonAndPhysicsSolver::step(float dt_sec, std::span<const AetherJointDesc> bones, std::span<float> local_t,
+                                       std::span<float> local_r, std::span<const float> local_s,
+                                       std::span<float> world_mats16) noexcept {
     if (bones.empty() || empty()) {
         return;
     }
@@ -934,7 +903,23 @@ void PmxSkeletonAndPhysicsSolver::step(
 
     // 3. Fixed-timestep 60 Hz RigidBody + 6-DOF Spring Joint simulation
     if (!rigid_bodies_.empty()) {
-        const float clamped_dt = std::clamp(dt_sec, 0.0f, kFixedDt * static_cast<float>(kMaxSubsteps));
+        auto state_sane = [&](const PmxRigidBodyRuntime& st) noexcept -> bool {
+            return std::isfinite(st.pos.x) && std::isfinite(st.pos.y) && std::isfinite(st.pos.z) &&
+                   std::isfinite(st.rot.x) && std::isfinite(st.rot.y) && std::isfinite(st.rot.z) &&
+                   std::isfinite(st.rot.w) && std::isfinite(st.lin_vel.x) && std::isfinite(st.lin_vel.y) &&
+                   std::isfinite(st.lin_vel.z) && std::isfinite(st.ang_vel.x) && std::isfinite(st.ang_vel.y) &&
+                   std::isfinite(st.ang_vel.z) && std::abs(st.pos.x) < 1000.0f && std::abs(st.pos.y) < 1000.0f &&
+                   std::abs(st.pos.z) < 1000.0f;
+        };
+        for (const auto& st : rb_states_) {
+            if (!state_sane(st)) {
+                reset_to_rest_pose(bones, world_mats16);
+                break;
+            }
+        }
+        // Clamp delta time strictly to <= 1/30 s so tab-out/resize spikes never explode joints.
+        const float safe_dt = std::isfinite(dt_sec) ? dt_sec : 0.0f;
+        const float clamped_dt = std::clamp(safe_dt, 0.0f, 1.0f / 30.0f);
         accumulator_sec_ += clamped_dt;
         uint32_t substeps = 0;
         while (accumulator_sec_ >= kFixedDt && substeps < kMaxSubsteps) {
@@ -946,21 +931,20 @@ void PmxSkeletonAndPhysicsSolver::step(
             step_physics_fixed(kFixedDt, bones, world_mats16);
             accumulator_sec_ = 0.0f;
         }
+        for (const auto& st : rb_states_) {
+            if (!state_sane(st)) {
+                reset_to_rest_pose(bones, world_mats16);
+                break;
+            }
+        }
         write_dynamic_bodies_to_bones(bones, local_t, local_r, local_s, world_mats16);
     }
 }
 
 void PmxSkeletonAndPhysicsSolver::evaluate_sdef_vertex(
-    const float in_pos[3],
-    const float in_nrm[3],
-    const uint16_t joints[4],
-    const float weights[4],
-    const AetherPmxSdefVertex& sdef,
-    std::span<const float> skin_mats16,
-    std::span<const float> world_mats16,
-    std::span<const float> inv_bind_mats16,
-    float out_pos[3],
-    float out_nrm[3]) noexcept {
+    const float in_pos[3], const float in_nrm[3], const uint16_t joints[4], const float weights[4],
+    const AetherPmxSdefVertex& sdef, std::span<const float> skin_mats16, std::span<const float> world_mats16,
+    std::span<const float> inv_bind_mats16, float out_pos[3], float out_nrm[3]) noexcept {
     const size_t num_bones = skin_mats16.size() / 16;
     if ((sdef.flags & 1u) != 0u && num_bones > 0) {
         const size_t b0 = std::min<size_t>(joints[0], num_bones - 1);
@@ -983,7 +967,7 @@ void PmxSkeletonAndPhysicsSolver::evaluate_sdef_vertex(
         // SDEF volume-preserving spherical interpolation around pivot C:
         //   r_mix = w0 * r0 + w1 * r1
         //   p_out = w0*(M0 * r0) + w1*(M1 * r1) + R_slerp(q0, q1, w1) * (p - c)
-        //Wait: in standard PMX SDEF:
+        // Wait: in standard PMX SDEF:
         //   rw = w0 * r0 + w1 * r1
         //   c0 = c + 0.5 * (r0 - rw), c1 = c + 0.5 * (r1 - rw)
         //   p' = w0 * (M0 * c0) + w1 * (M1 * c1) + q_blend * (p - c)
@@ -1044,4 +1028,4 @@ void PmxSkeletonAndPhysicsSolver::evaluate_sdef_vertex(
     }
 }
 
-}  // namespace aether::animation
+} // namespace aether::animation

@@ -1,5 +1,7 @@
 add_library(aether_ui STATIC
     dev_shell.cpp
+    project_manager_window.cpp
+    project_manager_window.hpp
     dev_shell.hpp
     modals/graphics_settings_modal.cpp
     modals/graphics_settings_modal.hpp

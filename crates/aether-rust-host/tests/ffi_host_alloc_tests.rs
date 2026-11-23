@@ -171,6 +171,7 @@ fn t2_host_evaluate_active_has_zero_allocs_even_across_plan_hotswap()
     assert!((gout.ik_targets[6][1] - 31.5).abs() < 1e-3);
 
     aether_set_thread_role(AETHER_THREAD_ROLE_UI);
+    // SAFETY: `AetherGraphTelemetryReadout` is a POD C ABI struct valid when zero-initialized.
     let mut readout: AetherGraphTelemetryReadout = unsafe { core::mem::zeroed() };
     readout.struct_size = size_of::<AetherGraphTelemetryReadout>() as u32;
     aether_test_alloc_reset();
@@ -189,7 +190,7 @@ fn t2_host_evaluate_active_has_zero_allocs_even_across_plan_hotswap()
         .iter()
         .take(readout.pin_readout_count as usize)
         .position(|&nid| nid == 63)
-        .expect("node 63 output pin present");
+        .ok_or("node 63 output pin present")?;
     assert_eq!(readout.pin_kinds[idx63], AETHER_PIN_VALUE_FLOAT);
     assert!((readout.pin_values[idx63][0] - 31.5).abs() < 1e-3);
 
@@ -221,10 +222,8 @@ fn t2_material_texture_nodes_evaluate_with_zero_allocs() -> Result<(), Box<dyn s
         r#"{"format":1,"materials":["Face_00_SKIN","Hair_00_HAIR","Cardigan_00_CLOTH"]}"#,
     )?;
     // SAFETY: Valid host and NUL-terminated JSON string.
-    assert_eq!(
-        unsafe { aether_host_set_model_metadata_json(host, meta_cstr.as_ptr()) },
-        AETHER_OK
-    );
+    let meta_st = unsafe { aether_host_set_model_metadata_json(host, meta_cstr.as_ptr()) };
+    assert_eq!(meta_st, AETHER_OK);
 
     let graph_json = serde_json::json!({
         "schema_version": 1,
@@ -258,6 +257,7 @@ fn t2_material_texture_nodes_evaluate_with_zero_allocs() -> Result<(), Box<dyn s
     let mut compiled = false;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(10));
+        // SAFETY: `AetherHostEvent` is a POD C ABI struct valid when zero-initialized.
         let mut evs = [unsafe { core::mem::zeroed::<AetherHostEvent>() }; 8];
         let mut count = 0u32;
         // SAFETY: Valid host and event buffer.
@@ -285,14 +285,15 @@ fn t2_material_texture_nodes_evaluate_with_zero_allocs() -> Result<(), Box<dyn s
         keys_pressed: [0; 2],
         external_params: [0.0; 64],
     };
+    // SAFETY: `AetherGraphOutputs` and `AetherMaterialOverrideBuffer` are POD C ABI structs.
     let mut gout: AetherGraphOutputs = unsafe { core::mem::zeroed() };
+    // SAFETY: `AetherMaterialOverrideBuffer` is a POD C ABI struct valid when zero-initialized.
     let mut gmats: AetherMaterialOverrideBuffer = unsafe { core::mem::zeroed() };
 
     aether_test_alloc_reset();
     for _ in 0..100 {
         // SAFETY: Valid T2 pointers and 64-byte aligned outputs.
-        let st =
-            unsafe { aether_host_evaluate_active_ex(host, &gin, 18.0, &mut gout, &mut gmats) };
+        let st = unsafe { aether_host_evaluate_active_ex(host, &gin, 18.0, &mut gout, &mut gmats) };
         assert_eq!(st, AETHER_OK);
     }
     assert_eq!(

@@ -21,6 +21,9 @@ add_library(aether_core STATIC
     spsc_ring.hpp
     telemetry.cpp
     telemetry.hpp
+    zip_archive.cpp
+    action_registry.hpp
+    zip_archive.hpp
     triple_buffer.hpp
     viewport_aspect.hpp
 )
@@ -34,6 +37,11 @@ target_include_directories(aether_core PUBLIC
 
 target_link_libraries(aether_core PUBLIC
     aether_rust_host
+    nlohmann_json::nlohmann_json
+)
+
+target_link_libraries(aether_core PRIVATE
+    ZLIB::ZLIB
 )
 
 if(AETHER_WITH_TRACY)
@@ -43,6 +51,7 @@ endif()
 
 if(WIN32)
     target_link_libraries(aether_core PRIVATE
+        bcrypt
         dxgi
         mf
         mfplat
@@ -53,5 +62,6 @@ if(WIN32)
         shell32
         uuid
         avrt
+        windowscodecs
     )
 endif()

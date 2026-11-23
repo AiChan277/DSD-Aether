@@ -32,6 +32,8 @@ struct BoneLineVertex {
     float color[4]{};
 };
 
+struct GpuAvatar;
+
 /**
  * Staged host-visible CPU+VMA arena prepared on the async loader thread cleanly (`§5.6`).
  * Holds zero-copy decoded streams directly inside `staging_buf` ready for single-batch DMA upload.
@@ -61,6 +63,15 @@ struct StagedAvatarUpload {
     std::vector<AetherPmxBoneMorphOffset> pmx_bone_morphs;
     std::vector<AetherPmxRigidBodyDesc> pmx_rigid_bodies;
     std::vector<AetherPmxConstraint6DofDesc> pmx_constraints_6dof;
+    std::vector<uint8_t> cpu_texture_pixels;
+    std::unique_ptr<GpuAvatar> prebuilt_avatar;
+
+    StagedAvatarUpload() noexcept = default;
+    ~StagedAvatarUpload() noexcept;
+    StagedAvatarUpload(const StagedAvatarUpload&) = delete;
+    StagedAvatarUpload& operator=(const StagedAvatarUpload&) = delete;
+    StagedAvatarUpload(StagedAvatarUpload&&) = delete;
+    StagedAvatarUpload& operator=(StagedAvatarUpload&&) = delete;
 
     void release() noexcept;
 };
@@ -189,6 +200,11 @@ struct GpuAvatar {
     [[nodiscard]] std::string string_slice(uint32_t offset, uint32_t len) const;
     [[nodiscard]] uint32_t mapped_humanoid_count() const noexcept;
 };
+
+/**
+ * Builds CPU geometry/skeleton/parity/morph/bone metadata into `staged.prebuilt_avatar` off the main thread.
+ */
+void prepare_cpu_avatar_payload(StagedAvatarUpload& staged);
 
 /**
  * Uploads a completed `StagedAvatarUpload` (zero-copy VMA host-visible staging) into GPU memory

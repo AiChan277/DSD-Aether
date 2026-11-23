@@ -17,13 +17,15 @@ enum class GpuPassId : uint8_t {
     DiffuseBounce = 5,
     Live2dNpr = 6,
     OutlineHull = 7,
-    CreaseLines = 8,
-    PostBloom = 9,
-    ToneMap = 10,
-    OutputEncode = 11,
-    ViewportCompose = 12,
-    FrameTotal = 13,
-    Count = 14,
+    TransparentPass = 8,
+    CreaseLines = 9,
+    PostBloom = 10,
+    ToneMap = 11,
+    OutputEncode = 12,
+    ViewportCompose = 13,
+    LightingStage = 14,
+    FrameTotal = 15,
+    Count = 16,
 };
 
 struct GpuPassTimingSnapshot {

@@ -263,8 +263,7 @@ constexpr std::array<NodeTemplate, 39> kTemplates = {{
 }};
 
 constexpr std::array<const char*, 7> kMenuGroups = {
-    "Sources",           "Model & Materials", "Solvers & Filters", "Blend & Procedural",
-    "Math & Logic",      "Outputs",           nullptr};
+    "Sources", "Model & Materials", "Solvers & Filters", "Blend & Procedural", "Math & Logic", "Outputs", nullptr};
 
 std::string_view type_base(std::string_view type_id) noexcept {
     const size_t at = type_id.find('@');
@@ -452,8 +451,7 @@ void draw_pin_glyph(ImDrawList* dl, ImVec2 c, float r, PinDataKind kind, ImU32 c
     switch (kind) {
     case PinDataKind::AudioFrame: {
         // Waveform-accented diamond for DSP AudioFrame
-        const ImVec2 pts[4] = {ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r),
-                               ImVec2(c.x - r, c.y)};
+        const ImVec2 pts[4] = {ImVec2(c.x, c.y - r), ImVec2(c.x + r, c.y), ImVec2(c.x, c.y + r), ImVec2(c.x - r, c.y)};
         if (connected) {
             dl->AddConvexPolyFilled(pts, 4, col);
         } else {
@@ -845,8 +843,7 @@ void NodeCanvas::set_graph_json(const std::string& json_utf8) {
                 const auto& tn = nodes_[static_cast<size_t>(ti)];
                 std::string_view eff_tp = tp;
                 const std::string_view tn_tid(tn.kind.data());
-                if (tp == "visemes" &&
-                    (tn_tid == "aether.expr.formant_lipsync@1" || tn_tid == "formant_lipsync")) {
+                if (tp == "visemes" && (tn_tid == "aether.expr.formant_lipsync@1" || tn_tid == "formant_lipsync")) {
                     eff_tp = "audio";
                 }
                 for (uint8_t p = 0; p < tn.num_inputs; ++p) {
@@ -1378,14 +1375,14 @@ size_t NodeCanvas::format_watched_pin_value(const PinRef& pin, const StudioHostS
                                 static_cast<double>(vals[1]), static_cast<double>(vals[2]));
         break;
     case AETHER_PIN_VALUE_QUAT:
-        written = std::snprintf(out, cap, "(%.2f, %.2f, %.2f, %.2f)", static_cast<double>(vals[0]),
-                                static_cast<double>(vals[1]), static_cast<double>(vals[2]),
-                                static_cast<double>(vals[3]));
+        written =
+            std::snprintf(out, cap, "(%.2f, %.2f, %.2f, %.2f)", static_cast<double>(vals[0]),
+                          static_cast<double>(vals[1]), static_cast<double>(vals[2]), static_cast<double>(vals[3]));
         break;
     case AETHER_PIN_VALUE_TRANSFORM:
-        written = std::snprintf(out, cap, "p(%.2f, %.2f, %.2f) s%.2f", static_cast<double>(vals[0]),
-                                static_cast<double>(vals[1]), static_cast<double>(vals[2]),
-                                static_cast<double>(vals[3]));
+        written =
+            std::snprintf(out, cap, "p(%.2f, %.2f, %.2f) s%.2f", static_cast<double>(vals[0]),
+                          static_cast<double>(vals[1]), static_cast<double>(vals[2]), static_cast<double>(vals[3]));
         break;
     case AETHER_PIN_VALUE_POSE:
         written = std::snprintf(out, cap, "H(%.2f, %.2f) c=%.2f", static_cast<double>(vals[0]),
@@ -1398,13 +1395,13 @@ size_t NodeCanvas::format_watched_pin_value(const PinRef& pin, const StudioHostS
     }
     case AETHER_PIN_VALUE_VISEME: {
         static constexpr std::array<char, 5> kVisLabels{'A', 'I', 'U', 'E', 'O'};
-        const size_t idx = std::min<size_t>(4, static_cast<size_t>(std::max(0, static_cast<int>(std::lround(vals[1])))));
+        const size_t idx =
+            std::min<size_t>(4, static_cast<size_t>(std::max(0, static_cast<int>(std::lround(vals[1])))));
         written = std::snprintf(out, cap, "%c %.2f", kVisLabels[idx], static_cast<double>(vals[0]));
         break;
     }
     case AETHER_PIN_VALUE_AUDIO:
-        written = std::snprintf(out, cap, "%.1fdB F1:%.0f", static_cast<double>(vals[0]),
-                                static_cast<double>(vals[2]));
+        written = std::snprintf(out, cap, "%.1fdB F1:%.0f", static_cast<double>(vals[0]), static_cast<double>(vals[2]));
         break;
     default:
         written = std::snprintf(out, cap, "--");
@@ -1560,9 +1557,8 @@ void NodeCanvas::layout_node(GraphNodeVm& n, const UiFontSet& fonts) const {
     const float header_need = 24.0f + title_w + 14.0f + tag_w + 10.0f;
     const float rows_need = t.node_label_inset + in_w + 20.0f + out_w + t.node_label_inset;
     const char* eval_sample = is_root_node_kind(n.kind.data()) ? "Root · Eval: 99.9 \xC2\xB5s" : "Eval: 99.9 \xC2\xB5s";
-    const float footer_need =
-        24.0f + text_w(caption, caption->FontSize, n.bypassed ? "Bypassed" : "Active") / dpi + 12.0f +
-        text_w(caption, caption->FontSize, eval_sample) / dpi + 10.0f;
+    const float footer_need = 24.0f + text_w(caption, caption->FontSize, n.bypassed ? "Bypassed" : "Active") / dpi +
+                              12.0f + text_w(caption, caption->FontSize, eval_sample) / dpi + 10.0f;
     n.w = std::ceil(std::max({t.node_min_w, header_need, rows_need, footer_need}));
     const float rows = static_cast<float>(std::max<uint8_t>(1, std::max(n.num_inputs, n.num_outputs)));
     n.h = t.node_header_h + rows * t.node_row_h + t.node_footer_h;
@@ -1948,7 +1944,7 @@ void NodeCanvas::handle_mouse(const CanvasXform& xf, const HoverInfo& hov, bool 
         break;
     }
 
-    if (interaction_ == Interaction::Wiring && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if (interaction_ == Interaction::Wiring && KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape, false)) {
         restore_detached_link();
         interaction_ = Interaction::None;
         return;
@@ -2030,23 +2026,26 @@ void NodeCanvas::handle_keyboard(const CanvasXform& xf, const KeymapRegistry& ke
     }
     const ImGuiIO& io = ImGui::GetIO();
     const bool no_mods = !io.KeyCtrl && !io.KeyAlt && !io.KeyShift;
-    if (keymap.is_pressed(ActionId::GraphDelete) || (no_mods && ImGui::IsKeyPressed(ImGuiKey_Backspace, false))) {
+    if (keymap.is_pressed(ActionId::GraphDelete) ||
+        (no_mods && KeymapRegistry::is_raw_key_pressed(ImGuiKey_Backspace, false))) {
         delete_selected(undo, actions);
     } else if (keymap.is_pressed(ActionId::GraphDuplicate)) {
         duplicate_selected(undo, actions);
     } else if (keymap.is_pressed(ActionId::GraphComment)) {
         wrap_selected_in_comment(undo, actions);
-    } else if (keymap.is_pressed(ActionId::GraphBypass) || (no_mods && ImGui::IsKeyPressed(ImGuiKey_M, false))) {
+    } else if (keymap.is_pressed(ActionId::GraphBypass) ||
+               (no_mods && KeymapRegistry::is_raw_key_pressed(ImGuiKey_M, false))) {
         toggle_bypass_selected(undo, actions);
     } else if (keymap.is_pressed(ActionId::GraphFrame)) {
         frame_all();
     } else if (keymap.is_pressed(ActionId::GraphRecompile)) {
         actions.request_recompile_graph_now = true;
-    } else if (keymap.is_pressed(ActionId::GraphAddNode) || (no_mods && ImGui::IsKeyPressed(ImGuiKey_Space, false))) {
+    } else if (keymap.is_pressed(ActionId::GraphAddNode) ||
+               (no_mods && KeymapRegistry::is_raw_key_pressed(ImGuiKey_Space, false))) {
         spawn_world_pos_ = xf.to_world(io.MousePos);
         open_canvas_ctx_ = true;
         spawn_from_wire_ = false;
-    } else if (no_mods && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    } else if (no_mods && KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape, false)) {
         clear_selection();
     }
 }
@@ -2187,7 +2186,8 @@ void NodeCanvas::draw_node(ImDrawList* dl, const CanvasXform& xf, GraphNodeVm& n
         char right_buf[48]{};
         if (has_eval) {
             if (is_root_node_kind(n.kind.data())) {
-                std::snprintf(right_buf, sizeof(right_buf), "Root · Eval: %.1f \xC2\xB5s", static_cast<double>(node_us));
+                std::snprintf(right_buf, sizeof(right_buf), "Root · Eval: %.1f \xC2\xB5s",
+                              static_cast<double>(node_us));
             } else {
                 std::snprintf(right_buf, sizeof(right_buf), "Eval: %.1f \xC2\xB5s", static_cast<double>(node_us));
             }
@@ -2291,6 +2291,248 @@ void NodeCanvas::draw_add_node_menu(UndoStack& undo, StudioActions& actions) {
             }
         }
     }
+}
+
+void NodeCanvas::draw_node_extra_controls(GraphNodeVm& n, float field_w, UndoStack& undo, StudioActions& actions) {
+    const std::string_view kbase = type_base(n.kind.data());
+    auto parse_extra = [&]() -> nlohmann::json {
+        if (n.extra_params_json.empty()) {
+            return nlohmann::json::object();
+        }
+        auto j = nlohmann::json::parse(n.extra_params_json, nullptr, false);
+        return j.is_object() ? j : nlohmann::json::object();
+    };
+    if (kbase == "aether.material.slot_override") {
+        nlohmann::json ex = parse_extra();
+        bool changed = false;
+        char slot_buf[64]{};
+        std::snprintf(slot_buf, sizeof(slot_buf), "%s", ex.value("slot_name", std::string{"*"}).c_str());
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::InputText(tr("Material Slot"), slot_buf, sizeof(slot_buf))) {
+            ex["slot_name"] = std::string(slot_buf);
+            changed = true;
+        }
+        static constexpr std::array<const char*, 8> kProfiles = {
+            "keep",        "2.5D Skin SDF", "Dual-Lobe Hair", "Micro-PBR Cloth",
+            "Eye Caustic", "Metallic",      "Glass",          "Emissive"};
+        const std::string cur_prof = ex.value("shader_profile", std::string{"keep"});
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::BeginCombo(tr("Shader Profile"), cur_prof.c_str())) {
+            for (const char* p : kProfiles) {
+                const bool sel = (cur_prof == p);
+                if (ImGui::Selectable(p, sel)) {
+                    ex["shader_profile"] = std::string(p);
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        float sc[3]{0.72f, 0.75f, 0.85f};
+        if (ex.contains("shade_color") && ex["shade_color"].is_array() && ex["shade_color"].size() >= 3) {
+            sc[0] = ex["shade_color"][0].get<float>();
+            sc[1] = ex["shade_color"][1].get<float>();
+            sc[2] = ex["shade_color"][2].get<float>();
+        }
+        if (ImGui::ColorEdit3(tr("Shade Color"), sc, ImGuiColorEditFlags_NoInputs)) {
+            ex["shade_color"] = {sc[0], sc[1], sc[2], 1.0f};
+            changed = true;
+        }
+        uint32_t rt_mask = ex.value("rt_shadow_mask", 0x7u);
+        bool rt_hair = (rt_mask & 1u) != 0u;
+        bool rt_hands = (rt_mask & 2u) != 0u;
+        bool rt_self = (rt_mask & 4u) != 0u;
+        const bool rt_hair_changed = ImGui::Checkbox(tr("RT Hair Shadow"), &rt_hair);
+        const bool rt_hand_changed = ImGui::Checkbox(tr("RT Hand Shadow"), &rt_hands);
+        const bool rt_self_changed = ImGui::Checkbox(tr("RT Self Shadow"), &rt_self);
+        if (rt_hair_changed || rt_hand_changed || rt_self_changed) {
+            rt_mask = (rt_hair ? 1u : 0u) | (rt_hands ? 2u : 0u) | (rt_self ? 4u : 0u);
+            ex["rt_shadow_mask"] = rt_mask;
+            changed = true;
+        }
+        if (changed) {
+            n.extra_params_json = ex.dump();
+            commit_edit("Edit Material Slot Override", undo, actions);
+        }
+        ImGui::Separator();
+    } else if (kbase == "aether.texture.asset") {
+        nlohmann::json ex = parse_extra();
+        bool changed = false;
+        char path_buf[256]{};
+        std::snprintf(path_buf, sizeof(path_buf), "%s", ex.value("path", std::string{}).c_str());
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::InputText(tr("Texture Path"), path_buf, sizeof(path_buf))) {
+            ex["path"] = std::string(path_buf);
+            changed = true;
+        }
+        bool is_srgb = (ex.value("color_space", std::string{"srgb"}) != "linear");
+        if (ImGui::Checkbox(tr("sRGB Color Space"), &is_srgb)) {
+            ex["color_space"] = is_srgb ? "srgb" : "linear";
+            changed = true;
+        }
+        bool is_spout = ex.value("use_spout2", ex.value("spout_enabled", false));
+        if (ImGui::Checkbox(tr("Spout2 Live Receiver"), &is_spout)) {
+            ex["use_spout2"] = is_spout;
+            changed = true;
+        }
+        static constexpr std::array<const char*, 6> kTexSlots = {"albedo", "shade", "normal",
+                                                                 "matcap", "toon",  "emissive"};
+        const std::string cur_slot = ex.value("target_slot", std::string{"albedo"});
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::BeginCombo(tr("Target Slot"), cur_slot.c_str())) {
+            for (const char* s : kTexSlots) {
+                if (ImGui::Selectable(s, cur_slot == s)) {
+                    ex["target_slot"] = std::string(s);
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (changed) {
+            n.extra_params_json = ex.dump();
+            commit_edit("Edit Texture Asset Node", undo, actions);
+        }
+        ImGui::Separator();
+    } else if (kbase == "aether.texture.grade") {
+        nlohmann::json ex = parse_extra();
+        float tint[3]{1.0f, 1.0f, 1.0f};
+        if (ex.contains("tint") && ex["tint"].is_array() && ex["tint"].size() >= 3) {
+            tint[0] = ex["tint"][0].get<float>();
+            tint[1] = ex["tint"][1].get<float>();
+            tint[2] = ex["tint"][2].get<float>();
+        }
+        if (ImGui::ColorEdit3(tr("Tint Multiply"), tint, ImGuiColorEditFlags_NoInputs)) {
+            ex["tint"] = {tint[0], tint[1], tint[2], 1.0f};
+            n.extra_params_json = ex.dump();
+            commit_edit("Edit Texture Grade Tint", undo, actions);
+        }
+        ImGui::Separator();
+    } else if (kbase == "aether.material.dynamic_driver") {
+        nlohmann::json ex = parse_extra();
+        bool changed = false;
+        static constexpr std::array<const char*, 5> kSignals = {"audio_rms", "circadian_time", "blink_l", "mouth_open",
+                                                                "joy"};
+        static constexpr std::array<const char*, 3> kTargets = {"emissive_intensity", "blush_alpha", "rim_boost"};
+        const std::string cur_sig = ex.value("signal_source", std::string{"audio_rms"});
+        const std::string cur_tgt = ex.value("target_param", std::string{"emissive_intensity"});
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::BeginCombo(tr("Signal Source"), cur_sig.c_str())) {
+            for (const char* s : kSignals) {
+                if (ImGui::Selectable(s, cur_sig == s)) {
+                    ex["signal_source"] = std::string(s);
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SetNextItemWidth(field_w);
+        if (ImGui::BeginCombo(tr("Target Param"), cur_tgt.c_str())) {
+            for (const char* tg : kTargets) {
+                if (ImGui::Selectable(tg, cur_tgt == tg)) {
+                    ex["target_param"] = std::string(tg);
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (changed) {
+            n.extra_params_json = ex.dump();
+            commit_edit("Edit Dynamic Material Driver", undo, actions);
+        }
+        ImGui::Separator();
+    }
+}
+
+void NodeCanvas::draw_selected_node_inspector(uint64_t preferred_node_id, const UiFontSet& fonts, UndoStack& undo,
+                                              StudioActions& actions) {
+    const PrecisionDarkTokens& t = tokens();
+    int ni = (preferred_node_id != 0) ? find_node_index(preferred_node_id) : -1;
+    if (ni < 0) {
+        for (size_t i = 0; i < nodes_.size(); ++i) {
+            if (nodes_[i].selected) {
+                ni = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    if (ni < 0) {
+        ImGui::TextColored(t.text_tertiary, "%s", tr("Select a node in the Node Graph canvas to inspect parameters."));
+        return;
+    }
+
+    GraphNodeVm& n = nodes_[static_cast<size_t>(ni)];
+    const bool root = is_root_node_kind(n.kind.data());
+    ImGui::PushID(static_cast<int>(n.id & 0x7FFFFFFFull));
+
+    ImGui::TextColored(t.text_primary, "%s", n.title.data());
+    if (fonts.mono != nullptr) {
+        ImGui::PushFont(fonts.mono);
+    }
+    ImGui::TextColored(t.text_tertiary, "%s", n.kind.data());
+    if (fonts.mono != nullptr) {
+        ImGui::PopFont();
+    }
+    if (n.param_id[0] != '\0') {
+        ImGui::TextColored(t.text_secondary, "Bound Param: %s", n.param_id.data());
+    }
+    ImGui::Separator();
+
+    bool bypass = n.bypassed;
+    if (ImGui::Checkbox(tr("Bypass / Mute Node"), &bypass)) {
+        (void)set_node_bypassed(n.id, bypass, undo, actions);
+    }
+
+    const float field_w = std::max(120.0f, ImGui::GetContentRegionAvail().x * 0.56f);
+    draw_node_extra_controls(n, field_w, undo, actions);
+
+    bool any_pin_shown = false;
+    for (uint8_t p = 0; p < n.num_inputs && p < kMaxNodePins; ++p) {
+        const auto& pin = n.inputs[p];
+        if (pin.kind != PinDataKind::Float && pin.kind != PinDataKind::Bool) {
+            continue;
+        }
+        any_pin_shown = true;
+        const bool wired = (find_input_link(n.id, p) != nullptr);
+        ImGui::PushID(static_cast<int>(p));
+        if (wired) {
+            ImGui::BeginDisabled(true);
+            ImGui::LabelText(pin.name.data(), "%s", tr("<Wired>"));
+            ImGui::EndDisabled();
+        } else if (pin.kind == PinDataKind::Bool) {
+            bool bval = (n.input_values[p] >= 0.5f);
+            if (ImGui::Checkbox(pin.name.data(), &bval)) {
+                n.input_values[p] = bval ? 1.0f : 0.0f;
+                n.input_value_set[p] = true;
+                commit_edit("Edit Node Input", undo, actions);
+            }
+        } else {
+            float fval = n.input_values[p];
+            ImGui::SetNextItemWidth(field_w);
+            if (ImGui::DragFloat(pin.name.data(), &fval, 0.02f, -100.0f, 100.0f, "%.3f")) {
+                n.input_values[p] = fval;
+                n.input_value_set[p] = true;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                n.input_value_set[p] = true;
+                commit_edit("Edit Node Input", undo, actions);
+            }
+        }
+        ImGui::PopID();
+    }
+    if (!any_pin_shown) {
+        ImGui::TextColored(t.text_tertiary, "%s", tr("No editable scalar input pins."));
+    }
+    ImGui::Spacing();
+    if (ImGui::Button(tr("Recompile Graph"), ImVec2(-FLT_MIN, 0.0f))) {
+        actions.pending_graph_json = serialize_graph_json();
+        actions.request_apply_graph_json = true;
+        actions.request_recompile_graph_now = true;
+    }
+    if (!root) {
+        if (ImGui::Button(tr("Break All Node Links"), ImVec2(-FLT_MIN, 0.0f))) {
+            (void)break_node_links(n.id, undo, actions);
+        }
+    }
+    ImGui::PopID();
 }
 
 void NodeCanvas::draw_context_menus(const CanvasXform& xf, UndoStack& undo, StudioActions& actions) {
@@ -2411,152 +2653,7 @@ void NodeCanvas::draw_context_menus(const CanvasXform& xf, UndoStack& undo, Stud
             ImGui::TextColored(t.text_tertiary, "%s", n.kind.data());
             ImGui::Separator();
 
-            const std::string_view kbase = type_base(n.kind.data());
-            auto parse_extra = [&]() -> nlohmann::json {
-                if (n.extra_params_json.empty()) {
-                    return nlohmann::json::object();
-                }
-                auto j = nlohmann::json::parse(n.extra_params_json, nullptr, false);
-                return j.is_object() ? j : nlohmann::json::object();
-            };
-            if (kbase == "aether.material.slot_override") {
-                nlohmann::json ex = parse_extra();
-                bool changed = false;
-                char slot_buf[64]{};
-                std::snprintf(slot_buf, sizeof(slot_buf), "%s", ex.value("slot_name", std::string{"*"}).c_str());
-                ImGui::SetNextItemWidth(160.0f);
-                if (ImGui::InputText(tr("Material Slot"), slot_buf, sizeof(slot_buf))) {
-                    ex["slot_name"] = std::string(slot_buf);
-                    changed = true;
-                }
-                static constexpr std::array<const char*, 8> kProfiles = {
-                    "keep",         "2.5D Skin SDF", "Dual-Lobe Hair", "Micro-PBR Cloth",
-                    "Eye Caustic",  "Metallic",      "Glass",          "Emissive"};
-                const std::string cur_prof = ex.value("shader_profile", std::string{"keep"});
-                ImGui::SetNextItemWidth(160.0f);
-                if (ImGui::BeginCombo(tr("Shader Profile"), cur_prof.c_str())) {
-                    for (const char* p : kProfiles) {
-                        const bool sel = (cur_prof == p);
-                        if (ImGui::Selectable(p, sel)) {
-                            ex["shader_profile"] = std::string(p);
-                            changed = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                float sc[3]{0.72f, 0.75f, 0.85f};
-                if (ex.contains("shade_color") && ex["shade_color"].is_array() && ex["shade_color"].size() >= 3) {
-                    sc[0] = ex["shade_color"][0].get<float>();
-                    sc[1] = ex["shade_color"][1].get<float>();
-                    sc[2] = ex["shade_color"][2].get<float>();
-                }
-                if (ImGui::ColorEdit3(tr("Shade Color"), sc, ImGuiColorEditFlags_NoInputs)) {
-                    ex["shade_color"] = {sc[0], sc[1], sc[2], 1.0f};
-                    changed = true;
-                }
-                uint32_t rt_mask = ex.value("rt_shadow_mask", 0x7u);
-                bool rt_hair = (rt_mask & 1u) != 0u;
-                bool rt_hands = (rt_mask & 2u) != 0u;
-                bool rt_self = (rt_mask & 4u) != 0u;
-                if (ImGui::Checkbox(tr("RT Hair Shadow"), &rt_hair) |
-                    ImGui::Checkbox(tr("RT Hand Shadow"), &rt_hands) |
-                    ImGui::Checkbox(tr("RT Self Shadow"), &rt_self)) {
-                    rt_mask = (rt_hair ? 1u : 0u) | (rt_hands ? 2u : 0u) | (rt_self ? 4u : 0u);
-                    ex["rt_shadow_mask"] = rt_mask;
-                    changed = true;
-                }
-                if (changed) {
-                    n.extra_params_json = ex.dump();
-                    commit_edit("Edit Material Slot Override", undo, actions);
-                }
-                ImGui::Separator();
-            } else if (kbase == "aether.texture.asset") {
-                nlohmann::json ex = parse_extra();
-                bool changed = false;
-                char path_buf[256]{};
-                std::snprintf(path_buf, sizeof(path_buf), "%s", ex.value("path", std::string{}).c_str());
-                ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::InputText(tr("Texture Path"), path_buf, sizeof(path_buf))) {
-                    ex["path"] = std::string(path_buf);
-                    changed = true;
-                }
-                bool is_srgb = (ex.value("color_space", std::string{"srgb"}) != "linear");
-                if (ImGui::Checkbox(tr("sRGB Color Space"), &is_srgb)) {
-                    ex["color_space"] = is_srgb ? "srgb" : "linear";
-                    changed = true;
-                }
-                bool is_spout = ex.value("use_spout2", ex.value("spout_enabled", false));
-                if (ImGui::Checkbox(tr("Spout2 Live Receiver"), &is_spout)) {
-                    ex["use_spout2"] = is_spout;
-                    changed = true;
-                }
-                static constexpr std::array<const char*, 6> kTexSlots = {
-                    "albedo", "shade", "normal", "matcap", "toon", "emissive"};
-                const std::string cur_slot = ex.value("target_slot", std::string{"albedo"});
-                ImGui::SetNextItemWidth(160.0f);
-                if (ImGui::BeginCombo(tr("Target Slot"), cur_slot.c_str())) {
-                    for (const char* s : kTexSlots) {
-                        if (ImGui::Selectable(s, cur_slot == s)) {
-                            ex["target_slot"] = std::string(s);
-                            changed = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                if (changed) {
-                    n.extra_params_json = ex.dump();
-                    commit_edit("Edit Texture Asset Node", undo, actions);
-                }
-                ImGui::Separator();
-            } else if (kbase == "aether.texture.grade") {
-                nlohmann::json ex = parse_extra();
-                float tint[3]{1.0f, 1.0f, 1.0f};
-                if (ex.contains("tint") && ex["tint"].is_array() && ex["tint"].size() >= 3) {
-                    tint[0] = ex["tint"][0].get<float>();
-                    tint[1] = ex["tint"][1].get<float>();
-                    tint[2] = ex["tint"][2].get<float>();
-                }
-                if (ImGui::ColorEdit3(tr("Tint Multiply"), tint, ImGuiColorEditFlags_NoInputs)) {
-                    ex["tint"] = {tint[0], tint[1], tint[2], 1.0f};
-                    n.extra_params_json = ex.dump();
-                    commit_edit("Edit Texture Grade Tint", undo, actions);
-                }
-                ImGui::Separator();
-            } else if (kbase == "aether.material.dynamic_driver") {
-                nlohmann::json ex = parse_extra();
-                bool changed = false;
-                static constexpr std::array<const char*, 5> kSignals = {
-                    "audio_rms", "circadian_time", "blink_l", "mouth_open", "joy"};
-                static constexpr std::array<const char*, 3> kTargets = {
-                    "emissive_intensity", "blush_alpha", "rim_boost"};
-                const std::string cur_sig = ex.value("signal_source", std::string{"audio_rms"});
-                const std::string cur_tgt = ex.value("target_param", std::string{"emissive_intensity"});
-                ImGui::SetNextItemWidth(160.0f);
-                if (ImGui::BeginCombo(tr("Signal Source"), cur_sig.c_str())) {
-                    for (const char* s : kSignals) {
-                        if (ImGui::Selectable(s, cur_sig == s)) {
-                            ex["signal_source"] = std::string(s);
-                            changed = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::SetNextItemWidth(160.0f);
-                if (ImGui::BeginCombo(tr("Target Param"), cur_tgt.c_str())) {
-                    for (const char* tg : kTargets) {
-                        if (ImGui::Selectable(tg, cur_tgt == tg)) {
-                            ex["target_param"] = std::string(tg);
-                            changed = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                if (changed) {
-                    n.extra_params_json = ex.dump();
-                    commit_edit("Edit Dynamic Material Driver", undo, actions);
-                }
-                ImGui::Separator();
-            }
+            draw_node_extra_controls(n, 160.0f, undo, actions);
 
             if (ImGui::MenuItem(tr("Break All Node Links"))) {
                 (void)break_node_links(ctx_node_id_, undo, actions);
@@ -2823,7 +2920,8 @@ void NodeCanvas::draw(const StudioHostStatus& host_status, UndoStack& undo, cons
 
     // Floating live Watch Pin Value badges (fixed-capacity array, zero per-frame allocations)
     if (watched_pin_count_ > 0 && zoom_ >= 0.4f) {
-        ImFont* watch_font = fonts.mono != nullptr ? fonts.mono : (fonts.caption != nullptr ? fonts.caption : ImGui::GetFont());
+        ImFont* watch_font =
+            fonts.mono != nullptr ? fonts.mono : (fonts.caption != nullptr ? fonts.caption : ImGui::GetFont());
         const float w_px = std::max(8.0f, watch_font->FontSize * zoom_);
         for (size_t wi = 0; wi < watched_pin_count_; ++wi) {
             const PinRef wp = watched_pins_[wi];
@@ -2832,8 +2930,8 @@ void NodeCanvas::draw(const StudioHostStatus& host_status, UndoStack& undo, cons
                 continue;
             }
             const ImVec2 pp = pin_screen_pos(xf, *wn, wp.output, wp.pin);
-            if (pp.x + 120.0f * dpi < origin.x || pp.x - 120.0f * dpi > canvas_max.x ||
-                pp.y + 30.0f * dpi < origin.y || pp.y - 30.0f * dpi > canvas_max.y) {
+            if (pp.x + 120.0f * dpi < origin.x || pp.x - 120.0f * dpi > canvas_max.x || pp.y + 30.0f * dpi < origin.y ||
+                pp.y - 30.0f * dpi > canvas_max.y) {
                 continue;
             }
             char val_buf[48]{};
@@ -2847,7 +2945,8 @@ void NodeCanvas::draw(const StudioHostStatus& host_status, UndoStack& undo, cons
             const float bw = pad_x * 2.0f + dot_r * 2.0f + 5.0f * dpi + text_width;
             const float bh = w_px + pad_y * 2.0f;
             const float gap = 10.0f * xf.zs;
-            const ImVec2 b0 = wp.output ? ImVec2(pp.x + gap, pp.y - bh * 0.5f) : ImVec2(pp.x - gap - bw, pp.y - bh * 0.5f);
+            const ImVec2 b0 =
+                wp.output ? ImVec2(pp.x + gap, pp.y - bh * 0.5f) : ImVec2(pp.x - gap - bw, pp.y - bh * 0.5f);
             const ImVec2 b1(b0.x + bw, b0.y + bh);
             const ImU32 pcol = pin_color(pin_kind(wp));
             dl->AddLine(pp, ImVec2(wp.output ? b0.x : b1.x, pp.y), col32_with_alpha(pcol, 0xCC), 1.5f * dpi);

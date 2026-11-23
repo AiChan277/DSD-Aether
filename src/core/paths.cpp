@@ -44,9 +44,9 @@ std::wstring utf8_to_wide(std::string_view s) {
     return out;
 }
 
-std::filesystem::path known_local_app_data() {
+std::filesystem::path known_folder_or_fallback(const KNOWNFOLDERID& folder_id) {
     PWSTR raw = nullptr;
-    if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &raw)) && raw != nullptr) {
+    if (SUCCEEDED(::SHGetKnownFolderPath(folder_id, 0, nullptr, &raw)) && raw != nullptr) {
         std::filesystem::path p(raw);
         ::CoTaskMemFree(raw);
         return p;
@@ -55,6 +55,18 @@ std::filesystem::path known_local_app_data() {
         ::CoTaskMemFree(raw);
     }
     return std::filesystem::current_path();
+}
+
+std::filesystem::path known_local_app_data() {
+    return known_folder_or_fallback(FOLDERID_LocalAppData);
+}
+
+std::filesystem::path known_roaming_app_data() {
+    return known_folder_or_fallback(FOLDERID_RoamingAppData);
+}
+
+std::filesystem::path known_documents_dir() {
+    return known_folder_or_fallback(FOLDERID_Documents);
 }
 #endif
 
@@ -94,21 +106,26 @@ std::filesystem::path find_assets_root(const std::filesystem::path& exe_dir) {
 
 } // namespace
 
-RuntimePaths discover_runtime_paths() {
+RuntimePaths discover_runtime_paths(const std::filesystem::path* exe_dir_override) {
     RuntimePaths out{};
     std::error_code ec;
-    const std::filesystem::path exe_dir = executable_directory();
+    const std::filesystem::path exe_dir =
+        (exe_dir_override != nullptr && !exe_dir_override->empty()) ? *exe_dir_override : executable_directory();
     out.exe_dir = wide_to_utf8(exe_dir.native());
 
     const bool portable = std::filesystem::exists(exe_dir / "portable.flag", ec);
     out.portable_mode = portable;
 
+    const std::filesystem::path local_legacy = known_local_app_data() / "AetherStudio";
     const std::filesystem::path base_data =
-        portable ? (exe_dir / "UserData") : (known_local_app_data() / "AetherStudio");
+        portable ? (exe_dir / "userdata") : (known_roaming_app_data() / "AETHER-2.5D-Studio");
+    const std::filesystem::path base_runtime_cache = portable ? base_data : local_legacy;
+    const std::filesystem::path default_projects =
+        portable ? (base_data / "Projects") : (known_documents_dir() / "AETHER-2.5D Projects");
 
-    const std::filesystem::path cache = base_data / "Cache";
-    const std::filesystem::path logs = base_data / "Logs";
-    const std::filesystem::path crash = base_data / "CrashDumps";
+    const std::filesystem::path cache = base_runtime_cache / "Cache";
+    const std::filesystem::path logs = base_runtime_cache / "Logs";
+    const std::filesystem::path crash = base_runtime_cache / "CrashDumps";
     const std::filesystem::path assets = find_assets_root(exe_dir);
 
     std::filesystem::create_directories(base_data, ec);
@@ -117,9 +134,11 @@ RuntimePaths discover_runtime_paths() {
     std::filesystem::create_directories(crash, ec);
 
     out.app_data_dir = wide_to_utf8(base_data.native());
+    out.legacy_app_data_dir = wide_to_utf8(local_legacy.native());
     out.cache_dir = wide_to_utf8(cache.native());
     out.logs_dir = wide_to_utf8(logs.native());
     out.crash_dir = wide_to_utf8(crash.native());
+    out.default_projects_dir = wide_to_utf8(default_projects.native());
     out.assets_dir = wide_to_utf8(assets.native());
     return out;
 }

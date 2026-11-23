@@ -426,7 +426,10 @@ fn detect_convention(joints: &[RawJoint]) -> SkeletonConvention {
 fn is_mmd_cog_ancestor(name: &str) -> bool {
     let n: String = name.nfkc().collect();
     let t = n.trim();
-    matches!(t, "センター" | "グルーブ" | "全ての親" | "center" | "groove" | "motherbone")
+    matches!(
+        t,
+        "センター" | "グルーブ" | "全ての親" | "center" | "groove" | "motherbone"
+    )
 }
 
 fn exact_alias_match(

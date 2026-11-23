@@ -44,6 +44,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float3 n0 = oct_decode(aether_load(gb_n_slot, p).xy);
     uint raw_m0 = aether_uload(gb_mat_slot, p).x;
     uint m0 = raw_m0 & 0x3FFu;
+    uint g0 = (raw_m0 >> 24u) & 0xFFu;
     bool skin0 = ((raw_m0 & 0x3000u) != 0u);
     float crease_w = float((raw_m0 >> 16u) & 0xFFu) / 255.0;
     float edge_scale0 = ((raw_m0 & 0x4000u) != 0u) ? 0.0 : 1.0;
@@ -75,6 +76,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             float3 n1 = (d1 >= 0.99998) ? n0 : oct_decode(aether_load(gb_n_slot, np).xy);
             uint raw_m1 = aether_uload(gb_mat_slot, np).x;
             uint m1 = raw_m1 & 0x3FFu;
+            uint g1 = (raw_m1 >> 24u) & 0xFFu;
             bool skin1 = ((raw_m1 & 0x3000u) != 0u);
             if (!skin1 || d1 >= 0.99998) {
                 all_neighbors_skin = false;
@@ -91,16 +93,18 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             dog_n += (1.0 - saturate(dot(n0, n1)));
 
             if (abs(dx) + abs(dy) == 1 && d1 < 0.99998) {
-                if (!(skin0 && skin1)) {
+                if (fg.vrm_parity_params1.y > 0.5 && g0 != 0u && g1 != 0u && g0 != g1) {
+                    max_mat_edge = max(max_mat_edge, 0.72);
+                } else if (!(skin0 && skin1)) {
                     if (dot(n0, n1) < cos_thresh) {
                         max_n_ang = 1.0;
                     }
                     if (m0 != m1) {
-                        max_mat_edge = 0.55;
+                        max_mat_edge = max(max_mat_edge, 0.42);
                     }
                 } else if (m0 != m1) {
                     // Explicit 0% skin-to-skin Iro-Tsuke ink across jaw-to-neck Face/Body submesh interface
-                    max_mat_edge = 0.0;
+                    max_mat_edge = max(max_mat_edge, 0.0);
                 }
             }
             ++k;

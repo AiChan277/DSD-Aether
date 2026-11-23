@@ -1,6 +1,10 @@
+#include "aether/ui_state_contract.hpp"
+#include "core/alfx_serializer.hpp"
+#include "core/apr_serializer.hpp"
 #include "core/hot_path_guard.hpp"
 #include "core/hw_enum.hpp"
 #include "core/paths.hpp"
+#include "core/session_manager.hpp"
 #include "core/telemetry.hpp"
 #include "core/viewport_aspect.hpp"
 #include "renderer/frame_graph.hpp"
@@ -10,6 +14,7 @@
 #include "ui/params/param_registry.hpp"
 #include "ui/params/project_settings.hpp"
 #include "ui/params/undo_stack.hpp"
+#include "ui/project_manager_window.hpp"
 #include "ui/theme/precision_dark.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/widgets/property_row.hpp"
@@ -28,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -84,7 +90,7 @@ struct ScopedUiRig {
 TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project reset", "[ui][params]") {
     const auto specs = all_param_specs();
     REQUIRE(specs.size() == kParamCount);
-    REQUIRE(kParamCount == 111U); // 97 + Phase 1 Studio Fixture & Optical Modifiers/Satsuei/Holo-Grading (14)
+    REQUIRE(kParamCount == 95U); // Rev 3.1 Single Lighting Authority removed 16 legacy Key/Fill/Rim/Fixture params
 
     for (const auto& sp : specs) {
         REQUIRE(sp.id != nullptr);
@@ -98,13 +104,11 @@ TEST_CASE("ParamStore enforces parameter registry bounds, epochs, and project re
     REQUIRE(store.get_int(ParamId::AppUiScalePct) == 125);
     REQUIRE(store.epoch() > e0);
 
-    // Photometric fixture & [TESTING] crease disguise parameter bounds
-    // Photometric fixture, catchlight & [TESTING] crease disguise defaults + bounds
+    // Quick Key Orb defaults to OFF (Rev 3.1 §2.4), catchlight & [TESTING] crease disguise defaults + bounds
+    REQUIRE_FALSE(store.get_bool(ParamId::AppOrbitOrbVisible));
     REQUIRE_FALSE(store.get_bool(ParamId::RenderCreaseDisguiseEnabled));
     (void)store.set(ParamId::RenderEyeCatchlightIntensity, 9.0);
     REQUIRE(store.get_float(ParamId::RenderEyeCatchlightIntensity) <= 2.0f);
-    (void)store.set(ParamId::RenderLightingFixture, 99.0);
-    REQUIRE(store.get_int(ParamId::RenderLightingFixture) <= 5);
 
     // Out-of-bounds + NaN clamping
     (void)store.set(ParamId::RenderFlatness, 99.0);
@@ -133,30 +137,30 @@ TEST_CASE("UndoStack enforces 200-entry eviction, drag coalescing, and graph rou
     };
 
     for (int i = 0; i < 220; ++i) {
-        const double prev = static_cast<double>(i) * 0.5;
-        const double next = static_cast<double>(i + 1) * 0.5;
-        undo.push_param(ParamId::RenderKeyAzimuthDeg, prev, next);
+        const double prev = static_cast<double>(i) * 0.004;
+        const double next = static_cast<double>(i + 1) * 0.004;
+        undo.push_param(ParamId::RenderFlatness, prev, next);
     }
     REQUIRE(undo.undo_count() == UndoStack::kMaxEntries);
     REQUIRE(UndoStack::kMaxEntries == 200U);
     REQUIRE(undo.is_dirty());
 
     REQUIRE(undo.undo(ctx));
-    REQUIRE(std::fabs(store.get(ParamId::RenderKeyAzimuthDeg) - 109.5) < 1e-6);
+    REQUIRE(std::fabs(store.get(ParamId::RenderFlatness) - 0.876) < 1e-6);
     REQUIRE(undo.redo(ctx));
-    REQUIRE(std::fabs(store.get(ParamId::RenderKeyAzimuthDeg) - 110.0) < 1e-6);
+    REQUIRE(std::fabs(store.get(ParamId::RenderFlatness) - 0.880) < 1e-6);
 
     // Drag coalescing produces exactly 1 undo entry
     const size_t before_drag_cnt = undo.undo_count();
-    undo.begin_drag(ParamId::RenderKeyIntensity, 1.0);
-    (void)store.set(ParamId::RenderKeyIntensity, 1.4);
-    (void)store.set(ParamId::RenderKeyIntensity, 2.2);
-    undo.commit_drag(ParamId::RenderKeyIntensity, 2.2);
+    undo.begin_drag(ParamId::RenderOutlineScale, 1.0);
+    (void)store.set(ParamId::RenderOutlineScale, 1.4);
+    (void)store.set(ParamId::RenderOutlineScale, 2.2);
+    undo.commit_drag(ParamId::RenderOutlineScale, 2.2);
     REQUIRE(undo.undo_count() == before_drag_cnt); // capped at 200 if already full, so test fresh stack too
 
     UndoStack fresh;
-    fresh.begin_drag(ParamId::RenderKeyIntensity, 1.0);
-    fresh.commit_drag(ParamId::RenderKeyIntensity, 2.5);
+    fresh.begin_drag(ParamId::RenderOutlineScale, 1.0);
+    fresh.commit_drag(ParamId::RenderOutlineScale, 2.5);
     REQUIRE(fresh.undo_count() == 1U);
     fresh.push_graph_edit("Connect Pin", "{\"nodes\":[]}", "{\"nodes\":[{\"id\":1}]}");
     REQUIRE(fresh.undo_count() == 2U);
@@ -448,7 +452,7 @@ TEST_CASE("StudioWorkspace meets <= 0.40 ms CPU budget, zero steady-state allocs
 
     for (int f = 80; f < 200; ++f) {
         if (f == 100) {
-            (void)ws.params().set(ParamId::RenderKeyAzimuthDeg, 48.0);
+            (void)ws.params().set(ParamId::RenderFlatness, 0.42);
             (void)ws.params().set(ParamId::AppSkeletonHeatmap, 1.0);
         }
 
@@ -472,7 +476,7 @@ TEST_CASE("StudioWorkspace meets <= 0.40 ms CPU budget, zero steady-state allocs
 
     // Verify immediate parameter-to-action coupling (§12.16)
     REQUIRE(actions.viewport.lighting_dirty);
-    REQUIRE(std::fabs(actions.viewport.key_azimuth_deg - 48.0f) < 1e-3f);
+    REQUIRE(std::fabs(actions.viewport.live2d_flatness - 0.42f) < 1e-3f);
     REQUIRE(actions.viewport.show_skeleton_heatmap);
 
     std::sort(frame_ms.begin(), frame_ms.end());
@@ -1115,8 +1119,10 @@ TEST_CASE("Viewport HUD collapse/close, Light Orb collision shift, Camera Preset
     aether::ui::DevShellOutputView output_view{};
     aether::ui::StudioActions actions{};
 
-    // Hand tracking defaults to disabled (`false`)
+    // Hand tracking & Quick Key Orb default to disabled (`false`)
     CHECK_FALSE(rig.ws.params().get_bool(ParamId::TrackingHandEnabled));
+    CHECK_FALSE(rig.ws.params().get_bool(ParamId::AppOrbitOrbVisible));
+    (void)rig.ws.params().set(ParamId::AppOrbitOrbVisible, 1.0);
 
     // Render on tall viewport with expanded HUD: HUD drawn and Light Orb stays bottom-right without overlap
     for (int f = 0; f < 5; ++f) {
@@ -1267,49 +1273,57 @@ TEST_CASE("Viewport HUD collapse/close, Light Orb collision shift, Camera Preset
     CHECK(actions.viewport.target_hand_tracking_enabled);
 }
 
-TEST_CASE("Phase 2 Lighting Tab: 16-light Mixer, Rigs JSON roundtrip, 7 Stage Cameras & Ctrl+Alt+Q Quad View",
+TEST_CASE("Phase 2 Lighting Tab: 16-light Mixer, .alfx Preset roundtrip, 7 Stage Cameras & Ctrl+Alt+Q Quad View",
           "[ui][phase2][lighting]") {
     using namespace aether::renderer;
     using namespace aether::ui;
 
     const aether::RuntimePaths paths = aether::discover_runtime_paths();
     const auto repo_root = std::filesystem::path(paths.assets_dir).parent_path();
-    const auto cfg_rigs = repo_root / "config" / "lighting_rigs.json";
-    REQUIRE(std::filesystem::is_regular_file(cfg_rigs));
+    const auto alfx_dir = repo_root / "presets" / "alfx";
+    REQUIRE(std::filesystem::is_directory(alfx_dir));
+    REQUIRE_FALSE(std::filesystem::exists(repo_root / "config" / "lighting_rigs.json"));
 
-    // 1. Validate shipped config/lighting_rigs.json loads all 5 built-in presets cleanly
+    // 1. Validate shipped presets/alfx/*.alfx packages load all 5 built-in presets cleanly & round-trip via
+    // AlfxSerializer
     {
-        std::vector<StudioRigPresetRecord> presets;
-        REQUIRE(load_lighting_rigs_json(cfg_rigs, presets));
-        REQUIRE(presets.size() >= 5U);
-        CHECK(std::string(presets[0].name.data()) == "Three-Point Broadcast");
-        CHECK(std::string(presets[1].name.data()) == "Dramatic Rim Split");
-        CHECK(presets[1].rig.studio_lights[1].passive_flag == PassiveFlagMode::NegativeFillBlack);
-        CHECK(std::string(presets[2].name.data()) == "Shinkai Golden Hour");
+        const auto catalog = aether::core::AlfxSerializer::builtin_preset_catalog();
+        std::vector<aether::core::AlfxDocument> presets;
+        presets.reserve(catalog.size());
+        for (const auto& info : catalog) {
+            const auto p = alfx_dir / info.filename;
+            REQUIRE(std::filesystem::is_regular_file(p));
+            auto doc_res = aether::core::AlfxSerializer::load_file(p);
+            REQUIRE(doc_res.has_value());
+            presets.push_back(std::move(doc_res.value()));
+        }
+        REQUIRE(presets.size() == 5U);
+        CHECK(presets[0].meta.name == "Studio Clean Daylight");
+        CHECK(presets[1].meta.name == "Anime Sunset Rim");
+        CHECK(presets[2].meta.name == "Cyber Neon Stage");
+        CHECK(presets[3].meta.name == "Soft Pastel VRM");
         CHECK(presets[3].rig.studio_lights[0].fixture == StudioFixtureProfile::BroadcastRing);
-        CHECK(std::string(presets[4].name.data()) == "Neon Cyberpunk Dual-Color");
+        CHECK(presets[4].meta.name == "Dramatic Chiaroscuro");
+        CHECK(presets[4].rig.studio_lights[1].passive_flag == PassiveFlagMode::NegativeFillBlack);
 
-        std::error_code ec;
-        const auto tmp_dir =
-            std::filesystem::temp_directory_path(ec) /
-            ("aether_rigs_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(tmp_dir, ec);
-        const auto save_path = tmp_dir / "custom_rigs.json";
-        LightingRig mod_rig = presets[0].rig;
-        const int added_idx = add_studio_light(mod_rig, StudioFixtureProfile::EllipsoidalLeko);
+        ScopedTempDir tmp{"aether_alfx_mixer_test_"};
+        const auto save_path = tmp.dir / "qa_gobo_rig.alfx";
+        aether::lighting::StudioLightingStore store;
+        store.rig() = presets[0].rig;
+        const int added_idx = add_studio_light(store.rig(), StudioFixtureProfile::EllipsoidalLeko);
         REQUIRE(added_idx >= 4);
-        mod_rig.studio_lights[static_cast<size_t>(added_idx)].gobo = StudioGoboPattern::AnimeClassroomSlats;
-        mod_rig.studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled = true;
-        REQUIRE(save_or_update_lighting_rig_preset(save_path, "QA Gobo Rig", mod_rig));
+        store.rig().studio_lights[static_cast<size_t>(added_idx)].gobo = StudioGoboPattern::AnimeClassroomSlats;
+        store.rig().studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled = true;
+        aether::core::AlfxMetadata meta{};
+        meta.name = "QA Gobo Rig";
+        REQUIRE(aether::core::AlfxSerializer::save_file(save_path, store, &meta).has_value());
 
-        std::vector<StudioRigPresetRecord> reloaded;
-        REQUIRE(load_lighting_rigs_json(save_path, reloaded));
-        REQUIRE(reloaded.size() == 6U);
-        CHECK(std::string(reloaded.back().name.data()) == "QA Gobo Rig");
-        CHECK(reloaded.back().rig.studio_lights[static_cast<size_t>(added_idx)].gobo ==
+        auto reloaded_res = aether::core::AlfxSerializer::load_file(save_path);
+        REQUIRE(reloaded_res.has_value());
+        CHECK(reloaded_res.value().meta.name == "QA Gobo Rig");
+        CHECK(reloaded_res.value().rig.studio_lights[static_cast<size_t>(added_idx)].gobo ==
               StudioGoboPattern::AnimeClassroomSlats);
-        CHECK(reloaded.back().rig.studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled);
-        std::filesystem::remove_all(tmp_dir, ec);
+        CHECK(reloaded_res.value().rig.studio_lights[static_cast<size_t>(added_idx)].barn_doors_enabled);
     }
 
     // 2. Dynamic add/duplicate/remove up to 16 studio lights + Passive Flags
@@ -1491,8 +1505,8 @@ TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and 
             actions.viewport.mutable_lighting_rig = &lrig;
             io.DeltaTime = 1.0f / 60.0f;
             ImGui::NewFrame();
-            rig.ws.render(0.016 * f, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view,
-                          output_view, actions);
+            rig.ws.render(0.016 * f, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view,
+                          actions);
             ImGui::Render();
         }
     };
@@ -1503,8 +1517,8 @@ TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and 
     const std::pair<float, float> kSizes[] = {{1600.0f, 900.0f}, {1600.0f, 360.0f}, {450.0f, 900.0f}};
     for (const auto& sz : kSizes) {
         // Test Free Cam (distance 4.5 to keep (1.0, 1.4, 0.8) in frame even on narrow 450x900) & Front Ortho
-        for (const auto view_mode : {aether::renderer::StageCameraView::FreePerspective,
-                                     aether::renderer::StageCameraView::OrthoFront}) {
+        for (const auto view_mode :
+             {aether::renderer::StageCameraView::FreePerspective, aether::renderer::StageCameraView::OrthoFront}) {
             rig.ws.lighting_stage().set_stage_view(view_mode, {0.0f, 1.35f, 0.0f});
             step_size(sz.first, sz.second, 4);
 
@@ -1552,8 +1566,8 @@ TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and 
     for (const auto& sz : {std::pair{1600.0f, 900.0f}, std::pair{1600.0f, 360.0f}, std::pair{450.0f, 900.0f}}) {
         const float asp = sz.first / sz.second;
         for (int vi = 0; vi <= 6; ++vi) {
-            auto cam = aether::renderer::make_stage_camera_preset(
-                static_cast<aether::renderer::StageCameraView>(vi), {0.0f, 1.35f, 0.0f}, 5.5f);
+            auto cam = aether::renderer::make_stage_camera_preset(static_cast<aether::renderer::StageCameraView>(vi),
+                                                                  {0.0f, 1.35f, 0.0f}, 5.5f);
             if (!cam.is_orthographic) {
                 cam.distance = 6.0f;
             }
@@ -1565,8 +1579,166 @@ TEST_CASE("LightingStageView enforces 1:1 pixel aspect, Quad/PiP isolation, and 
             const float u01 = (cx / cw) * 0.5f + 0.5f;
             const float v01 = 0.5f - (cy / cw) * 0.5f;
             INFO("aspect=" << asp << " vi=" << vi << " u01=" << u01 << " v01=" << v01);
-            CHECK(aether::renderer::pick_stage_studio_light(lrig, {0.0f, 1.35f, 0.0f}, eye_dummy, cam, u01, v01,
-                                                            asp, nullptr) == 1);
+            CHECK(aether::renderer::pick_stage_studio_light(lrig, {0.0f, 1.35f, 0.0f}, eye_dummy, cam, u01, v01, asp,
+                                                            nullptr) == 1);
         }
     }
+}
+
+TEST_CASE("Rev 3.1 Empirical Test #4: UI Deduplication, DirtyDomain propagation & ProjectManagerWindow",
+          "[ui][rev31][empirical]") {
+    using namespace aether::ui;
+    const aether::RuntimePaths paths = aether::discover_runtime_paths();
+    const auto repo_root = std::filesystem::path(paths.assets_dir).parent_path();
+
+    // 1. Static source deduplication audit across src/ui panels/modals (Rev 3.1 §1.2-§1.3).
+    auto read_txt = [](const std::filesystem::path& p) {
+        std::ifstream f(p, std::ios::binary);
+        REQUIRE(f.is_open());
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    {
+        const std::string insp = read_txt(repo_root / "src/ui/panels/inspector/inspector_panel.cpp");
+        CHECK(insp.find("GraphicsSettingsModal::draw_gpu_selector_combo") == std::string::npos);
+        CHECK(insp.find("draw_enum_row(fonts, params, ParamId::RenderLightingMode") == std::string::npos);
+        CHECK(insp.find("draw_toggle_row(fonts, params, ParamId::RenderCircadianEnabled") == std::string::npos);
+        CHECK(insp.find("params.set(ParamId::Render") == std::string::npos);
+        CHECK(insp.find("Lighting & Effects (.alfx)") != std::string::npos);
+        CHECK(insp.find("Edit in Lighting Workspace ->") != std::string::npos);
+
+        const std::string outl = read_txt(repo_root / "src/ui/panels/outliner/outliner_panel.cpp");
+        CHECK(outl.find("CollapsingHeader(tr(\"Avatar Source\"))") == std::string::npos);
+        CHECK(outl.find("CollapsingHeader(tr(\"Expressions (F1-F8)\"))") == std::string::npos);
+
+        const std::string gfx = read_txt(repo_root / "src/ui/modals/graphics_settings_modal.cpp");
+        CHECK(gfx.find("2D Illustration Style") == std::string::npos);
+        CHECK(gfx.find("RenderCircadianEnabled") == std::string::npos);
+
+        const std::string bar = read_txt(repo_root / "src/ui/panels/telemetry/telemetry_bar.cpp");
+        CHECK(bar.find("MenuItem(tr(\"Circadian Lighting\")") == std::string::npos);
+        CHECK(bar.find("MenuItem(tr(\"Ray Tracing\")") == std::string::npos);
+        CHECK(bar.find("MenuItem(tr(\"Project Manager...\")") != std::string::npos);
+        CHECK(bar.find("SmallButton(tr(\"Home\")") != std::string::npos);
+
+        const std::string vp = read_txt(repo_root / "src/ui/panels/viewport/viewport_panel.cpp");
+        const size_t hands_first = vp.find("tr(\"Hands\")");
+        REQUIRE(hands_first != std::string::npos);
+        CHECK(vp.find("toolbar_toggle(tr(\"Hands\")") != std::string::npos);
+        CHECK(vp.find("tr(\"Hands\")", hands_first + 1u) == std::string::npos);
+    }
+
+    // 2. DirtyDomain propagation & ProjectManagerWindow modal state machine under ImGui + Arena.
+    aether::rhi::RhiDeviceConfig rhi_cfg{};
+    rhi_cfg.enable_validation = false;
+    rhi_cfg.require_validation = false;
+    rhi_cfg.headless = true;
+    auto rhi_res = aether::rhi::RhiDevice::create(rhi_cfg);
+    REQUIRE(rhi_res.has_value());
+
+    aether::ui::ScopedUiRig rig{};
+    rig.rhi = rhi_res.value();
+    REQUIRE(rig.arena.init(16ULL * 1024ULL * 1024ULL));
+    REQUIRE(install_imgui_arena(rig.arena));
+    ImGui::CreateContext();
+    rig.imgui_init = true;
+    ImPlot::CreateContext();
+    rig.implot_init = true;
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(1440.0f, 860.0f);
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+    aether::HardwareInventory hw{};
+    rig.ws.init(paths, hw, 1.0f, nullptr, false);
+    rig.ws_init = true;
+    rig.ws.viewport_panel().set_persist_presets(false);
+
+    unsigned char* tex_px = nullptr;
+    int tw = 0;
+    int th = 0;
+    io.Fonts->GetTexDataAsAlpha8(&tex_px, &tw, &th);
+    io.Fonts->SetTexID(static_cast<ImTextureID>(1));
+
+    aether::StudioStateStore store{};
+    rig.ws.set_state_store(&store);
+    REQUIRE_FALSE(store.is_dirty());
+
+    aether::TelemetrySnapshot telem{};
+    DevShellInputEcho echo{};
+    DevShellAvatarView avatar{};
+    DevShellTrackingView tracking{};
+    DevShellRenderView render_view{};
+    DevShellOutputView output_view{};
+    StudioActions actions{};
+
+    auto step_ws = [&]() {
+        actions.reset_per_frame();
+        io.DeltaTime = 1.0f / 60.0f;
+        ImGui::NewFrame();
+        rig.ws.render(0.1, *rig.rhi, telem, echo, rig.arena, true, avatar, tracking, render_view, output_view, actions);
+        ImGui::Render();
+    };
+
+    // Global hardware param does NOT mark project dirty.
+    (void)rig.ws.params().set(ParamId::RenderTargetFps, 2.0);
+    step_ws();
+    CHECK_FALSE(store.is_dirty());
+
+    // Project-scoped edits mark exact DirtyDomain bits cleanly.
+    (void)rig.ws.params().set(ParamId::AvatarPosX, 0.25);
+    step_ws();
+    CHECK(store.is_domain_dirty(aether::DirtyDomain::AvatarState));
+    store.clear_dirty();
+
+    (void)rig.ws.params().set(ParamId::RenderFlatness, 0.50);
+    step_ws();
+    CHECK(store.is_domain_dirty(aether::DirtyDomain::EffectsFx));
+    store.clear_dirty();
+
+    (void)rig.ws.params().set(ParamId::OutputResolution, 2.0);
+    step_ws();
+    CHECK(store.is_domain_dirty(aether::DirtyDomain::OutputsCfg));
+    store.clear_dirty();
+
+    (void)rig.ws.params().set(ParamId::TrackingHandEnabled, 1.0);
+    step_ws();
+    CHECK(store.is_domain_dirty(aether::DirtyDomain::TrackingCfg));
+    store.clear_dirty();
+
+    // ProjectManagerWindow draws Grid/List, Crash Recovery banner, and all 4 modals cleanly.
+    ProjectManagerWindow pm{};
+    std::vector<aether::core::ScannedProjectCard> cards(1);
+    cards[0].apr_path = "C:/Projects/TestShow.apr";
+    cards[0].manifest.project_name = "Test VTuber Show";
+    cards[0].manifest.modified_utc = "2026-11-23T12:00:00Z";
+    cards[0].manifest.summary.avatar_display_name = "Momo";
+    cards[0].manifest.summary.avatar_format = "VRM";
+    cards[0].manifest.summary.active_alfx_name = "Studio Clean Daylight";
+    cards[0].manifest.summary.active_light_count = 3u;
+    cards[0].pinned = true;
+
+    aether::core::SessionState sess{};
+    aether::core::CrashRecoveryInfo rec{};
+    rec.detected = true;
+    rec.orphan_pid = 99999u;
+    rec.project_name = "Unsaved Stream";
+    rec.autosave_modified_utc = "2026-11-23T12:15:00Z";
+    rec.original_modified_utc = "2026-11-23T12:00:00Z";
+
+    pm.open_new_project_modal("C:/Projects");
+    pm.open_alfx_import_modal("look.alfx", aether::core::AlfxSerializer::build_builtin_preset(0));
+    pm.open_relink_avatar_modal("../momo.vrm", "C:/Models/momo.vrm", "deadbeef");
+    pm.open_unsaved_changes_modal("Test VTuber Show", aether::dirty_bit(aether::DirtyDomain::LightingRig));
+
+    ProjectManagerActions pm_act{};
+    aether::core::AlfxDocument tmp_doc{};
+    aether::core::AlfxImportMode tmp_mode = aether::core::AlfxImportMode::ReplaceAll;
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    pm.draw(cards, {}, sess, rec, rig.ws.fonts(), 1.0f, false, pm_act);
+    (void)pm.draw_alfx_import_modal(rig.ws.fonts(), 1.0f, tmp_doc, tmp_mode);
+    (void)pm.draw_relink_avatar_modal(rig.ws.fonts(), 1.0f);
+    (void)pm.draw_unsaved_changes_modal(rig.ws.fonts(), 1.0f);
+    ImGui::Render();
 }

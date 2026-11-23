@@ -855,10 +855,12 @@ Expected<void> SpoutOutput::publish_frame(VkImage src_bgra_image, uint32_t width
 Expected<void> SpoutOutput::publish_d3d12_texture(rhi::D3D12Device& d3d12, const rhi::D3D12Texture& src_bgra8,
                                                   std::span<const uint8_t> cpu_fallback_bgra) noexcept {
     if (!initialized_ || d3d_device_ == nullptr || d3d_context_ == nullptr || d3d_shared_tex_ == nullptr) {
-        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture invalid state")};
+        return Unexpected<Error>{
+            Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture invalid state")};
     }
     if (src_bgra8.width != width_ || src_bgra8.height != height_) {
-        return Unexpected<Error>{Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture extent mismatch")};
+        return Unexpected<Error>{
+            Error::make(ErrorCode::InvalidArg, "SpoutOutput::publish_d3d12_texture extent mismatch")};
     }
 
     if (access_mutex_ != nullptr) {
@@ -879,8 +881,7 @@ Expected<void> SpoutOutput::publish_d3d12_texture(rhi::D3D12Device& d3d12, const
     auto* dst = static_cast<ID3D11Texture2D*>(d3d_shared_tex_);
     bool copied = false;
 
-    if (!cpu_fallback_ && src_bgra8.shared_nt_handle != nullptr &&
-        src_bgra8.uav_index != rhi::kD3D12InvalidDescIndex) {
+    if (!cpu_fallback_ && src_bgra8.shared_nt_handle != nullptr && src_bgra8.uav_index != rhi::kD3D12InvalidDescIndex) {
         if (d3d12_opened_nt_handle_ != src_bgra8.shared_nt_handle) {
             safe_release<ID3D11Texture2D>(d3d12_opened_tex_);
             d3d12_opened_nt_handle_ = nullptr;

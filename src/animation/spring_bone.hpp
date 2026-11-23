@@ -113,9 +113,8 @@ class alignas(64) SpringBoneSimulator {
                                            const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept;
 
     /** Runs `steps` static warm-up Verlet substeps so all chains enter equilibrium on Frame 1. */
-    void warmup_settle(std::array<Vec3, kMaxBones>& io_bone_pos_ws,
-                       std::array<Quat, kMaxBones>& io_bone_rot_ws, uint32_t bone_count,
-                       uint32_t steps = 60U) noexcept;
+    void warmup_settle(std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws,
+                       uint32_t bone_count, uint32_t steps = 60U) noexcept;
 
     void step(float fixed_dt_s, Vec3 external_accel_ws, float external_drag_scale,
               std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws,
@@ -152,14 +151,11 @@ class alignas(64) SpringBoneSimulator {
     void evaluate_colliders(const std::array<Vec3, kMaxBones>& bone_pos_ws,
                             const std::array<Quat, kMaxBones>& bone_rot_ws) noexcept;
     void step_scalar(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
-                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
-                     std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
+                     std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
     void step_avx2(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
-                   std::array<Vec3, kMaxBones>& io_bone_pos_ws,
-                   std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
+                   std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
     void step_avx512(float dt_s, float dt_sq, Vec3 ext_accel, float ext_drag_scale, bool sleep_gate,
-                     std::array<Vec3, kMaxBones>& io_bone_pos_ws,
-                     std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
+                     std::array<Vec3, kMaxBones>& io_bone_pos_ws, std::array<Quat, kMaxBones>& io_bone_rot_ws) noexcept;
 
     uint32_t count_{0};
     uint32_t teleport_resets_{0};
@@ -173,7 +169,7 @@ class alignas(64) SpringBoneSimulator {
     SimdPath detected_path_{SimdPath::Scalar};
     std::array<uint8_t, kMaxSpringColliders> active_contact_{};
     std::array<uint8_t, kMaxSpringJoints> joint_contact_{};
-    alignas(64) std::array<uint16_t, kMaxSpringJoints * kMaxSpringColliders> pair_shrink_1e5m_{};
+    alignas(64) std::array<uint16_t, static_cast<size_t>(kMaxSpringJoints) * kMaxSpringColliders> pair_shrink_1e5m_{};
 
     // SoA joint arrays aligned for 512-bit SIMD loads:
     alignas(64) float curr_x_[kMaxSpringJoints]{};

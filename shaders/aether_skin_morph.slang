@@ -91,6 +91,20 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     GpuSourceVertex src = AETHER_LOAD(GpuSourceVertex, g_Pc.draw_data_bda, v_idx);
     GpuFrameGlobals fg = AETHER_LOAD(GpuFrameGlobals, g_Pc.frame_globals_bda, 0);
 
+    float2 uv0 = float2(0.0, 0.0);
+    uint surf_flags = 0u;
+    uint packed_tan_oct = 0u;
+    float3 t_hair_loc = float3(0.0, 0.0, 0.0);
+    if (g_Pc.aux_buf_bda != 0ul) {
+        GpuSourceSurface surf = AETHER_LOAD(GpuSourceSurface, g_Pc.aux_buf_bda, v_idx);
+        uv0 = surf.uv0;
+        surf_flags = surf.flags;
+        packed_tan_oct = surf.tangent_oct;
+        if (packed_tan_oct != 0u) {
+            t_hair_loc = oct_decode_snorm16_u32(packed_tan_oct);
+        }
+    }
+
     // Optional GPU Compute SDEF spherical skinning when bit 1 of g_Pc.param1 is set
     if ((g_Pc.param1 & 2u) != 0u && fg.pmx_sdef_bda != 0ul && fg.joint_mats_bda != 0ul && fg.skin_buf_bda != 0ul) {
         GpuPmxSdef sdef = AETHER_LOAD(GpuPmxSdef, fg.pmx_sdef_bda, v_idx);
@@ -115,6 +129,9 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
             src.pos_out.xyz = w0 * mc0 + w1 * mc1 + quat_rotate_sdef(qb, src.pos_out.xyz - sdef.c);
             src.norm_zflat.xyz = quat_rotate_sdef(qb, src.norm_zflat.xyz);
             src.proxy_sdf.xyz = quat_rotate_sdef(qb, src.proxy_sdf.xyz);
+            if (packed_tan_oct != 0u) {
+                t_hair_loc = quat_rotate_sdef(qb, t_hair_loc);
+            }
         }
     }
     float2 yaw_cs = (dot(fg.avatar_rot_sincos.xy, fg.avatar_rot_sincos.xy) > 0.25)
@@ -136,6 +153,12 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float3 tan_rot = float3(yaw_cs.x * src.smooth_tan.x + yaw_cs.y * src.smooth_tan.z,
                             src.smooth_tan.y,
                             -yaw_cs.y * src.smooth_tan.x + yaw_cs.x * src.smooth_tan.z);
+    float3 t_hair_ws = (packed_tan_oct != 0u)
+                           ? normalize_safe(
+                                 float3(yaw_cs.x * t_hair_loc.x + yaw_cs.y * t_hair_loc.z, t_hair_loc.y,
+                                        -yaw_cs.y * t_hair_loc.x + yaw_cs.x * t_hair_loc.z),
+                                 float3(1.0, 0.0, 0.0))
+                           : float3(0.0, 0.0, 0.0);
 
     float3 prev_pos = world_pos;
     if ((g_Pc.param1 & 1u) != 0u) {
@@ -143,13 +166,6 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         prev_pos = prev_v.pos_zflat.xyz;
     }
 
-    float2 uv0 = float2(0.0, 0.0);
-    uint surf_flags = 0u;
-    if (g_Pc.aux_buf_bda != 0ul) {
-        GpuSourceSurface surf = AETHER_LOAD(GpuSourceSurface, g_Pc.aux_buf_bda, v_idx);
-        uv0 = surf.uv0;
-        surf_flags = surf.flags;
-    }
     if (fg.uv_delta_bda != 0ul) {
         float2 d_uv = AETHER_LOAD(float2, fg.uv_delta_bda, v_idx);
         uv0 += d_uv;
@@ -167,7 +183,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     dst.proxy_norm_out = float4(n_proxy_ws, src.pos_out.w);
     dst.tangent_crease = float4(normalize_safe(tan_rot, float3(0.0, 0.0, 1.0)), crease_w);
     dst.uv = uv0;
-    dst.material_id = (surf_flags >> 8u) & 0xFFu;
+    dst.material_id = (packed_tan_oct != 0u) ? oct_encode_snorm16_u32(t_hair_ws) : 0u;
     dst.flags = surf_flags;
 
     AETHER_STORE(GpuSkinnedVertex, g_Pc.vertex_buf_bda, v_idx, dst);

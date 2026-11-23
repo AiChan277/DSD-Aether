@@ -191,6 +191,8 @@ struct GpuFrameGlobals {
     uint64_t _phase3_pad_bda;
     float4 target_uv_scale;
     float4 target_half_uv_scale;
+    float4 vrm_parity_params0;
+    float4 vrm_parity_params1;
 };
 
 struct GpuPmxSdef {
@@ -422,6 +424,37 @@ float3 oct_decode(float2 e) {
     n.x += n.x >= 0.0 ? -t : t;
     n.y += n.y >= 0.0 ? -t : t;
     return normalize(n);
+}
+
+uint oct_encode_snorm16_u32(float3 v) {
+    float3 n = normalize_safe(v, float3(0.0, 0.0, 1.0));
+    float denom = abs(n.x) + abs(n.y) + abs(n.z);
+    float2 o = n.xy / max(denom, 1e-6);
+    if (n.z < 0.0) {
+        float2 s = o;
+        o.x = (1.0 - abs(s.y)) * (s.x >= 0.0 ? 1.0 : -1.0);
+        o.y = (1.0 - abs(s.x)) * (s.y >= 0.0 ? 1.0 : -1.0);
+    }
+    int ix = int(round(clamp(o.x * 32767.0, -32767.0, 32767.0)));
+    int iy = int(round(clamp(o.y * 32767.0, -32767.0, 32767.0)));
+    return (uint(ix) & 0xFFFFu) | ((uint(iy) & 0xFFFFu) << 16u);
+}
+
+float3 oct_decode_snorm16_u32(uint packed) {
+    int ix = int(packed & 0xFFFFu);
+    if (ix >= 32768) {
+        ix -= 65536;
+    }
+    int iy = int((packed >> 16u) & 0xFFFFu);
+    if (iy >= 32768) {
+        iy -= 65536;
+    }
+    float2 f = clamp(float2(float(ix), float(iy)) / 32767.0, float2(-1.0, -1.0), float2(1.0, 1.0));
+    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    float t = saturate(-n.z);
+    n.x += (n.x >= 0.0) ? -t : t;
+    n.y += (n.y >= 0.0) ? -t : t;
+    return normalize_safe(n, float3(1.0, 0.0, 0.0));
 }
 
 float ign_blue_noise(uint2 pix, uint frame_idx) {

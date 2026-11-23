@@ -14,6 +14,9 @@ struct VrmMmdParityParams {
     float vrm_cel_crispness_boost{0.85f};
     float vrm_shadow_chroma_lift{0.22f};
     bool vrm_auto_edge_scale_enabled{true};
+    float face_internal_edge_suppress_cm{1.8f};
+    bool unified_surface_group_crease{true};
+    float vrm_pre_cel_clarity_strength{0.25f};
     float vrm_hair_angel_ring_boost{0.75f};
     bool pmx_alpha_bleed_padding{true};
     bool pmx_strict_material_draw_order{true};
@@ -47,11 +50,11 @@ struct LightingRig {
     float bg_rgba[4]{0.0f, 0.0f, 0.0f, 0.0f};
 
     // 3-tier lighting, pre-quantized GI, Filter Pro, circadian, catchlights & [TESTING] crease disguise
-    uint8_t lighting_mode{1}; // 0 = Traditional (Raster+SDF), 1 = Hybrid RT, 2 = 2.5D Path Tracing
-    float eye_catchlight_intensity{0.85f};   // Cornea catchlight reflection brightness (0 = muted)
-    float eye_catchlight_size{1.00f};        // Cornea catchlight angular scale (0.25..2.0)
-    bool crease_disguise_enabled{false};     // [TESTING] Disguise Low-Poly Creases (default OFF)
-    float crease_disguise_strength{0.70f};   // 0..1 blending toward safely welded N_healed when enabled
+    uint8_t lighting_mode{1};              // 0 = Traditional (Raster+SDF), 1 = Hybrid RT, 2 = 2.5D Path Tracing
+    float eye_catchlight_intensity{0.85f}; // Cornea catchlight reflection brightness (0 = muted)
+    float eye_catchlight_size{1.00f};      // Cornea catchlight angular scale (0.25..2.0)
+    bool crease_disguise_enabled{false};   // [TESTING] Disguise Low-Poly Creases (default OFF)
+    float crease_disguise_strength{0.70f}; // 0..1 blending toward safely welded N_healed when enabled
     bool enable_2d_filter_pro{true};
     float painterly_flatten_strength{0.55f};
     float dog_ink_boost{0.65f};
@@ -67,6 +70,7 @@ struct LightingRig {
     std::array<StudioLightSpec, kMaxStudioLights> studio_lights{};
     uint32_t studio_light_count{0};
     uint32_t dominant_key_light_id{0};
+    int32_t circadian_sun_slot_id{-1}; // Locked NaturalSunCieSky slot index when Circadian active (-1 = unset)
     float ambient_floor{0.28f};
     float environment_sky_strength{0.28f};
     float ground_bounce_strength{0.15f};
@@ -221,8 +225,7 @@ struct LightingRig {
     }
 };
 
-
-/** Named studio lighting rig preset record for JSON serialization (`config/lighting_rigs.json`). */
+/** Named studio lighting rig preset record for in-memory `.alfx` preset catalogs (`presets/alfx`). */
 struct StudioRigPresetRecord {
     std::array<char, 64> name{};
     LightingRig rig{};
@@ -231,17 +234,5 @@ struct StudioRigPresetRecord {
 /** Fills `out_presets` with the 5 built-in complete studio lighting rig presets. */
 void builtin_studio_rig_presets(std::array<StudioRigPresetRecord, 5>& out_presets,
                                 const std::array<float, 3>& pivot_ws = {0.0f, 1.32f, 0.0f}) noexcept;
-
-/** Loads studio lighting presets from a JSON file (`config/lighting_rigs.json`). */
-[[nodiscard]] bool load_lighting_rigs_json(const std::filesystem::path& path,
-                                           std::vector<StudioRigPresetRecord>& out_presets) noexcept;
-
-/** Writes a list of studio lighting presets to a JSON file (`config/lighting_rigs.json`). */
-[[nodiscard]] bool save_lighting_rigs_json(const std::filesystem::path& path,
-                                           std::span<const StudioRigPresetRecord> presets) noexcept;
-
-/** Updates or inserts a named preset inside `path` cleanly. */
-[[nodiscard]] bool save_or_update_lighting_rig_preset(const std::filesystem::path& path, const char* preset_name,
-                                                      const LightingRig& rig) noexcept;
 
 } // namespace aether::renderer

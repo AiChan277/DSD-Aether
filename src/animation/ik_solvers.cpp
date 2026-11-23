@@ -322,15 +322,12 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
             if (l_active) {
                 Vec3 n_fore{};
                 Vec3 n_hand{};
-                const float sd_fore =
-                    field.query_segment(out_world_positions[AETHER_BONE_LEFT_LOWER_ARM],
-                                        out_world_positions[AETHER_BONE_LEFT_HAND],
-                                        BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::LeftArm, 1.0f,
-                                        &n_fore);
-                const float sd_hand =
-                    field.query_point(out_world_positions[AETHER_BONE_LEFT_HAND],
-                                      BodySelfCollisionField::kHandSphereRadiusM, CollisionCapsuleKind::LeftArm, 1.0f,
-                                      &n_hand);
+                const float sd_fore = field.query_segment(
+                    out_world_positions[AETHER_BONE_LEFT_LOWER_ARM], out_world_positions[AETHER_BONE_LEFT_HAND],
+                    BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::LeftArm, 1.0f, &n_fore);
+                const float sd_hand = field.query_point(out_world_positions[AETHER_BONE_LEFT_HAND],
+                                                        BodySelfCollisionField::kHandSphereRadiusM,
+                                                        CollisionCapsuleKind::LeftArm, 1.0f, &n_hand);
                 const float worst = std::min(sd_fore, sd_hand);
                 if (worst < 0.0f) {
                     const Vec3 push_n = (sd_fore < sd_hand) ? n_fore : n_hand;
@@ -342,15 +339,12 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
             if (r_active) {
                 Vec3 n_fore{};
                 Vec3 n_hand{};
-                const float sd_fore =
-                    field.query_segment(out_world_positions[AETHER_BONE_RIGHT_LOWER_ARM],
-                                        out_world_positions[AETHER_BONE_RIGHT_HAND],
-                                        BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::RightArm, -1.0f,
-                                        &n_fore);
-                const float sd_hand =
-                    field.query_point(out_world_positions[AETHER_BONE_RIGHT_HAND],
-                                      BodySelfCollisionField::kHandSphereRadiusM, CollisionCapsuleKind::RightArm, -1.0f,
-                                      &n_hand);
+                const float sd_fore = field.query_segment(
+                    out_world_positions[AETHER_BONE_RIGHT_LOWER_ARM], out_world_positions[AETHER_BONE_RIGHT_HAND],
+                    BodySelfCollisionField::kForearmRadiusM, CollisionCapsuleKind::RightArm, -1.0f, &n_fore);
+                const float sd_hand = field.query_point(out_world_positions[AETHER_BONE_RIGHT_HAND],
+                                                        BodySelfCollisionField::kHandSphereRadiusM,
+                                                        CollisionCapsuleKind::RightArm, -1.0f, &n_hand);
                 const float worst = std::min(sd_fore, sd_hand);
                 if (worst < 0.0f) {
                     const Vec3 push_n = (sd_fore < sd_hand) ? n_fore : n_hand;
@@ -392,15 +386,14 @@ void FullBodyIkSolver::solve(const SolvedBodyPose& body_pose, const AetherGraphO
     compute_fk();
 }
 
-RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
-    const AetherAvatarDesc& desc, const AetherJointDesc* joints, size_t joint_count,
-    const std::array<float, 3>* joint_rest_world_pos, size_t rest_pos_count,
-    const AetherColliderDesc* colliders, size_t collider_count,
-    const AetherSpringJointDesc* springs, size_t spring_count,
-    bool has_split_brow_morphs) noexcept {
+RestSkeletonMetrics build_rest_metrics_from_avatar_streams(const AetherAvatarDesc& desc, const AetherJointDesc* joints,
+                                                           size_t joint_count,
+                                                           const std::array<float, 3>* joint_rest_world_pos,
+                                                           size_t rest_pos_count, const AetherColliderDesc* colliders,
+                                                           size_t collider_count, const AetherSpringJointDesc* springs,
+                                                           size_t spring_count, bool has_split_brow_morphs) noexcept {
     RestSkeletonMetrics rm = build_default_humanoid_rest_metrics();
-    if (joints == nullptr || joint_rest_world_pos == nullptr || joint_count == 0U ||
-        rest_pos_count != joint_count) {
+    if (joints == nullptr || joint_rest_world_pos == nullptr || joint_count == 0U || rest_pos_count != joint_count) {
         return rm;
     }
 
@@ -420,8 +413,7 @@ RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
         const auto& j = joints[idx];
         const float* br = j.bind_rotation_quat;
         const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
-        const Quat q_local =
-            (q2 > 1e-6f) ? normalize(Quat{br[0], br[1], br[2], br[3]}) : Quat::identity();
+        const Quat q_local = (q2 > 1e-6f) ? normalize(Quat{br[0], br[1], br[2], br[3]}) : Quat::identity();
         Quat q_parent = Quat::identity();
         if (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < n_j) {
             q_parent = self(self, static_cast<size_t>(j.parent_index), depth + 1);
@@ -474,8 +466,7 @@ RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
             world[b] = world[pi] + rm.rest_local_positions[b];
             rm.rest_world_rotations[b] = rm.rest_world_rotations[pi];
         }
-        rm.rest_local_rotations[b] =
-            normalize(conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
+        rm.rest_local_rotations[b] = normalize(conjugate(rm.rest_world_rotations[pi]) * rm.rest_world_rotations[b]);
     }
 
     rm.rest_local_positions[AETHER_BONE_HIPS] = world[AETHER_BONE_HIPS];
@@ -552,8 +543,8 @@ RestSkeletonMetrics build_rest_metrics_from_avatar_streams(
             if (mapped_ps >= 0 && static_cast<uint32_t>(mapped_ps) < dst_idx) {
                 const auto& p_dst = rm.custom_springs[static_cast<size_t>(mapped_ps)];
                 const auto& p_sp = springs[static_cast<size_t>(sp.parent_spring_index)];
-                const Vec3 p_dir = normalize_safe({p_sp.rest_dir[0], p_sp.rest_dir[1], p_sp.rest_dir[2]},
-                                                  {0.0f, -1.0f, 0.0f});
+                const Vec3 p_dir =
+                    normalize_safe({p_sp.rest_dir[0], p_sp.rest_dir[1], p_sp.rest_dir[2]}, {0.0f, -1.0f, 0.0f});
                 const Vec3 expected_tail = p_dst.rest_world_pos + p_dir * std::max(p_dst.bone_length, 0.01f);
                 if (length(pos_ws - expected_tail) <= 2e-3f) {
                     dst.parent_spring_index = mapped_ps;

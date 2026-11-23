@@ -237,6 +237,11 @@ void DenoiserManager::reset_budget_monitor() noexcept {
     rolling_p95_ms_ = 0.0f;
 }
 
+void DenoiserManager::invalidate_temporal_history() noexcept {
+    sample_count_ = 0;
+    sample_cursor_ = 0;
+}
+
 DenoiserKind DenoiserManager::active_kind() const noexcept {
     return active_ != nullptr ? active_->kind() : DenoiserKind::SvgfLite;
 }

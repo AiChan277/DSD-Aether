@@ -80,12 +80,11 @@ void init_neutral_pose_and_springs(const RestSkeletonMetrics& rm, VisibilityFirs
         const uint32_t custom_n = std::min<uint32_t>(rm.custom_spring_count, kMaxRestSprings);
         for (uint32_t si = 0; si < custom_n; ++si) {
             const auto& sp = rm.custom_springs[si];
-            const size_t bi = static_cast<size_t>(kCustomSpringBoneOffset + si);
+            const size_t bi = static_cast<size_t>(kCustomSpringBoneOffset) + si;
             if (bi < kMaxBones) {
                 bone_pos_ws[bi] = sp.rest_world_pos;
                 const uint32_t hb = static_cast<uint32_t>(sp.skin_base_humanoid);
-                bone_rot_ws[bi] =
-                    (hb < AETHER_HUMANOID_BONE_COUNT) ? rm.rest_world_rotations[hb] : Quat::identity();
+                bone_rot_ws[bi] = (hb < AETHER_HUMANOID_BONE_COUNT) ? rm.rest_world_rotations[hb] : Quat::identity();
             }
         }
     }
@@ -152,8 +151,8 @@ void SimEngine::set_rest_metrics(const RestSkeletonMetrics& rest) noexcept {
 
 void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyncPacket& dsp,
                      const AetherGraphOutputs& graph_out, uint64_t now_us, float horizon_override_s,
-                     const SimEngineConfig& cfg, SkinningFrame& out_skinning,
-                     const AudioLipSyncFrame* audio_lipsync, float audio_assist_weight) noexcept {
+                     const SimEngineConfig& cfg, SkinningFrame& out_skinning, const AudioLipSyncFrame* audio_lipsync,
+                     float audio_assist_weight) noexcept {
     float dt_s = 1.0f / 240.0f;
     if (last_tick_us_ > 0 && now_us > last_tick_us_) {
         dt_s = std::clamp(static_cast<float>(now_us - last_tick_us_) * 1e-6f, 1.0f / 480.0f, 0.05f);
@@ -256,9 +255,8 @@ void SimEngine::tick(const AetherTrackingFrame& raw_tracking, const AetherDspSyn
     const Live2DParameters* const opt_raw_l2d = has_packed_live2d(stabilized_frame_) ? &raw_l2d : nullptr;
     out_skinning.live2d = Live2DParameters{};
     expr_mixer_.update(predicted_state_.blendshapes.data(), dsp, graph_out, dt_s, out_skinning.morph_weights,
-                       out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data(),
-                       rm.has_split_brow_morphs, opt_raw_l2d, &out_skinning.live2d, audio_lipsync,
-                       audio_assist_weight);
+                       out_skinning.mouth_owner_blend, predicted_state_.webcam_visemes.data(), rm.has_split_brow_morphs,
+                       opt_raw_l2d, &out_skinning.live2d, audio_lipsync, audio_assist_weight);
 
     const auto world_delta_euler_deg = [&](uint32_t bone_id) noexcept -> Vec3 {
         const Quat rw = rm.rest_world_rotations[bone_id];

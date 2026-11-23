@@ -89,6 +89,9 @@ pub struct RawMaterial {
     pub double_sided: bool,
     pub unlit: bool,
     pub has_vrm_mtoon: bool,
+    pub cast_shadow: bool,
+    pub edge_enabled: bool,
+    pub is_pmx: bool,
     pub render_queue_offset: i32,
     /// Optional material-level `z_flatten_weight` override (`None` = derive from skin).
     pub flatten_override: Option<f32>,

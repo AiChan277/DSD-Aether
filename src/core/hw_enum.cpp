@@ -164,9 +164,9 @@ void enum_mf_cameras(std::vector<CameraDeviceInfo>& out) {
                         ::CoTaskMemFree(symlink);
                     }
                     static constexpr const char* kVirtualHints[] = {
-                        "smart connect", "obs virtual", "obs-camera", "broadcast", "snap camera",
-                        "virtual",       "root\\camera", "manycam",   "iriun",     "droidcam",
-                        "epoccam",       "youcam",      "vcam",
+                        "smart connect", "obs virtual",  "obs-camera", "broadcast", "snap camera",
+                        "virtual",       "root\\camera", "manycam",    "iriun",     "droidcam",
+                        "epoccam",       "youcam",       "vcam",
                     };
                     for (const char* hint : kVirtualHints) {
                         if (contains_ci(cam.friendly_name, hint) || contains_ci(cam.symbolic_link, hint)) {
@@ -268,7 +268,8 @@ void enum_wasapi_audio_inputs(std::vector<AudioInputDeviceInfo>& out) {
                     Microsoft::WRL::ComPtr<IPropertyStore> props;
                     if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props)) && props) {
                         static constexpr PROPERTYKEY kFriendlyNameKey = {
-                            {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80U, 0x20U, 0x67U, 0xd1U, 0x46U, 0xa8U, 0x50U, 0xe0U}}, 14};
+                            {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80U, 0x20U, 0x67U, 0xd1U, 0x46U, 0xa8U, 0x50U, 0xe0U}},
+                            14};
                         PROPVARIANT var{};
                         PropVariantInit(&var);
                         if (SUCCEEDED(props->GetValue(kFriendlyNameKey, &var)) && var.vt == VT_LPWSTR &&
@@ -286,8 +287,7 @@ void enum_wasapi_audio_inputs(std::vector<AudioInputDeviceInfo>& out) {
         }
     }
 
-    std::stable_partition(out.begin(), out.end(),
-                          [](const AudioInputDeviceInfo& d) { return d.is_default; });
+    std::stable_partition(out.begin(), out.end(), [](const AudioInputDeviceInfo& d) { return d.is_default; });
 
     if (com_owned) {
         ::CoUninitialize();

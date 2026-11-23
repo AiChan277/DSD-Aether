@@ -1,6 +1,8 @@
 #include "ui/panels/lighting/lighting_stage_panels.hpp"
 
+#include "core/alfx_serializer.hpp"
 #include "core/viewport_aspect.hpp"
+#include "core/zip_archive.hpp"
 #include "renderer/frame_graph.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
@@ -161,14 +163,15 @@ const char* channel_short_label(uint32_t mask) noexcept {
 
 } // namespace
 
-std::filesystem::path LightingStagePanels::rigs_json_path() const noexcept {
+std::filesystem::path LightingStagePanels::rigs_json_path() const {
     if (!config_dir_.empty()) {
-        return config_dir_ / "lighting_rigs.json";
+        return config_dir_ / "presets" / "alfx";
     }
     if (!shipped_config_dir_.empty()) {
-        return shipped_config_dir_ / "lighting_rigs.json";
+        const auto parent = shipped_config_dir_.parent_path();
+        return parent.empty() ? std::filesystem::path("presets/alfx") : (parent / "presets" / "alfx");
     }
-    return std::filesystem::path("config/lighting_rigs.json");
+    return std::filesystem::path("presets/alfx");
 }
 
 void LightingStagePanels::ensure_rigs_loaded() noexcept {
@@ -176,24 +179,67 @@ void LightingStagePanels::ensure_rigs_loaded() noexcept {
         return;
     }
     rigs_loaded_ = true;
-    std::error_code ec;
-    const auto user_path = rigs_json_path();
-    if (std::filesystem::is_regular_file(user_path, ec) && renderer::load_lighting_rigs_json(user_path, saved_rigs_)) {
-        return;
-    }
-    if (!shipped_config_dir_.empty()) {
-        const auto shipped = shipped_config_dir_ / "lighting_rigs.json";
-        if (std::filesystem::is_regular_file(shipped, ec) && renderer::load_lighting_rigs_json(shipped, saved_rigs_)) {
-            return;
+    saved_rigs_.clear();
+
+    try {
+        auto append_from_dir = [&](const std::filesystem::path& dir) {
+            std::error_code ec;
+            if (dir.empty() || !std::filesystem::is_directory(dir, ec)) {
+                return;
+            }
+            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                if (ec || !entry.is_regular_file(ec)) {
+                    continue;
+                }
+                if (entry.path().extension() != ".alfx") {
+                    continue;
+                }
+                auto doc_res = core::AlfxSerializer::load_file(entry.path());
+                if (!doc_res.has_value()) {
+                    continue;
+                }
+                const auto& doc = doc_res.value();
+                const std::string& disp = !doc.meta.name.empty() ? doc.meta.name : entry.path().stem().string();
+                bool replaced = false;
+                for (auto& existing : saved_rigs_) {
+                    if (std::strcmp(existing.name.data(), disp.c_str()) == 0) {
+                        existing.rig = doc.rig;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    renderer::StudioRigPresetRecord rec{};
+                    std::snprintf(rec.name.data(), rec.name.size(), "%s", disp.c_str());
+                    rec.rig = doc.rig;
+                    saved_rigs_.push_back(rec);
+                }
+            }
+        };
+
+        if (!shipped_config_dir_.empty()) {
+            const auto parent = shipped_config_dir_.parent_path();
+            append_from_dir(parent.empty() ? std::filesystem::path("presets/alfx") : (parent / "presets" / "alfx"));
+        } else {
+            append_from_dir(std::filesystem::path("presets/alfx"));
         }
+        const auto user_dir = rigs_json_path();
+        if (user_dir != std::filesystem::path("presets/alfx")) {
+            append_from_dir(user_dir);
+        }
+
+        if (saved_rigs_.empty()) {
+            const auto& catalog = core::AlfxSerializer::builtin_preset_catalog();
+            for (size_t i = 0; i < catalog.size(); ++i) {
+                renderer::StudioRigPresetRecord rec{};
+                std::snprintf(rec.name.data(), rec.name.size(), "%s", catalog[i].display_name);
+                rec.rig = core::AlfxSerializer::build_builtin_preset(i).rig;
+                saved_rigs_.push_back(rec);
+            }
+        }
+    } catch (...) {
+        saved_rigs_.clear();
     }
-    if (std::filesystem::is_regular_file("config/lighting_rigs.json", ec) &&
-        renderer::load_lighting_rigs_json("config/lighting_rigs.json", saved_rigs_)) {
-        return;
-    }
-    std::array<renderer::StudioRigPresetRecord, 5> builtins{};
-    renderer::builtin_studio_rig_presets(builtins);
-    saved_rigs_.assign(builtins.begin(), builtins.end());
 }
 
 renderer::LightingRig& LightingStagePanels::active_rig(DevShellViewportActions& vp_actions) noexcept {
@@ -221,15 +267,14 @@ void LightingStagePanels::ensure_initialized(DevShellViewportActions& vp_actions
     (void)active_rig(vp_actions);
 }
 
-void LightingStagePanels::sync_key_fill_rim_mirror(const renderer::LightingRig& rig,
-                                                   DevShellViewportActions& vp_actions) noexcept {
-    if (rig.studio_light_count > 0u) {
-        const auto& k = rig.studio_lights[0];
-        vp_actions.key_azimuth_deg = k.orbit_azimuth_deg;
-        vp_actions.key_elevation_deg = k.orbit_elevation_deg;
-        vp_actions.key_intensity = k.intensity_ev100;
-        vp_actions.lighting_mode = rig.lighting_mode;
+void LightingStagePanels::sync_store_dirty(const renderer::LightingRig& rig,
+                                           DevShellViewportActions& vp_actions) noexcept {
+    if (const auto* dk = rig.dominant_key_light()) {
+        vp_actions.dominant_key_azimuth_deg = dk->orbit_azimuth_deg;
+        vp_actions.dominant_key_elevation_deg = dk->orbit_elevation_deg;
+        vp_actions.dominant_key_intensity = dk->intensity_ev100;
     }
+    vp_actions.lighting_mode = rig.lighting_mode;
     vp_actions.lighting_dirty = true;
 }
 
@@ -297,7 +342,7 @@ void LightingStagePanels::export_stage_actions(const DevShellAvatarView& avatar,
             l.target_ws = {stage_camera_.target_x, stage_camera_.target_y, stage_camera_.target_z};
             l.aim_lock = (std::fabs(l.target_ws[0] - pivot[0]) < 0.02f &&
                           std::fabs(l.target_ws[1] - pivot[1]) < 0.02f && std::fabs(l.target_ws[2] - pivot[2]) < 0.02f);
-            sync_key_fill_rim_mirror(rig, vp_actions);
+            sync_store_dirty(rig, vp_actions);
         }
     }
 
@@ -353,7 +398,7 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
                     selection.item_index = idx;
                     std::snprintf(selection.name.data(), selection.name.size(), "%s",
                                   rig.studio_lights[static_cast<size_t>(idx)].name.data());
-                    sync_key_fill_rim_mirror(rig, actions.viewport);
+                    sync_store_dirty(rig, actions.viewport);
                 }
             }
         }
@@ -372,7 +417,7 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
                     selection.item_index = idx;
                     std::snprintf(selection.name.data(), selection.name.size(), "%s",
                                   rig.studio_lights[static_cast<size_t>(idx)].name.data());
-                    sync_key_fill_rim_mirror(rig, actions.viewport);
+                    sync_store_dirty(rig, actions.viewport);
                 }
             }
         }
@@ -415,7 +460,7 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
         ImGui::PushStyleColor(ImGuiCol_Text, light.enabled ? t.stage_cyan : t.stage_muted);
         if (ImGui::SmallButton(light.enabled ? "ON" : "--")) {
             light.enabled = !light.enabled;
-            sync_key_fill_rim_mirror(rig, actions.viewport);
+            sync_store_dirty(rig, actions.viewport);
         }
         ImGui::PopStyleColor();
         ImGui::SameLine();
@@ -424,7 +469,7 @@ void LightingStagePanels::draw_outliner(const DevShellAvatarView& avatar, const 
         ImGui::PushStyleColor(ImGuiCol_Text, light.solo ? t.stage_amber : t.text_tertiary);
         if (ImGui::SmallButton("S")) {
             light.solo = !light.solo;
-            sync_key_fill_rim_mirror(rig, actions.viewport);
+            sync_store_dirty(rig, actions.viewport);
         }
         ImGui::PopStyleColor();
         ImGui::SameLine();
@@ -551,7 +596,7 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                 auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
                 sl.target_ws = pivot;
                 sl.aim_lock = true;
-                sync_key_fill_rim_mirror(rig, actions.viewport);
+                sync_store_dirty(rig, actions.viewport);
             }
         };
         auto giz_btn = [&](GizmoTool gt, const char* lbl) {
@@ -851,18 +896,18 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
                                                                          : (pose.distance_m * 0.0028f);
                             sl.position_ws[static_cast<size_t>(gizmo_active_axis_)] += io.MouseDelta.x * fallback_m;
                         }
-                        sync_key_fill_rim_mirror(rig, actions.viewport);
+                        sync_store_dirty(rig, actions.viewport);
                     } else if (gizmo_tool_ == GizmoTool::Rotate) {
                         sl.orbit_azimuth_deg += io.MouseDelta.x * 0.45f;
                         sl.orbit_elevation_deg =
                             std::clamp(sl.orbit_elevation_deg - io.MouseDelta.y * 0.35f, -85.0f, 85.0f);
                         sl.use_orbit_angles = true;
-                        sync_key_fill_rim_mirror(rig, actions.viewport);
+                        sync_store_dirty(rig, actions.viewport);
                     } else if (gizmo_tool_ == GizmoTool::Scale) {
                         const float delta = (io.MouseDelta.x - io.MouseDelta.y) * 0.004f;
                         sl.width_or_outer_m = std::clamp(sl.width_or_outer_m + delta, 0.05f, 3.0f);
                         sl.height_or_inner_m = std::clamp(sl.height_or_inner_m + delta, 0.05f, 3.0f);
-                        sync_key_fill_rim_mirror(rig, actions.viewport);
+                        sync_store_dirty(rig, actions.viewport);
                     }
                 }
                 if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -908,17 +953,17 @@ void LightingStagePanels::draw_stage_viewport(const DevShellAvatarView& avatar, 
         desired_stage_h_ = static_cast<uint32_t>(bot_h);
 
         struct QuadCell {
-            ImVec2 p0;
-            ImVec2 sz;
-            VkDescriptorSet tex;
-            uint32_t ren_w;
-            uint32_t ren_h;
-            uint32_t rt_w;
-            uint32_t rt_h;
-            const char* tag;
-            const char* btn_id;
-            renderer::PreviewCamera* cam;
-            bool allow_pick;
+            ImVec2 p0{};
+            ImVec2 sz{};
+            VkDescriptorSet tex{VK_NULL_HANDLE};
+            uint32_t ren_w{0};
+            uint32_t ren_h{0};
+            uint32_t rt_w{0};
+            uint32_t rt_h{0};
+            const char* tag{nullptr};
+            const char* btn_id{nullptr};
+            renderer::PreviewCamera* cam{nullptr};
+            bool allow_pick{false};
         };
         const QuadCell cells[4]{
             {canvas_p0, ImVec2(left_w, top_h), avatar.quad_top_texture, avatar.quad_top_w, avatar.quad_top_h,
@@ -1039,21 +1084,119 @@ void LightingStagePanels::draw_inspector(const DevShellAvatarView& avatar, const
     renderer::LightingRig& rig = active_rig(actions.viewport);
     const std::array<float, 3> pivot = compute_pivot_ws(avatar);
 
+    auto draw_global_fx_sections = [&](bool& out_dirty) {
+        if (ImGui::CollapsingHeader(tr("Satsuei, Circadian & 2.5D FX"))) {
+            out_dirty |= ImGui::SliderFloat(tr("Ambient Floor"), &rig.ambient_floor, 0.0f, 1.5f, "%.2f");
+            out_dirty |= ImGui::SliderFloat(tr("Environment Sky"), &rig.environment_sky_strength, 0.0f, 2.0f, "%.2f");
+            out_dirty |= ImGui::SliderFloat(tr("Ground Bounce"), &rig.ground_bounce_strength, 0.0f, 1.5f, "%.2f");
+            if (ImGui::Checkbox(tr("Circadian Lighting"), &rig.circadian_enabled)) {
+                (void)params.set(ParamId::RenderCircadianEnabled, rig.circadian_enabled ? 1.0 : 0.0);
+                out_dirty = true;
+            }
+            if (rig.circadian_enabled) {
+                int tz = rig.circadian_timezone;
+                if (ImGui::SliderInt(tr("Circadian TZ Index"), &tz, 0, 12)) {
+                    rig.circadian_timezone = tz;
+                    (void)params.set(ParamId::RenderCircadianTimezone, static_cast<double>(tz));
+                    out_dirty = true;
+                }
+                int tmin = rig.circadian_time_minutes;
+                if (ImGui::SliderInt(tr("Solar Time (min, -1=Auto)"), &tmin, -1, 1439)) {
+                    rig.circadian_time_minutes = tmin;
+                    (void)params.set(ParamId::RenderCircadianTimeMinutes, static_cast<double>(tmin));
+                    out_dirty = true;
+                }
+            }
+            int lm = static_cast<int>(rig.lighting_mode);
+            static constexpr const char* kLightModes[3] = {"Traditional (Fast)", "Hybrid Ray Tracing",
+                                                           "2.5D Path Tracing"};
+            if (ImGui::Combo(tr("Lighting Mode"), &lm, kLightModes, 3)) {
+                rig.lighting_mode = static_cast<uint8_t>(std::clamp(lm, 0, 2));
+                (void)params.set(ParamId::RenderLightingMode, static_cast<double>(rig.lighting_mode));
+                (void)params.set(ParamId::RenderRtEnabled, rig.lighting_mode > 0 ? 1.0 : 0.0);
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Light Wrap"), &rig.satsuei.light_wrap_strength, 0.0f, 1.0f, "%.2f")) {
+                (void)params.set(ParamId::RenderSatsueiLightWrap, static_cast<double>(rig.satsuei.light_wrap_strength));
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Halation"), &rig.satsuei.halation_strength, 0.0f, 1.0f, "%.2f")) {
+                (void)params.set(ParamId::RenderSatsueiHalation, static_cast<double>(rig.satsuei.halation_strength));
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Backscatter"), &rig.satsuei.backscatter_strength, 0.0f, 1.5f, "%.2f")) {
+                (void)params.set(ParamId::RenderSatsueiBackscatter,
+                                 static_cast<double>(rig.satsuei.backscatter_strength));
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Bloom Intensity"), &rig.bloom_intensity, 0.0f, 2.0f, "%.2f")) {
+                (void)params.set(ParamId::RenderBloomIntensity, static_cast<double>(rig.bloom_intensity));
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Avatar Contrast"), &rig.split_grading.avatar_contrast, 0.6f, 1.5f, "%.2f")) {
+                (void)params.set(ParamId::RenderHoloAvatarContrast,
+                                 static_cast<double>(rig.split_grading.avatar_contrast));
+                out_dirty = true;
+            }
+            if (ImGui::Checkbox(tr("2D Filter Pro"), &rig.enable_2d_filter_pro)) {
+                (void)params.set(ParamId::Render2DFilterPro, rig.enable_2d_filter_pro ? 1.0 : 0.0);
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Outline Scale"), &rig.outline_width_scale, 0.0f, 3.0f, "%.2f")) {
+                (void)params.set(ParamId::RenderOutlineScale, static_cast<double>(rig.outline_width_scale));
+                out_dirty = true;
+            }
+            if (ImGui::SliderFloat(tr("Cel Sharpness"), &rig.cel_band_sharpness, 0.0f, 1.0f, "%.2f")) {
+                (void)params.set(ParamId::RenderCelBandSharpness, static_cast<double>(rig.cel_band_sharpness));
+                out_dirty = true;
+            }
+            float flat = rig.global_live2d_flatness;
+            if (ImGui::SliderFloat(tr("Broadcast 2.5D Flatten"), &flat, 0.0f, 1.0f, "%.2f")) {
+                rig.global_live2d_flatness = flat;
+                (void)params.set(ParamId::RenderFlatness, static_cast<double>(flat));
+                out_dirty = true;
+            }
+        }
+
+        if (ImGui::CollapsingHeader(tr("VRM & PMX Parity"))) {
+            auto& vp = rig.vrm_mmd_parity;
+            out_dirty |= ImGui::Checkbox(tr("OKLab Toon Harmonizer"), &vp.auto_toon_harmonizer_enabled);
+            out_dirty |= ImGui::SliderFloat(tr("VRM Cel Crispness"), &vp.vrm_cel_crispness_boost, 0.0f, 1.0f, "%.2f");
+            out_dirty |= ImGui::SliderFloat(tr("Shadow Chroma Lift"), &vp.vrm_shadow_chroma_lift, 0.0f, 1.0f, "%.2f");
+            out_dirty |= ImGui::Checkbox(tr("Auto Edge Width Scale"), &vp.vrm_auto_edge_scale_enabled);
+            out_dirty |= ImGui::SliderFloat(tr("Hair Angel Ring"), &vp.vrm_hair_angel_ring_boost, 0.0f, 1.5f, "%.2f");
+            out_dirty |=
+                ImGui::SliderFloat(tr("Pre-Cel Clarity"), &vp.vrm_pre_cel_clarity_strength, 0.0f, 1.0f, "%.2f");
+            out_dirty |= ImGui::Checkbox(tr("PMX Alpha-Bleed Padding"), &vp.pmx_alpha_bleed_padding);
+            out_dirty |= ImGui::Checkbox(tr("PMX Strict Draw Order"), &vp.pmx_strict_material_draw_order);
+        }
+    };
+
+    bool dirty = false;
     if (outliner_selected_cam_) {
         ImGui::TextColored(t.stage_cyan, "%s", tr("Studio Broadcast Camera (Locked Isolation)"));
         ImGui::Separator();
         ImGui::TextWrapped("%s", tr("Live Broadcast outputs (Spout2, VCam, NDI, Live Studio, PiP) always render "
                                     "cleanly from this camera with 2.5D Z-Flattening ON and zero Stage schematics."));
+        ImGui::Spacing();
+        draw_global_fx_sections(dirty);
+        if (dirty) {
+            sync_store_dirty(rig, actions.viewport);
+        }
         return;
     }
 
     if (selected_light_idx_ < 0 || static_cast<uint32_t>(selected_light_idx_) >= rig.studio_light_count) {
         ImGui::TextDisabled("%s", tr("Select a light or modifier in the Stage or Outliner."));
+        ImGui::Spacing();
+        draw_global_fx_sections(dirty);
+        if (dirty) {
+            sync_store_dirty(rig, actions.viewport);
+        }
         return;
     }
 
     auto& sl = rig.studio_lights[static_cast<size_t>(selected_light_idx_)];
-    bool dirty = false;
 
     ImGui::TextColored(t.stage_amber, "%s", sl.name.data());
     ImGui::Separator();
@@ -1097,6 +1240,14 @@ void LightingStagePanels::draw_inspector(const DevShellAvatarView& avatar, const
     }
 
     if (ImGui::CollapsingHeader(tr("Transform & Aim"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        const bool locked_by_circadian =
+            rig.circadian_enabled &&
+            (rig.circadian_sun_slot_id == selected_light_idx_ ||
+             (rig.circadian_sun_slot_id < 0 && sl.fixture == renderer::StudioFixtureProfile::NaturalSunCieSky));
+        if (locked_by_circadian) {
+            ImGui::TextColored(t.status_warn, "%s", tr("Locked by Circadian solar trajectory"));
+        }
+        ImGui::BeginDisabled(locked_by_circadian);
         if (ImGui::Checkbox(tr("Orbit Polar Coordinates"), &sl.use_orbit_angles)) {
             if (!sl.use_orbit_angles) {
                 renderer::bake_studio_light_world_pose(sl, pivot, avatar.camera_eye);
@@ -1110,6 +1261,7 @@ void LightingStagePanels::draw_inspector(const DevShellAvatarView& avatar, const
         } else {
             dirty |= ImGui::DragFloat3(tr("Position XYZ (m)"), sl.position_ws.data(), 0.02f, -10.0f, 10.0f);
         }
+        ImGui::EndDisabled();
         dirty |= ImGui::SliderFloat(tr("Fixture Roll (deg)"), &sl.roll_deg, -180.0f, 180.0f, "%.1f");
         dirty |= ImGui::Checkbox(tr("Aim Lock -> Pivot"), &sl.aim_lock);
         if (!sl.aim_lock) {
@@ -1207,30 +1359,19 @@ void LightingStagePanels::draw_inspector(const DevShellAvatarView& avatar, const
         dirty |= ImGui::Checkbox(tr("Coaxial Ring Lock"), &sl.coaxial_lock);
     }
 
-    if (ImGui::CollapsingHeader(tr("Satsuei & Split Grading"))) {
-        dirty |= ImGui::SliderFloat(tr("Light Wrap"), &rig.satsuei.light_wrap_strength, 0.0f, 1.0f, "%.2f");
-        dirty |= ImGui::SliderFloat(tr("Halation"), &rig.satsuei.halation_strength, 0.0f, 1.0f, "%.2f");
-        dirty |= ImGui::SliderFloat(tr("Backscatter"), &rig.satsuei.backscatter_strength, 0.0f, 1.5f, "%.2f");
-        dirty |= ImGui::SliderFloat(tr("Avatar Contrast"), &rig.split_grading.avatar_contrast, 0.6f, 1.5f, "%.2f");
-        float flat = rig.global_live2d_flatness;
-        if (ImGui::SliderFloat(tr("Broadcast 2.5D Flatten"), &flat, 0.0f, 1.0f, "%.2f")) {
-            rig.global_live2d_flatness = flat;
-            (void)params.set(ParamId::RenderFlatness, static_cast<double>(flat));
-            dirty = true;
-        }
-    }
+    draw_global_fx_sections(dirty);
 
     ImGui::PopItemWidth();
     // Scroll padding so the last control never sits clipped against the bottom fold.
     ImGui::Dummy(ImVec2(0.0f, 16.0f));
 
     if (dirty) {
-        sync_key_fill_rim_mirror(rig, actions.viewport);
+        sync_store_dirty(rig, actions.viewport);
     }
 }
 
 void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, const UiFontSet& fonts,
-                                             UiSelection& selection, StudioActions& actions) noexcept {
+                                             UiSelection& selection, StudioActions& actions) {
     (void)fonts;
     ensure_initialized(actions.viewport);
     const PrecisionDarkTokens& t = tokens();
@@ -1238,37 +1379,38 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
     const std::array<float, 3> pivot = compute_pivot_ws(avatar);
     const float fs = std::max(10.0f, ImGui::GetFontSize());
 
-    // Preset row: one dropdown + name field + Save/Load. Nothing is laid out as a strip, so no label can clip.
+    // Preset row: built-in .alfx presets + Save/Load + Export/Import .alfx.
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(tr("Preset"));
     ImGui::SameLine();
     {
+        const auto& catalog = core::AlfxSerializer::builtin_preset_catalog();
         float longest = 0.0f;
-        for (int p = 0; p < 5; ++p) {
-            longest = std::max(
-                longest,
-                ImGui::CalcTextSize(renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(p))).x);
+        for (const auto& info : catalog) {
+            longest = std::max(longest, ImGui::CalcTextSize(info.display_name).x);
         }
         const float combo_w = longest + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2.0f;
-        ImGui::SetNextItemWidth(std::min(combo_w, std::max(fs * 8.0f, ImGui::GetContentRegionAvail().x * 0.45f)));
+        ImGui::SetNextItemWidth(std::min(combo_w, std::max(fs * 8.0f, ImGui::GetContentRegionAvail().x * 0.36f)));
         const int cur = std::clamp(active_preset_idx_, 0, 4);
-        if (ImGui::BeginCombo("##RigPreset",
-                              renderer::studio_rig_preset_name(static_cast<renderer::StudioRigPresetId>(cur)))) {
-            for (int p = 0; p < 5; ++p) {
-                const auto pid = static_cast<renderer::StudioRigPresetId>(p);
-                if (ImGui::Selectable(renderer::studio_rig_preset_name(pid), p == cur)) {
-                    active_preset_idx_ = p;
-                    renderer::apply_studio_rig_preset(rig, pid, pivot);
+        if (ImGui::BeginCombo("##RigPreset", catalog[static_cast<size_t>(cur)].display_name)) {
+            for (size_t p = 0; p < catalog.size(); ++p) {
+                if (ImGui::Selectable(catalog[p].display_name, static_cast<int>(p) == cur)) {
+                    active_preset_idx_ = static_cast<int>(p);
+                    const auto doc = core::AlfxSerializer::build_builtin_preset(p, pivot);
+                    rig = doc.rig;
+                    renderer::ensure_studio_lights_initialized(rig, pivot);
                     selected_light_idx_ = 0;
-                    sync_key_fill_rim_mirror(rig, actions.viewport);
+                    sync_store_dirty(rig, actions.viewport);
+                    actions.request_apply_alfx_preset_index = static_cast<int32_t>(p);
                 }
             }
             ImGui::EndCombo();
         }
     }
     ImGui::SameLine();
-    const float save_w = ImGui::CalcTextSize(tr("Save Rig")).x + ImGui::CalcTextSize(tr("Load...")).x +
-                         ImGui::GetStyle().FramePadding.x * 4.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+    const float save_w = ImGui::CalcTextSize(tr("Save .alfx")).x + ImGui::CalcTextSize(tr("Load...")).x +
+                         ImGui::CalcTextSize(tr("Export...")).x + ImGui::CalcTextSize(tr("Import...")).x +
+                         ImGui::GetStyle().FramePadding.x * 8.0f + ImGui::GetStyle().ItemSpacing.x * 4.0f;
     const float name_w =
         std::min(ImGui::CalcTextSize("Custom Studio Rig").x + ImGui::GetStyle().FramePadding.x * 2.0f + 8.0f,
                  ImGui::GetContentRegionAvail().x - save_w);
@@ -1278,16 +1420,34 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
     ImGui::SetNextItemWidth(std::max(fs * 5.0f, name_w));
     ImGui::InputTextWithHint("##PresetName", "Preset name", save_name_buf_.data(), save_name_buf_.size());
     ImGui::SameLine();
-    if (ImGui::SmallButton(tr("Save Rig"))) {
+    if (ImGui::SmallButton(tr("Save .alfx"))) {
         ensure_rigs_loaded();
-        const auto dst = rigs_json_path();
+        const auto dst_dir = rigs_json_path();
         std::error_code ec;
-        if (!std::filesystem::exists(dst, ec) && !saved_rigs_.empty()) {
-            (void)renderer::save_lighting_rigs_json(dst, saved_rigs_);
+        std::filesystem::create_directories(dst_dir, ec);
+        std::string safe_name;
+        for (const char* p = save_name_buf_.data(); *p != '\0'; ++p) {
+            const unsigned char ch = static_cast<unsigned char>(*p);
+            if (std::isalnum(ch) != 0 || ch == '-' || ch == '_') {
+                safe_name.push_back(static_cast<char>(ch));
+            } else if (ch == ' ') {
+                safe_name.push_back('_');
+            }
         }
-        if (renderer::save_or_update_lighting_rig_preset(dst, save_name_buf_.data(), rig)) {
-            rigs_loaded_ = false;
-            ensure_rigs_loaded();
+        if (safe_name.empty()) {
+            safe_name = "CustomLook";
+        }
+        const auto dst_file = dst_dir / (safe_name + ".alfx");
+        core::AlfxMetadata meta{};
+        meta.name = (save_name_buf_[0] != '\0') ? std::string(save_name_buf_.data()) : std::string("Custom Look");
+        const auto serialized = core::AlfxSerializer::serialize_rig_to_json_string(rig, meta.name, &meta);
+        if (serialized.has_value()) {
+            const std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(serialized.value().data()),
+                                                 serialized.value().size());
+            if (core::write_bytes_atomic(dst_file, bytes).has_value()) {
+                rigs_loaded_ = false;
+                ensure_rigs_loaded();
+            }
         }
     }
     ImGui::SameLine();
@@ -1296,13 +1456,21 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
         ensure_rigs_loaded();
         ImGui::OpenPopup("##SavedRigsPopup");
     }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(tr("Export..."))) {
+        actions.request_export_alfx_dialog = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton(tr("Import..."))) {
+        actions.request_import_alfx_dialog = true;
+    }
     if (ImGui::BeginPopup("##SavedRigsPopup")) {
         for (size_t k = 0; k < saved_rigs_.size(); ++k) {
             if (ImGui::MenuItem(saved_rigs_[k].name.data())) {
                 rig = saved_rigs_[k].rig;
                 renderer::ensure_studio_lights_initialized(rig, pivot);
                 selected_light_idx_ = 0;
-                sync_key_fill_rim_mirror(rig, actions.viewport);
+                sync_store_dirty(rig, actions.viewport);
             }
         }
         ImGui::EndPopup();
@@ -1400,7 +1568,7 @@ void LightingStagePanels::draw_mixer_console(const DevShellAvatarView& avatar, c
             dirty = true;
         }
         if (dirty) {
-            sync_key_fill_rim_mirror(rig, actions.viewport);
+            sync_store_dirty(rig, actions.viewport);
         }
         ImGui::EndTable();
     }

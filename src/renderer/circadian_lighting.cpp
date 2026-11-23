@@ -65,32 +65,158 @@ struct CircadianKeyframe {
 // Monotonic 24-hour palette keyframes (cyclical wrap at 0.0 == 24.0) guaranteeing zero pops at midnight or dusk.
 constexpr std::array<CircadianKeyframe, 9> kKeyframes = {{
     // 00:00 Midnight Studio (moonlight rim + cyan-lavender monitor key + warm indoor fill)
-    {0.0f, 18.0f, 14.0f, 1.12f, 4600.0f, {0.86f, 0.93f, 1.00f}, -48.0f, 10.0f, 0.54f, {0.92f, 0.72f, 0.62f},
-     -138.0f, 28.0f, 1.05f, 6500.0f, {0.80f, 0.90f, 1.00f}, 0.78f},
+    {0.0f,
+     18.0f,
+     14.0f,
+     1.12f,
+     4600.0f,
+     {0.86f, 0.93f, 1.00f},
+     -48.0f,
+     10.0f,
+     0.54f,
+     {0.92f, 0.72f, 0.62f},
+     -138.0f,
+     28.0f,
+     1.05f,
+     6500.0f,
+     {0.80f, 0.90f, 1.00f},
+     0.78f},
     // 04:30 Pre-Dawn
-    {4.5f, 28.0f, 12.0f, 1.10f, 4400.0f, {0.88f, 0.89f, 1.00f}, -50.0f, 11.0f, 0.52f, {0.74f, 0.68f, 0.88f},
-     -142.0f, 24.0f, 0.96f, 6400.0f, {0.82f, 0.88f, 1.00f}, 0.78f},
+    {4.5f,
+     28.0f,
+     12.0f,
+     1.10f,
+     4400.0f,
+     {0.88f, 0.89f, 1.00f},
+     -50.0f,
+     11.0f,
+     0.52f,
+     {0.74f, 0.68f, 0.88f},
+     -142.0f,
+     24.0f,
+     0.96f,
+     6400.0f,
+     {0.82f, 0.88f, 1.00f},
+     0.78f},
     // 06:00 Dawn (low eastern rose-peach key + cool periwinkle fill)
-    {6.0f, 52.0f, 12.0f, 1.16f, 3600.0f, {1.00f, 0.80f, 0.72f}, -58.0f, 14.0f, 0.56f, {0.52f, 0.62f, 0.96f},
-     -132.0f, 18.0f, 0.88f, 5200.0f, {1.00f, 0.84f, 0.80f}, 0.82f},
+    {6.0f,
+     52.0f,
+     12.0f,
+     1.16f,
+     3600.0f,
+     {1.00f, 0.80f, 0.72f},
+     -58.0f,
+     14.0f,
+     0.56f,
+     {0.52f, 0.62f, 0.96f},
+     -132.0f,
+     18.0f,
+     0.88f,
+     5200.0f,
+     {1.00f, 0.84f, 0.80f},
+     0.82f},
     // 08:30 Morning Clean Daylight
-    {8.5f, 36.0f, 30.0f, 1.26f, 5400.0f, {1.00f, 0.96f, 0.94f}, -52.0f, 12.0f, 0.48f, {0.62f, 0.76f, 0.98f},
-     148.0f, 22.0f, 0.74f, 6000.0f, {0.86f, 0.94f, 1.00f}, 0.74f},
+    {8.5f,
+     36.0f,
+     30.0f,
+     1.26f,
+     5400.0f,
+     {1.00f, 0.96f, 0.94f},
+     -52.0f,
+     12.0f,
+     0.48f,
+     {0.62f, 0.76f, 0.98f},
+     148.0f,
+     22.0f,
+     0.74f,
+     6000.0f,
+     {0.86f, 0.94f, 1.00f},
+     0.74f},
     // 12:30 Midday Studio Daylight
-    {12.5f, 10.0f, 46.0f, 1.32f, 5800.0f, {1.00f, 0.99f, 0.97f}, -48.0f, 10.0f, 0.46f, {0.64f, 0.80f, 1.00f},
-     155.0f, 26.0f, 0.70f, 6200.0f, {0.88f, 0.95f, 1.00f}, 0.72f},
+    {12.5f,
+     10.0f,
+     46.0f,
+     1.32f,
+     5800.0f,
+     {1.00f, 0.99f, 0.97f},
+     -48.0f,
+     10.0f,
+     0.46f,
+     {0.64f, 0.80f, 1.00f},
+     155.0f,
+     26.0f,
+     0.70f,
+     6200.0f,
+     {0.88f, 0.95f, 1.00f},
+     0.72f},
     // 15:30 Late Afternoon Transition
-    {15.5f, -34.0f, 26.0f, 1.26f, 5000.0f, {1.00f, 0.92f, 0.82f}, 54.0f, 12.0f, 0.50f, {0.62f, 0.68f, 0.96f},
-     136.0f, 20.0f, 0.84f, 5200.0f, {1.00f, 0.88f, 0.74f}, 0.76f},
+    {15.5f,
+     -34.0f,
+     26.0f,
+     1.26f,
+     5000.0f,
+     {1.00f, 0.92f, 0.82f},
+     54.0f,
+     12.0f,
+     0.50f,
+     {0.62f, 0.68f, 0.96f},
+     136.0f,
+     20.0f,
+     0.84f,
+     5200.0f,
+     {1.00f, 0.88f, 0.74f},
+     0.76f},
     // 17:00 Golden Hour / Sunset (golden-amber key + deep violet/magenta shadow fill + strong warm rim)
-    {17.0f, -62.0f, 10.0f, 1.22f, 3100.0f, {1.00f, 0.72f, 0.44f}, 60.0f, 14.0f, 0.58f, {0.60f, 0.42f, 0.82f},
-     124.0f, 16.0f, 1.10f, 3400.0f, {1.00f, 0.70f, 0.42f}, 0.86f},
+    {17.0f,
+     -62.0f,
+     10.0f,
+     1.22f,
+     3100.0f,
+     {1.00f, 0.72f, 0.44f},
+     60.0f,
+     14.0f,
+     0.58f,
+     {0.60f, 0.42f, 0.82f},
+     124.0f,
+     16.0f,
+     1.10f,
+     3400.0f,
+     {1.00f, 0.70f, 0.42f},
+     0.86f},
     // 18:30 Blue Hour -> Night Studio Transition
-    {18.5f, -38.0f, 12.0f, 1.14f, 4100.0f, {0.90f, 0.88f, 1.00f}, 52.0f, 12.0f, 0.56f, {0.78f, 0.64f, 0.80f},
-     -134.0f, 24.0f, 1.04f, 6300.0f, {0.80f, 0.90f, 1.00f}, 0.80f},
+    {18.5f,
+     -38.0f,
+     12.0f,
+     1.14f,
+     4100.0f,
+     {0.90f, 0.88f, 1.00f},
+     52.0f,
+     12.0f,
+     0.56f,
+     {0.78f, 0.64f, 0.80f},
+     -134.0f,
+     24.0f,
+     1.04f,
+     6300.0f,
+     {0.80f, 0.90f, 1.00f},
+     0.80f},
     // 24:00 Wraps seamlessly back to 00:00
-    {24.0f, 18.0f, 14.0f, 1.12f, 4600.0f, {0.86f, 0.93f, 1.00f}, -48.0f, 10.0f, 0.54f, {0.92f, 0.72f, 0.62f},
-     -138.0f, 28.0f, 1.05f, 6500.0f, {0.80f, 0.90f, 1.00f}, 0.78f},
+    {24.0f,
+     18.0f,
+     14.0f,
+     1.12f,
+     4600.0f,
+     {0.86f, 0.93f, 1.00f},
+     -48.0f,
+     10.0f,
+     0.54f,
+     {0.92f, 0.72f, 0.62f},
+     -138.0f,
+     28.0f,
+     1.05f,
+     6500.0f,
+     {0.80f, 0.90f, 1.00f},
+     0.78f},
 }};
 
 [[nodiscard]] float smooth_step01(float t) noexcept {
@@ -102,7 +228,8 @@ constexpr std::array<CircadianKeyframe, 9> kKeyframes = {{
     return a + (b - a) * t;
 }
 
-[[nodiscard]] std::array<float, 3> lerp3(const std::array<float, 3>& a, const std::array<float, 3>& b, float t) noexcept {
+[[nodiscard]] std::array<float, 3> lerp3(const std::array<float, 3>& a, const std::array<float, 3>& b,
+                                         float t) noexcept {
     return {lerpf(a[0], b[0], t), lerpf(a[1], b[1], t), lerpf(a[2], b[2], t)};
 }
 
@@ -124,14 +251,6 @@ constexpr std::array<CircadianKeyframe, 9> kKeyframes = {{
 
 [[nodiscard]] std::array<float, 3> mul3(const std::array<float, 3>& a, const std::array<float, 3>& b) noexcept {
     return {a[0] * b[0], a[1] * b[1], a[2] * b[2]};
-}
-
-[[nodiscard]] std::array<float, 3> dir_from_az_el(float az_deg, float el_deg) noexcept {
-    constexpr float kDegToRad = 3.1415926535f / 180.0f;
-    const float az = az_deg * kDegToRad;
-    const float el = el_deg * kDegToRad;
-    const float ce = std::cos(el);
-    return {ce * std::sin(az), std::sin(el), ce * std::cos(az)};
 }
 
 } // namespace
@@ -288,43 +407,46 @@ CircadianLightingResult evaluate_circadian_lighting(float hour_0_to_24) noexcept
 
 void apply_circadian_to_rig(const CircadianLightingResult& res, LightingRig& rig) noexcept {
     ensure_studio_lights_initialized(rig);
-    auto update_slot = [&](uint32_t idx, const char* fallback_name, StudioFixtureProfile profile, float az, float el,
-                           const std::array<float, 3>& rgb, float intensity, float kelvin, bool shadow) {
-        if (idx >= kMaxStudioLights) {
-            return;
-        }
-        if (idx >= rig.studio_light_count) {
-            rig.studio_light_count = idx + 1u;
-            rig.studio_lights[idx] = StudioLightSpec{};
-            configure_fixture_defaults(rig.studio_lights[idx], profile);
-            std::snprintf(rig.studio_lights[idx].name.data(), rig.studio_lights[idx].name.size(), "%s", fallback_name);
-        }
-        auto& s = rig.studio_lights[idx];
-        s.enabled = true;
-        s.cast_shadow = shadow;
-        s.use_orbit_angles = true;
-        s.orbit_azimuth_deg = az;
-        s.orbit_elevation_deg = el;
-        s.tint_rgb = rgb;
-        s.kelvin_cct = kelvin;
-        s.intensity_ev100 = intensity;
-    };
 
-    const uint32_t sun_idx = (rig.dominant_key_light_id < kMaxStudioLights) ? rig.dominant_key_light_id : 0u;
-    rig.dominant_key_light_id = sun_idx;
-    update_slot(sun_idx, "Solar Sun", StudioFixtureProfile::NaturalSunCieSky, res.key_azimuth_deg,
-                res.key_elevation_deg, res.key_rgb, res.key_intensity, res.key_kelvin, true);
-    rig.studio_lights[sun_idx].fixture = StudioFixtureProfile::NaturalSunCieSky;
-    if (rig.studio_light_count > 1u) {
-        const uint32_t fill_idx = (sun_idx == 1u) ? 0u : 1u;
-        update_slot(fill_idx, "Sky Fill", StudioFixtureProfile::LanternChinaBall, res.fill_azimuth_deg,
-                    res.fill_elevation_deg, res.fill_rgb, res.fill_intensity, 5600.0f, false);
+    int32_t sun_idx = rig.circadian_sun_slot_id;
+    if (sun_idx < 0 || static_cast<uint32_t>(sun_idx) >= rig.studio_light_count) {
+        sun_idx = -1;
+        for (uint32_t i = 0; i < rig.studio_light_count; ++i) {
+            if (rig.studio_lights[i].fixture == StudioFixtureProfile::NaturalSunCieSky) {
+                sun_idx = static_cast<int32_t>(i);
+                break;
+            }
+        }
+        if (sun_idx < 0) {
+            sun_idx = (rig.dominant_key_light_id < rig.studio_light_count)
+                          ? static_cast<int32_t>(rig.dominant_key_light_id)
+                          : 0;
+        }
     }
-    if (rig.studio_light_count > 2u) {
-        const uint32_t rim_idx = (sun_idx == 2u) ? 0u : 2u;
-        update_slot(rim_idx, "Sky Rim", StudioFixtureProfile::Stripbox, res.rim_azimuth_deg,
-                    res.rim_elevation_deg, res.rim_rgb, res.rim_intensity, res.rim_kelvin, false);
+
+    const uint32_t uidx = static_cast<uint32_t>(std::clamp(sun_idx, 0, static_cast<int32_t>(kMaxStudioLights - 1u)));
+    const bool new_slot = (uidx >= rig.studio_light_count);
+    if (new_slot) {
+        rig.studio_light_count = uidx + 1u;
+        rig.studio_lights[uidx] = StudioLightSpec{};
     }
+
+    auto& sun = rig.studio_lights[uidx];
+    if (new_slot || sun.fixture != StudioFixtureProfile::NaturalSunCieSky) {
+        configure_fixture_defaults(sun, StudioFixtureProfile::NaturalSunCieSky);
+        std::snprintf(sun.name.data(), sun.name.size(), "%s", "Circadian Solar Sun");
+    }
+    sun.passive_flag = PassiveFlagMode::None;
+    sun.enabled = true;
+    sun.cast_shadow = true;
+    sun.use_orbit_angles = true;
+    sun.orbit_azimuth_deg = res.key_azimuth_deg;
+    sun.orbit_elevation_deg = res.key_elevation_deg;
+    sun.tint_rgb = res.key_rgb;
+    sun.kelvin_cct = res.key_kelvin;
+    sun.intensity_ev100 = res.key_intensity;
+
+    rig.circadian_sun_slot_id = static_cast<int32_t>(uidx);
     rig.shadow_warm_cool_shift = res.shadow_warm_cool_shift;
 }
 

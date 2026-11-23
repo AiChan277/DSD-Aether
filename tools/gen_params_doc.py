@@ -51,7 +51,7 @@ def generate_markdown() -> str:
         "# AETHER-2.5D Parameter Registry (`REQ-UI-010`)",
         "",
         "Generated automatically from [`src/ui/params/param_registry.hpp`](../src/ui/params/param_registry.hpp) (`tools/gen_params_doc.py`).",
-        "Do not edit manually; every UI Inspector row, `settings.toml` / `project.toml` key, `/aether/param/<id>` OSC endpoint, Command Palette entry, and documentation table is derived from this single source.",
+        "Do not edit manually; every UI Inspector row, `session_state.json` / `.apr` key, `/aether/param/<id>` OSC endpoint, Command Palette entry, and documentation table is derived from this single source.",
         "",
         "| ID | Group | Label | Type | Owner | Default | Range | Unit | OSC Endpoint | Flags |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",

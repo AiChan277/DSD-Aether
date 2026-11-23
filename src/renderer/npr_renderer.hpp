@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/expected.hpp"
+#include "lighting/lighting_store.hpp"
 #include "renderer/frame_graph.hpp"
 #include "renderer/sdf_generator.hpp"
 #include "rhi/rhi_swapchain.hpp"
@@ -65,8 +66,10 @@ class NprRenderer {
 
     [[nodiscard]] FrameGraph& graph() noexcept { return graph_; }
     [[nodiscard]] const FrameGraph& graph() const noexcept { return graph_; }
-    [[nodiscard]] LightingRig& lighting() noexcept { return lighting_; }
-    [[nodiscard]] const LightingRig& lighting() const noexcept { return lighting_; }
+    [[nodiscard]] lighting::StudioLightingStore& lighting_store() noexcept { return lighting_store_; }
+    [[nodiscard]] const lighting::StudioLightingStore& lighting_store() const noexcept { return lighting_store_; }
+    [[nodiscard]] LightingRig& lighting() noexcept { return lighting_store_.rig(); }
+    [[nodiscard]] const LightingRig& lighting() const noexcept { return lighting_store_.rig(); }
     [[nodiscard]] uint64_t frame_timeline_value() const noexcept { return timeline_counter_; }
     [[nodiscard]] bool wireframe_supported() const noexcept { return graph_.wireframe_supported(); }
 
@@ -79,7 +82,7 @@ class NprRenderer {
 
     rhi::RhiDevice* device_{nullptr};
     FrameGraph graph_{};
-    LightingRig lighting_{LightingRig::default_three_point()};
+    lighting::StudioLightingStore lighting_store_{};
     std::array<CriticalCmdSlot, kFrameSlots> critical_slots_{};
     std::array<CriticalCmdSlot, kFrameSlots> ui_slots_{};
     uint64_t timeline_counter_{0};

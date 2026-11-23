@@ -54,6 +54,9 @@ class AccelStructManager {
     [[nodiscard]] uint64_t refit_count() const noexcept { return refit_count_; }
     [[nodiscard]] uint64_t full_rebuild_count() const noexcept { return rebuild_count_; }
 
+    /** Releases avatar-owned BLAS, TLAS, scratch, and metadata buffers while preserving the device handle. */
+    void destroy_avatar_structures() noexcept;
+
   private:
     struct BlasBucket {
         VkAccelerationStructureKHR handle{VK_NULL_HANDLE};
@@ -66,8 +69,6 @@ class AccelStructManager {
         std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges{};
         std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> range_ptrs{};
     };
-
-    void destroy_avatar_structures() noexcept;
 
     const rhi::RhiDevice* device_{nullptr};
 

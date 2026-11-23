@@ -28,7 +28,8 @@ struct TrackingOverlaySnapshot {
     RoiRectNorm face_roi{};
     std::array<float, 68U * 2U> keypoints_norm{};
     uint32_t keypoint_count{0};
-    // Normalized [0..1] camera coords: [0]=subject right iris (468, image-left), [1]=subject left iris (473, image-right)
+    // Normalized [0..1] camera coords: [0]=subject right iris (468, image-left), [1]=subject left iris (473,
+    // image-right)
     std::array<float, 2U * 2U> iris_centers_norm{};
     bool iris_valid{false};
     std::array<float, 8U * 2U> left_eye_poly_norm{};
@@ -74,9 +75,8 @@ struct TrackingOverlaySnapshot {
  * pinhole intrinsic matrix (`fx = fy = cam_w`, `cx = cam_w * 0.5`, `cy = cam_h * 0.5`),
  * aligned against rigid non-deforming canonical 3D skull vertices.
  */
-[[nodiscard]] HeadPose6D solve_pnp_head_pose(const float* landmarks_478x3, const RoiRectNorm& face_roi,
-                                             uint32_t cam_w, uint32_t cam_h,
-                                             const HeadPose6D* warm_start = nullptr) noexcept;
+[[nodiscard]] HeadPose6D solve_pnp_head_pose(const float* landmarks_478x3, const RoiRectNorm& face_roi, uint32_t cam_w,
+                                             uint32_t cam_h, const HeadPose6D* warm_start = nullptr) noexcept;
 
 /** 2D image point in camera pixels (`y` down). */
 struct FacePlanePoint2D {
@@ -137,18 +137,15 @@ class LandmarkPoseSolver {
                                                         float pose_flag, uint32_t cam_w = 1280U,
                                                         uint32_t cam_h = 720U) const noexcept;
 
-    void populate_tracking_frame(const RoiRectNorm& face_roi, const float* m2_landmarks_478x3, float face_flag,
-                                 const float* m3_blendshapes_52, const float* m1_body_world_39x3,
-                                 const float* m1_body_lm_39x5, float pose_flag, bool run_left_hand, bool run_right_hand,
-                                 const float* m1_hands_lm_2x63, const float* m1_hands_flag_2,
-                                 const float* m1_hands_handed_2, uint64_t capture_timestamp_us,
-                                 uint64_t inference_complete_us, EpTier active_ep, uint32_t frame_sequence,
-                                 bool roi_reset_this_frame, AetherTrackingFrame& out_frame,
-                                 uint32_t cam_w = 1280U, uint32_t cam_h = 720U,
-                                 bool enable_hand_tracking = false, const CapturedFrameBuffer* raw_frame = nullptr,
-                                 const RoiRectNorm* left_hand_roi = nullptr,
-                                 const RoiRectNorm* right_hand_roi = nullptr,
-                                 const float* m1_hands_world_2x63 = nullptr) noexcept;
+    void populate_tracking_frame(
+        const RoiRectNorm& face_roi, const float* m2_landmarks_478x3, float face_flag, const float* m3_blendshapes_52,
+        const float* m1_body_world_39x3, const float* m1_body_lm_39x5, float pose_flag, bool run_left_hand,
+        bool run_right_hand, const float* m1_hands_lm_2x63, const float* m1_hands_flag_2,
+        const float* m1_hands_handed_2, uint64_t capture_timestamp_us, uint64_t inference_complete_us, EpTier active_ep,
+        uint32_t frame_sequence, bool roi_reset_this_frame, AetherTrackingFrame& out_frame, uint32_t cam_w = 1280U,
+        uint32_t cam_h = 720U, bool enable_hand_tracking = false, const CapturedFrameBuffer* raw_frame = nullptr,
+        const RoiRectNorm* left_hand_roi = nullptr, const RoiRectNorm* right_hand_roi = nullptr,
+        const float* m1_hands_world_2x63 = nullptr) noexcept;
 
     [[nodiscard]] const TrackingOverlaySnapshot& overlay_snapshot() const noexcept { return overlay_; }
     [[nodiscard]] bool neutral_calibrated() const noexcept { return neutral_calibrated_; }

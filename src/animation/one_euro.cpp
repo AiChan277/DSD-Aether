@@ -286,8 +286,7 @@ void OneEuroPoseBank::update(const AetherTrackingFrame& raw, FilteredTrackingSta
     for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) {
         const OneEuroParams base_params = params_for_bone(b);
         bool bone_tracked = false;
-        if (b == AETHER_BONE_HEAD || b == AETHER_BONE_NECK || b == AETHER_BONE_LEFT_EYE ||
-            b == AETHER_BONE_RIGHT_EYE) {
+        if (b == AETHER_BONE_HEAD || b == AETHER_BONE_NECK || b == AETHER_BONE_LEFT_EYE || b == AETHER_BONE_RIGHT_EYE) {
             bone_tracked = face_tracked;
         } else if (b >= AETHER_BONE_LEFT_THUMB_PROXIMAL && b <= AETHER_BONE_LEFT_LITTLE_DISTAL) {
             bone_tracked = lhand_tracked;

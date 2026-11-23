@@ -117,8 +117,7 @@ Expected<void> Dx12Bridge::create_vulkan_image(bool try_import) {
     foreign_ = false;
 #if defined(_WIN32)
     void* nt_handle = fg_.shared_rgba16f_nt_handle();
-    const bool same_luid = (d3d12_ != nullptr) && vk_device_->gpu_info().luid_valid &&
-                           d3d12_->gpu_info().luid_valid &&
+    const bool same_luid = (d3d12_ != nullptr) && vk_device_->gpu_info().luid_valid && d3d12_->gpu_info().luid_valid &&
                            std::memcmp(vk_device_->gpu_info().luid.data(), d3d12_->gpu_info().luid.data(), 8u) == 0;
     if (try_import && same_luid && nt_handle != nullptr && vk_device_->gpu_info().external_memory_win32_active) {
         VkExternalMemoryImageCreateInfo ext_ci{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};

@@ -226,7 +226,6 @@ struct AppSequence {
         req.lighting_mode = 0u;
         req.rt_enabled = false;
         req.show_checkerboard = false;
-        req.show_orbit_orb = false;
         req.render_csm_shadow = true;
         req.encode_stage_broadcast_pip = true;
         AppFrameResult out{};
@@ -265,8 +264,9 @@ struct AppSequence {
         REQUIRE(o.stage_viewport_height == stage_h);
         auto st = npr.graph().readback_image_rgba8(o.stage_viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                                    o.stage_viewport_rt_width, o.stage_viewport_rt_height);
-        auto pp = npr.graph().readback_image_rgba8(o.stage_broadcast_pip_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                                   o.stage_broadcast_pip_width, o.stage_broadcast_pip_height);
+        auto pp =
+            npr.graph().readback_image_rgba8(o.stage_broadcast_pip_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                             o.stage_broadcast_pip_width, o.stage_broadcast_pip_height);
         auto lv = npr.graph().readback_image_rgba8(o.viewport_image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, o.width,
                                                    o.height);
         REQUIRE(st.has_value());
@@ -336,9 +336,12 @@ std::vector<uint8_t> rasterize(const ImDrawData* dd, int w, int h, const uint8_t
             const int cx1 = std::min(w, static_cast<int>(std::ceil(cmd.ClipRect.z)));
             const int cy1 = std::min(h, static_cast<int>(std::ceil(cmd.ClipRect.w)));
             for (unsigned int i = 0; i + 2 < cmd.ElemCount; i += 3) {
-                const ImDrawVert& v0 = dl->VtxBuffer[static_cast<int>(cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i)])];
-                const ImDrawVert& v1 = dl->VtxBuffer[static_cast<int>(cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i + 1U)])];
-                const ImDrawVert& v2 = dl->VtxBuffer[static_cast<int>(cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i + 2U)])];
+                const ImDrawVert& v0 =
+                    dl->VtxBuffer[static_cast<int>(cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i)])];
+                const ImDrawVert& v1 = dl->VtxBuffer[static_cast<int>(
+                    cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i + 1U)])];
+                const ImDrawVert& v2 = dl->VtxBuffer[static_cast<int>(
+                    cmd.VtxOffset + dl->IdxBuffer[static_cast<int>(cmd.IdxOffset + i + 2U)])];
                 const float area =
                     (v1.pos.x - v0.pos.x) * (v2.pos.y - v0.pos.y) - (v2.pos.x - v0.pos.x) * (v1.pos.y - v0.pos.y);
                 if (std::fabs(area) < 1e-6f) {
@@ -368,14 +371,18 @@ std::vector<uint8_t> rasterize(const ImDrawData* dd, int w, int h, const uint8_t
                         const float u = v0.uv.x * b0 + v1.uv.x * b1 + v2.uv.x * b2;
                         const float v = v0.uv.y * b0 + v1.uv.y * b1 + v2.uv.y * b2;
                         if (font_tex) {
-                            const int tx = std::clamp(static_cast<int>(u * static_cast<float>(atlas_w)), 0, atlas_w - 1);
-                            const int ty = std::clamp(static_cast<int>(v * static_cast<float>(atlas_h)), 0, atlas_h - 1);
+                            const int tx =
+                                std::clamp(static_cast<int>(u * static_cast<float>(atlas_w)), 0, atlas_w - 1);
+                            const int ty =
+                                std::clamp(static_cast<int>(v * static_cast<float>(atlas_h)), 0, atlas_h - 1);
                             a *= static_cast<float>(atlas[static_cast<size_t>(ty) * static_cast<size_t>(atlas_w) +
                                                           static_cast<size_t>(tx)]) /
                                  255.0f;
                         } else if (img != nullptr && img->w > 0u) {
-                            const uint32_t tx = std::min(img->w - 1u, static_cast<uint32_t>(std::max(0.0f, u * img->w)));
-                            const uint32_t ty = std::min(img->h - 1u, static_cast<uint32_t>(std::max(0.0f, v * img->h)));
+                            const uint32_t tx =
+                                std::min(img->w - 1u, static_cast<uint32_t>(std::max(0.0f, u * img->w)));
+                            const uint32_t ty =
+                                std::min(img->h - 1u, static_cast<uint32_t>(std::max(0.0f, v * img->h)));
                             const uint8_t* s = img->at(tx, ty);
                             cr *= s[0] / 255.0f;
                             cg *= s[1] / 255.0f;
@@ -384,7 +391,8 @@ std::vector<uint8_t> rasterize(const ImDrawData* dd, int w, int h, const uint8_t
                         if (a <= 0.0f) {
                             continue;
                         }
-                        const size_t o = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 3U;
+                        const size_t o =
+                            (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 3U;
                         rgb[o + 0] = rgb[o + 0] * (1.0f - a) + cr * a;
                         rgb[o + 1] = rgb[o + 1] * (1.0f - a) + cg * a;
                         rgb[o + 2] = rgb[o + 2] * (1.0f - a) + cb * a;
@@ -480,8 +488,9 @@ TEST_CASE("Lighting tab: non-blank Stage, in-canvas Grid/Schematic, uncropped Pi
     GarbageCollector gc;
     renderer::Dx12Bridge bridge;
     bridge.attach(*rhi, gc);
-    const bool dx12_ok = bridge.configure(kOutW, kOutH, avatar->requirements.vertex_count, &rhi->gpu_info()).has_value() &&
-                         bridge.bind_avatar(avatar.get()).has_value();
+    const bool dx12_ok =
+        bridge.configure(kOutW, kOutH, avatar->requirements.vertex_count, &rhi->gpu_info()).has_value() &&
+        bridge.bind_avatar(avatar.get()).has_value();
     if (!dx12_ok) {
         WARN("DirectX 12 unavailable: DX12 half of the Lighting tab verification skipped");
     } else {
@@ -602,8 +611,8 @@ TEST_CASE("Lighting tab: non-blank Stage, in-canvas Grid/Schematic, uncropped Pi
     ui_rig.avatar.stage_broadcast_pip_texture = reinterpret_cast<VkDescriptorSet>(static_cast<uintptr_t>(kTexPip));
 
     // Balanced ImGui stacks in every mode (UiRig::frame asserts after each frame).
-    for (const auto m : {ui::StudioMode::LiveStudio, ui::StudioMode::Rigging, ui::StudioMode::Nodes,
-                         ui::StudioMode::Lighting}) {
+    for (const auto m :
+         {ui::StudioMode::LiveStudio, ui::StudioMode::Rigging, ui::StudioMode::Nodes, ui::StudioMode::Lighting}) {
         ws.switch_mode(m);
         for (int f = 0; f < 6; ++f) {
             ui_rig.frame(ws);
@@ -697,8 +706,7 @@ TEST_CASE("Lighting tab: non-blank Stage, in-canvas Grid/Schematic, uncropped Pi
         for (int f = 0; f < 3; ++f) {
             ui_rig.frame(ws);
         }
-        const std::vector<uint8_t> px =
-            rasterize(ImGui::GetDrawData(), 1600, 900, atlas, aw, ah, &r.stage_rt, &r.pip);
+        const std::vector<uint8_t> px = rasterize(ImGui::GetDrawData(), 1600, 900, atlas, aw, ah, &r.stage_rt, &r.pip);
         const Image tab{px, 1600u, 900u};
         const auto canvas = ls.last_canvas_rect();
         const Rect centre{static_cast<uint32_t>(canvas[0] + (canvas[2] - canvas[0]) * 0.35f),

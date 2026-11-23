@@ -1,5 +1,6 @@
 #include "ui/wizard/hardware_optimizer_wizard.hpp"
 
+#include "ui/params/project_settings.hpp"
 #include "ui/theme/icons.hpp"
 #include "ui/theme/tokens.hpp"
 #include "ui/theme/tr.hpp"
@@ -187,7 +188,7 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
         const ImVec2 wmin = ImGui::GetWindowPos();
         draw_elevation_shadow(bg_dl, wmin, ImVec2(wmin.x + mw, wmin.y + mh), t.radius_modal_px);
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (KeymapRegistry::is_raw_key_pressed(ImGuiKey_Escape)) {
             keep_open = false;
         }
 
@@ -356,8 +357,9 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
                                       : "Synthetic Feed",
                                   camera_fps_);
                 ImGui::Spacing();
-                ImGui::TextColored(t.text_tertiary, "%s",
-                                   tr("Applies settings atomically to settings.toml without interrupting OBS scenes."));
+                ImGui::TextColored(
+                    t.text_tertiary, "%s",
+                    tr("Applies settings atomically to session_state.json without interrupting OBS scenes."));
             }
         }
         ImGui::EndChild();
@@ -395,8 +397,7 @@ bool HardwareOptimizerWizard::draw(bool on_air, const HardwareInventory& hw, con
                 if (!synthetic_feed_ && selected_camera_idx_ >= 0 &&
                     selected_camera_idx_ < static_cast<int>(hw.cameras.size())) {
                     const auto& cam = hw.cameras[static_cast<size_t>(selected_camera_idx_)];
-                    settings.preferred_camera_link =
-                        cam.symbolic_link.empty() ? cam.friendly_name : cam.symbolic_link;
+                    settings.preferred_camera_link = cam.symbolic_link.empty() ? cam.friendly_name : cam.symbolic_link;
                     actions.viewport.request_select_camera = true;
                     actions.viewport.select_camera_fps = std::max(30, camera_fps_);
                     std::snprintf(actions.viewport.select_camera_link.data(),

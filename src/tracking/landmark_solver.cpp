@@ -331,7 +331,7 @@ void quat_to_euler_yxz(Quat q, float& out_pitch, float& out_yaw, float& out_roll
 }
 
 void map_m2_crop_to_cam_px(float u_m2, float v_m2, const RoiRectNorm& face_roi, uint32_t cam_w, uint32_t cam_h,
-                            float& out_u, float& out_v) noexcept {
+                           float& out_u, float& out_v) noexcept {
     const float nx = (u_m2 / 256.0f) - 0.5f;
     const float ny = (v_m2 / 256.0f) - 0.5f;
     const float c = std::cos(face_roi.rotation_rad);
@@ -376,8 +376,8 @@ HeadEulerDeg kalido_calc_head_plane(FacePlanePoint2D eye_img_left, FacePlanePoin
     const float chin_n = (chin.x - nose_bridge.x) * nx + (chin.y - nose_bridge.y) * ny;
     if (chin_n > 1.0f) {
         out_pitch_ratio = tip_n / chin_n;
-        out.pitch = std::clamp((out_pitch_ratio - neutral_pitch_ratio) / 0.25f, -1.0f, 1.0f) * 35.0f *
-                    animation::kDegToRad;
+        out.pitch =
+            std::clamp((out_pitch_ratio - neutral_pitch_ratio) / 0.25f, -1.0f, 1.0f) * 35.0f * animation::kDegToRad;
     }
     out.pitch *= animation::kRadToDeg;
     out.yaw *= animation::kRadToDeg;
@@ -463,9 +463,8 @@ HeadPose6D solve_pnp_head_pose(const float* landmarks_478x3, const RoiRectNorm& 
     float cur_cost = eval_cost(q, t);
 
     if (warm_start != nullptr && warm_start->valid) {
-        const Quat q_w = animation::normalize(
-            {warm_start->rotation_xyzw[0], warm_start->rotation_xyzw[1], warm_start->rotation_xyzw[2],
-             warm_start->rotation_xyzw[3]});
+        const Quat q_w = animation::normalize({warm_start->rotation_xyzw[0], warm_start->rotation_xyzw[1],
+                                               warm_start->rotation_xyzw[2], warm_start->rotation_xyzw[3]});
         const Vec3 t_w{warm_start->position_m[0], warm_start->position_m[1], warm_start->position_m[2]};
         const float warm_cost = eval_cost(q_w, t_w);
         if (warm_cost < cur_cost * 1.25f) {
@@ -495,20 +494,10 @@ HeadPose6D solve_pnp_head_pose(const float* landmarks_478x3, const RoiRectNorm& 
             const float w = weights[k] * huber;
 
             const float j0[6] = {
-                p.x * inv_d2 * r.y,
-                inv_d * r.z - p.x * inv_d2 * r.x,
-                -inv_d * r.y,
-                inv_d,
-                0.0f,
-                p.x * inv_d2,
+                p.x * inv_d2 * r.y, inv_d * r.z - p.x * inv_d2 * r.x, -inv_d * r.y, inv_d, 0.0f, p.x * inv_d2,
             };
             const float j1[6] = {
-                -inv_d * r.z + p.y * inv_d2 * r.y,
-                -p.y * inv_d2 * r.x,
-                inv_d * r.x,
-                0.0f,
-                inv_d,
-                p.y * inv_d2,
+                -inv_d * r.z + p.y * inv_d2 * r.y, -p.y * inv_d2 * r.x, inv_d * r.x, 0.0f, inv_d, p.y * inv_d2,
             };
 
             for (int c = 0; c < 6; ++c) {
@@ -781,8 +770,8 @@ RoiRectNorm LandmarkPoseSolver::compute_next_face_roi(const float* m2_landmarks_
 }
 
 RoiRectNorm LandmarkPoseSolver::estimate_face_roi_from_m1(const float* m1_body_lm_39x5, const RoiRectNorm& lb_roi,
-                                                            float pose_flag, uint32_t cam_w,
-                                                            uint32_t cam_h) const noexcept {
+                                                          float pose_flag, uint32_t cam_w,
+                                                          uint32_t cam_h) const noexcept {
     if (m1_body_lm_39x5 == nullptr || pose_flag < 0.35f) {
         return {};
     }
@@ -940,10 +929,9 @@ void LandmarkPoseSolver::populate_tracking_frame(
             hp.valid = true;
         }
 
-        const Quat q_raw = hp.valid
-                               ? animation::normalize(
-                                     {hp.rotation_xyzw[0], hp.rotation_xyzw[1], hp.rotation_xyzw[2], hp.rotation_xyzw[3]})
-                               : Quat::identity();
+        const Quat q_raw = hp.valid ? animation::normalize({hp.rotation_xyzw[0], hp.rotation_xyzw[1],
+                                                            hp.rotation_xyzw[2], hp.rotation_xyzw[3]})
+                                    : Quat::identity();
         const Vec3 t_raw =
             hp.valid ? Vec3{hp.position_m[0], hp.position_m[1], hp.position_m[2]} : Vec3{0.0f, 0.0f, -0.55f};
 
@@ -972,8 +960,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
             has_prev_raw_quat_ = false;
         }
 
-        // Stage 2: Rigid Head Unprojection into Head-Local Canonical Space (eliminates Pitch/Yaw/Roll expression bleed).
-        // Forward pinhole model is `P_cam = rotate(q_raw, P_local) + t_raw`, `d = -P_cam.z`, `ox = P_cam.x/d`.
+        // Stage 2: Rigid Head Unprojection into Head-Local Canonical Space (eliminates Pitch/Yaw/Roll expression
+        // bleed). Forward pinhole model is `P_cam = rotate(q_raw, P_local) + t_raw`, `d = -P_cam.z`, `ox = P_cam.x/d`.
         // Solving ray-to-canonical-depth-plane intersection via `inverse(q_raw)` recovers exact `P_local`.
         const Quat q_inv = animation::conjugate(q_raw);
         const Vec3 origin_local = animation::rotate(q_inv, t_raw * -1.0f);
@@ -1103,8 +1091,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
             const Quat q_neutral{neutral_head_quat_[0], neutral_head_quat_[1], neutral_head_quat_[2],
                                  neutral_head_quat_[3]};
             q_head = animation::normalize(animation::conjugate(q_neutral) * q_raw);
-            t_head = {t_raw.x - neutral_head_pos_[0], t_raw.y - neutral_head_pos_[1],
-                      t_raw.z - neutral_head_pos_[2]};
+            t_head = {t_raw.x - neutral_head_pos_[0], t_raw.y - neutral_head_pos_[1], t_raw.z - neutral_head_pos_[2]};
         }
 
         // Strict anatomical limits: Pitch [-35, +35], Yaw [-45, +45], Roll [-30, +30] degrees
@@ -1143,17 +1130,18 @@ void LandmarkPoseSolver::populate_tracking_frame(
 
         // 8-point eye contour polygons (in full-res pixels + normalized overlay) and full-res iris centroid refinement
         static constexpr std::array<uint16_t, 8U> kImgLeftEyePolyIdx = {33U, 160U, 159U, 158U, 133U, 153U, 145U, 144U};
-        static constexpr std::array<uint16_t, 8U> kImgRightEyePolyIdx = {362U, 385U, 386U, 387U, 263U, 373U, 374U, 380U};
+        static constexpr std::array<uint16_t, 8U> kImgRightEyePolyIdx = {362U, 385U, 386U, 387U,
+                                                                         263U, 373U, 374U, 380U};
         const float inv_w = 1.0f / static_cast<float>(std::max(cam_w, 1U));
         const float inv_h = 1.0f / static_cast<float>(std::max(cam_h, 1U));
-        std::array<float, 8U * 2U> eye_r_poly_px{};
-        std::array<float, 8U * 2U> eye_l_poly_px{};
+        std::array<float, size_t{8} * 2> eye_r_poly_px{};
+        std::array<float, size_t{8} * 2> eye_l_poly_px{};
         for (size_t ei = 0U; ei < 8U; ++ei) {
             float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
             map_m2_crop_to_cam_px(lm[kImgLeftEyePolyIdx[ei] * 3U + 0U], lm[kImgLeftEyePolyIdx[ei] * 3U + 1U], face_roi,
                                   cam_w, cam_h, u0, v0);
-            map_m2_crop_to_cam_px(lm[kImgRightEyePolyIdx[ei] * 3U + 0U], lm[kImgRightEyePolyIdx[ei] * 3U + 1U], face_roi,
-                                  cam_w, cam_h, u1, v1);
+            map_m2_crop_to_cam_px(lm[kImgRightEyePolyIdx[ei] * 3U + 0U], lm[kImgRightEyePolyIdx[ei] * 3U + 1U],
+                                  face_roi, cam_w, cam_h, u1, v1);
             eye_r_poly_px[ei * 2U + 0U] = u0;
             eye_r_poly_px[ei * 2U + 1U] = v0;
             eye_l_poly_px[ei * 2U + 0U] = u1;
@@ -1170,7 +1158,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
             static constexpr std::array<uint16_t, 5U> kHudImgLeftBrow5 = {70U, 63U, 105U, 66U, 107U};
             map_m2_crop_to_cam_px(lm[kHudImgLeftBrow5[bi] * 3U + 0U], lm[kHudImgLeftBrow5[bi] * 3U + 1U], face_roi,
                                   cam_w, cam_h, ub0, vb0);
-            map_m2_crop_to_cam_px(lm[kBrowL5[bi] * 3U + 0U], lm[kBrowL5[bi] * 3U + 1U], face_roi, cam_w, cam_h, ub1, vb1);
+            map_m2_crop_to_cam_px(lm[kBrowL5[bi] * 3U + 0U], lm[kBrowL5[bi] * 3U + 1U], face_roi, cam_w, cam_h, ub1,
+                                  vb1);
             overlay_.left_brow_pts_norm[bi * 2U + 0U] = std::clamp(ub0 * inv_w, 0.0f, 1.0f);
             overlay_.left_brow_pts_norm[bi * 2U + 1U] = std::clamp(vb0 * inv_h, 0.0f, 1.0f);
             overlay_.right_brow_pts_norm[bi * 2U + 0U] = std::clamp(ub1 * inv_w, 0.0f, 1.0f);
@@ -1238,19 +1227,19 @@ void LandmarkPoseSolver::populate_tracking_frame(
 
         // Warudo & Live2D Dual-Stiffness C2 Blink Spring + Pitch-Compensated EAR + Pursuit/Saccade Gaze Stabilizer
         BlinkGazeInput blink_in{};
-        blink_in.ear_left = ear_r;               // 263/362 = subject's LEFT eye
-        blink_in.ear_right = ear_l;              // 33/133  = subject's RIGHT eye
+        blink_in.ear_left = ear_r;  // 263/362 = subject's LEFT eye
+        blink_in.ear_right = ear_l; // 33/133  = subject's RIGHT eye
         blink_in.neutral_ear_left_hint = neutral_ear_r_;
         blink_in.neutral_ear_right_hint = neutral_ear_l_;
         blink_in.raw_squint_left = out_frame.arkit_blendshapes[5];
         blink_in.raw_squint_right = out_frame.arkit_blendshapes[12];
         blink_in.raw_cheek_squint_left = out_frame.arkit_blendshapes[47];
         blink_in.raw_cheek_squint_right = out_frame.arkit_blendshapes[48];
-        blink_in.gaze_gx_left = l_eye_gx;        // 473     = subject's LEFT iris
+        blink_in.gaze_gx_left = l_eye_gx; // 473     = subject's LEFT iris
         blink_in.gaze_gy_left = l_eye_gy;
-        blink_in.gaze_gx_right = r_eye_gx;       // 468     = subject's RIGHT iris
+        blink_in.gaze_gx_right = r_eye_gx; // 468     = subject's RIGHT iris
         blink_in.gaze_gy_right = r_eye_gy;
-        blink_in.pitch_down_rad = pitch_r;       // +pitch_r = looking downward
+        blink_in.pitch_down_rad = pitch_r; // +pitch_r = looking downward
         blink_in.head_yaw_rad = yaw_r;
         blink_in.dt_s = dt_s;
         blink_in.has_landmarks = true;
@@ -1281,8 +1270,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
             out_frame.arkit_blendshapes[bs_base + 2] = std::clamp(g_out, 0.0f, 1.0f);
             out_frame.arkit_blendshapes[bs_base + 3] = std::clamp(g_up, 0.0f, 1.0f);
         };
-        write_eye_gaze_bs(blink_out.gaze_gx, blink_out.gaze_gy, 8U, true);   // subject's right eye
-        write_eye_gaze_bs(blink_out.gaze_gx, blink_out.gaze_gy, 1U, false);  // subject's left eye
+        write_eye_gaze_bs(blink_out.gaze_gx, blink_out.gaze_gy, 8U, true);  // subject's right eye
+        write_eye_gaze_bs(blink_out.gaze_gx, blink_out.gaze_gy, 1U, false); // subject's left eye
 
         out_frame.arkit_blendshapes[0] = std::clamp(blink_out.blink_left, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[7] = std::clamp(blink_out.blink_right, 0.0f, 1.0f);
@@ -1309,7 +1298,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
         live2d.param_eye_ball_x = std::clamp(blink_out.gaze_gx, -1.0f, 1.0f);
         live2d.param_eye_ball_y = std::clamp(-blink_out.gaze_gy, -1.0f, 1.0f);
 
-        // Task 4: Full 5-point per-brow Live2D Eyebrow tracking (`ParamBrowLY/RY`, `Angle`, `Form`) + ARKit slots `41..45`
+        // Task 4: Full 5-point per-brow Live2D Eyebrow tracking (`ParamBrowLY/RY`, `Angle`, `Form`) + ARKit slots
+        // `41..45`
         std::array<float, 5> dl{};
         std::array<float, 5> dr{};
         float sum_l = 0.0f;
@@ -1342,18 +1332,23 @@ void LandmarkPoseSolver::populate_tracking_frame(
         const float brow_out_r_g = std::clamp(r_out / 0.085f, 0.0f, 1.0f);
         const float m3_w = (m3_blendshapes_52 != nullptr) ? 0.30f : 0.0f;
         const float g_w = 1.0f - m3_w;
-        out_frame.arkit_blendshapes[41] = std::clamp(g_w * brow_down_l_g + m3_w * out_frame.arkit_blendshapes[41], 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[42] = std::clamp(g_w * brow_down_r_g + m3_w * out_frame.arkit_blendshapes[42], 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[43] = std::clamp(g_w * brow_in_up_g + m3_w * out_frame.arkit_blendshapes[43], 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[44] = std::clamp(g_w * brow_out_l_g + m3_w * out_frame.arkit_blendshapes[44], 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[45] = std::clamp(g_w * brow_out_r_g + m3_w * out_frame.arkit_blendshapes[45], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[41] =
+            std::clamp(g_w * brow_down_l_g + m3_w * out_frame.arkit_blendshapes[41], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[42] =
+            std::clamp(g_w * brow_down_r_g + m3_w * out_frame.arkit_blendshapes[42], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[43] =
+            std::clamp(g_w * brow_in_up_g + m3_w * out_frame.arkit_blendshapes[43], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[44] =
+            std::clamp(g_w * brow_out_l_g + m3_w * out_frame.arkit_blendshapes[44], 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[45] =
+            std::clamp(g_w * brow_out_r_g + m3_w * out_frame.arkit_blendshapes[45], 0.0f, 1.0f);
 
         // Task 3: Live2D 2D Mouth Manifold (`ParamMouthOpenY` x `ParamMouthForm` -> continuous `A, I, U, E, O`)
         const float raw_mouth_open = (mouth_h_ratio - neutral_mouth_height_ratio_) / 0.38f;
         live2d.param_mouth_open_y = (raw_mouth_open < 0.06f) ? 0.0f : std::clamp(raw_mouth_open, 0.0f, 1.0f);
-        live2d.param_mouth_form = std::clamp(
-            (mouth_width_ratio - neutral_mouth_width_ratio_) / (0.18f * std::max(neutral_mouth_width_ratio_, 0.20f)),
-            -1.0f, 1.0f);
+        live2d.param_mouth_form = std::clamp((mouth_width_ratio - neutral_mouth_width_ratio_) /
+                                                 (0.18f * std::max(neutral_mouth_width_ratio_, 0.20f)),
+                                             -1.0f, 1.0f);
         animation::solve_live2d_vowels(live2d.param_mouth_form, live2d.param_mouth_open_y, live2d.vowel_a,
                                        live2d.vowel_i, live2d.vowel_u, live2d.vowel_e, live2d.vowel_o);
         out_frame.webcam_visemes[0] = live2d.vowel_a;
@@ -1375,10 +1370,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
             std::clamp(funnel_geom * 0.68f + out_frame.arkit_blendshapes[19] * 0.32f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[20] =
             std::clamp(pucker_geom * 0.68f + out_frame.arkit_blendshapes[20] * 0.32f, 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[23] = std::clamp(
-            std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[23] * 0.35f), 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[24] = std::clamp(
-            std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[24] * 0.35f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[23] =
+            std::clamp(std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[23] * 0.35f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[24] =
+            std::clamp(std::max(smile_pos, smile_geom * 0.65f + out_frame.arkit_blendshapes[24] * 0.35f), 0.0f, 1.0f);
         out_frame.arkit_blendshapes[29] =
             std::clamp(stretch_geom * 0.60f + out_frame.arkit_blendshapes[29] * 0.40f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[30] =
@@ -1391,8 +1386,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
             std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[39] * 0.70f, 0.0f, 1.0f);
         out_frame.arkit_blendshapes[40] =
             std::clamp(jaw_open_geom * 0.30f + out_frame.arkit_blendshapes[40] * 0.70f, 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[47] = std::clamp(std::max(out_frame.arkit_blendshapes[47], smile_pos * 0.65f), 0.0f, 1.0f);
-        out_frame.arkit_blendshapes[48] = std::clamp(std::max(out_frame.arkit_blendshapes[48], smile_pos * 0.65f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[47] =
+            std::clamp(std::max(out_frame.arkit_blendshapes[47], smile_pos * 0.65f), 0.0f, 1.0f);
+        out_frame.arkit_blendshapes[48] =
+            std::clamp(std::max(out_frame.arkit_blendshapes[48], smile_pos * 0.65f), 0.0f, 1.0f);
 
         overlay_.live2d = live2d;
         animation::pack_live2d_into_tracking_frame(live2d, out_frame);
@@ -1400,21 +1397,81 @@ void LandmarkPoseSolver::populate_tracking_frame(
         // Export 68-point Live2D canonical wireframe HUD overlay (normalized [0..1] camera space) + irises + triad
         static constexpr std::array<uint16_t, 68U> kHud68Indices = {
             // Jaw (0..16, 17 pts)
-            234, 132, 58, 172, 136, 150, 149, 176, 152, 400, 378, 379, 365, 397, 288, 361, 454,
+            234,
+            132,
+            58,
+            172,
+            136,
+            150,
+            149,
+            176,
+            152,
+            400,
+            378,
+            379,
+            365,
+            397,
+            288,
+            361,
+            454,
             // Image-left brow (17..21, 5 pts)
-            70, 63, 105, 66, 107,
+            70,
+            63,
+            105,
+            66,
+            107,
             // Image-right brow (22..26, 5 pts)
-            336, 296, 334, 293, 300,
+            336,
+            296,
+            334,
+            293,
+            300,
             // Nose (27..35, 9 pts)
-            168, 6, 197, 195, 5, 4, 64, 2, 294,
+            168,
+            6,
+            197,
+            195,
+            5,
+            4,
+            64,
+            2,
+            294,
             // Image-left eye ring (36..41, 6 pts)
-            33, 160, 158, 133, 153, 144,
+            33,
+            160,
+            158,
+            133,
+            153,
+            144,
             // Image-right eye ring (42..47, 6 pts)
-            362, 385, 387, 263, 373, 380,
+            362,
+            385,
+            387,
+            263,
+            373,
+            380,
             // Outer lips loop (48..59, 12 pts)
-            61, 40, 37, 0, 267, 270, 291, 321, 314, 17, 84, 91,
+            61,
+            40,
+            37,
+            0,
+            267,
+            270,
+            291,
+            321,
+            314,
+            17,
+            84,
+            91,
             // Inner lips loop (60..67, 8 pts)
-            78, 81, 13, 311, 308, 402, 14, 178,
+            78,
+            81,
+            13,
+            311,
+            308,
+            402,
+            14,
+            178,
         };
         for (uint32_t k = 0; k < 68U; ++k) {
             const uint16_t idx = kHud68Indices[k];
@@ -1489,7 +1546,7 @@ void LandmarkPoseSolver::populate_tracking_frame(
                                      const RoiRectNorm* hand_roi, uint32_t hand_bone, uint32_t finger_base_bone,
                                      bool& out_detected, std::array<float, 4U>& out_obb, float& out_angle,
                                      std::array<float, 2U>& out_palm_ctr, std::array<float, 2U>& out_palm_n2d,
-                                     std::array<float, 21U * 2U>& out_kp21, float& out_hand_conf) noexcept {
+                                     std::array<float, size_t{21} * 2>& out_kp21, float& out_hand_conf) noexcept {
         out_detected = false;
         out_hand_conf = 0.0f;
 
@@ -1545,9 +1602,10 @@ void LandmarkPoseSolver::populate_tracking_frame(
             out_palm_n2d = (dlen > 1e-4f) ? std::array<float, 2U>{dx_mid / dlen, dy_mid / dlen}
                                           : std::array<float, 2U>{0.0f, -1.0f};
             out_palm_ctr = {
-                0.20f * (out_kp21[0] + out_kp21[5U * 2U] + out_kp21[9U * 2U] + out_kp21[13U * 2U] + out_kp21[17U * 2U]),
-                0.20f * (out_kp21[1] + out_kp21[5U * 2U + 1U] + out_kp21[9U * 2U + 1U] + out_kp21[13U * 2U + 1U] +
-                         out_kp21[17U * 2U + 1U]),
+                0.20f * (out_kp21[0] + out_kp21[size_t{5} * 2U] + out_kp21[size_t{9} * 2U] + out_kp21[size_t{13} * 2U] +
+                         out_kp21[size_t{17} * 2U]),
+                0.20f * (out_kp21[1] + out_kp21[size_t{5} * 2U + 1U] + out_kp21[size_t{9} * 2U + 1U] +
+                         out_kp21[size_t{13} * 2U + 1U] + out_kp21[size_t{17} * 2U + 1U]),
             };
 
             const float ca = std::cos(out_angle);
@@ -1585,8 +1643,8 @@ void LandmarkPoseSolver::populate_tracking_frame(
             }
             if (!use_world) {
                 for (size_t k = 0U; k < 21U; ++k) {
-                    p3[k] = {x_sign * ((hlm[k * 3U + 0U] / 224.0f) - 0.5f),
-                             -((hlm[k * 3U + 1U] / 224.0f) - 0.5f), -hlm[k * 3U + 2U] / 224.0f};
+                    p3[k] = {x_sign * ((hlm[k * 3U + 0U] / 224.0f) - 0.5f), -((hlm[k * 3U + 1U] / 224.0f) - 0.5f),
+                             -hlm[k * 3U + 2U] / 224.0f};
                 }
             }
 

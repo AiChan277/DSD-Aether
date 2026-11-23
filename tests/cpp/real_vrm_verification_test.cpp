@@ -85,8 +85,7 @@ ImageLumaStats analyze_rgba8(const std::vector<uint8_t>& rgba, uint32_t w, uint3
         const double r = rgba[i + 0];
         const double g = rgba[i + 1];
         const double b = rgba[i + 2];
-        const bool is_bg =
-            (std::abs(r - bg_r) <= 4.0) && (std::abs(g - bg_g) <= 4.0) && (std::abs(b - bg_b) <= 4.0);
+        const bool is_bg = (std::abs(r - bg_r) <= 4.0) && (std::abs(g - bg_g) <= 4.0) && (std::abs(b - bg_b) <= 4.0);
         const double l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
         if (!is_bg) {
             fg_lumas.push_back(l);
@@ -117,7 +116,8 @@ double mat3x4_delta_angle_deg(const float m[12]) noexcept {
     const double sy = static_cast<double>(m[2]) - static_cast<double>(m[8]);
     const double sz = static_cast<double>(m[4]) - static_cast<double>(m[1]);
     const double sin_theta = 0.5 * std::sqrt(sx * sx + sy * sy + sz * sz);
-    const double cos_theta = 0.5 * ((static_cast<double>(m[0]) + static_cast<double>(m[5]) + static_cast<double>(m[10])) - 1.0);
+    const double cos_theta =
+        0.5 * ((static_cast<double>(m[0]) + static_cast<double>(m[5]) + static_cast<double>(m[10])) - 1.0);
     return std::atan2(sin_theta, cos_theta) * static_cast<double>(aether::animation::kRadToDeg);
 }
 
@@ -169,15 +169,15 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
                 avatar->materials.size(), avatar->textures.size(), avatar->springs.size(), avatar->colliders.size());
     for (size_t i = 0; i < avatar->materials.size(); ++i) {
         const auto& m = avatar->materials[i];
-        std::printf(
-            "  mat[%zu]: base=(%.2f,%.2f,%.2f,%.2f) shade=(%.2f,%.2f,%.2f) emissive=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f tex=(base=%u,sh=%u,em=%u)\n",
-            i, static_cast<double>(m.base_color[0]), static_cast<double>(m.base_color[1]),
-            static_cast<double>(m.base_color[2]), static_cast<double>(m.base_color[3]),
-            static_cast<double>(m.shade_color_gi[0]), static_cast<double>(m.shade_color_gi[1]),
-            static_cast<double>(m.shade_color_gi[2]), static_cast<double>(m.emissive_and_pad[0]),
-            static_cast<double>(m.emissive_and_pad[1]), static_cast<double>(m.emissive_and_pad[2]),
-            static_cast<double>(m.toon_params[0]), static_cast<double>(m.toon_params[1]), m.tex_base, m.tex_shade,
-            m.tex_emissive);
+        std::printf("  mat[%zu]: base=(%.2f,%.2f,%.2f,%.2f) shade=(%.2f,%.2f,%.2f) emissive=(%.2f,%.2f,%.2f) "
+                    "shift=%.2f toony=%.2f tex=(base=%u,sh=%u,em=%u)\n",
+                    i, static_cast<double>(m.base_color[0]), static_cast<double>(m.base_color[1]),
+                    static_cast<double>(m.base_color[2]), static_cast<double>(m.base_color[3]),
+                    static_cast<double>(m.shade_color_gi[0]), static_cast<double>(m.shade_color_gi[1]),
+                    static_cast<double>(m.shade_color_gi[2]), static_cast<double>(m.emissive_and_pad[0]),
+                    static_cast<double>(m.emissive_and_pad[1]), static_cast<double>(m.emissive_and_pad[2]),
+                    static_cast<double>(m.toon_params[0]), static_cast<double>(m.toon_params[1]), m.tex_base,
+                    m.tex_shade, m.tex_emissive);
     }
 
     constexpr uint32_t kW = 1280;
@@ -286,15 +286,15 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
         transform_point_3x4(skin.bone_matrices[AETHER_BONE_RIGHT_LOWER_ARM], rest_ws[AETHER_BONE_RIGHT_LOWER_ARM]);
     const auto l_dir = aether::animation::normalize_safe(l_la_ws - l_ua_ws);
     const auto r_dir = aether::animation::normalize_safe(r_la_ws - r_ua_ws);
-    const double l_drop_deg =
-        std::asin(std::clamp(static_cast<double>(-l_dir.y), -1.0, 1.0)) * static_cast<double>(aether::animation::kRadToDeg);
-    const double r_drop_deg =
-        std::asin(std::clamp(static_cast<double>(-r_dir.y), -1.0, 1.0)) * static_cast<double>(aether::animation::kRadToDeg);
+    const double l_drop_deg = std::asin(std::clamp(static_cast<double>(-l_dir.y), -1.0, 1.0)) *
+                              static_cast<double>(aether::animation::kRadToDeg);
+    const double r_drop_deg = std::asin(std::clamp(static_cast<double>(-r_dir.y), -1.0, 1.0)) *
+                              static_cast<double>(aether::animation::kRadToDeg);
 
-    std::printf(
-        "[NEUTRAL-POSE] delta_deg(head=%.3f neck=%.3f chest=%.3f spine=%.3f) sh_dy=%.4f arm_drop=(L=%.2f, R=%.2f deg)\n",
-        head_deg, neck_deg, chest_deg, spine_deg, static_cast<double>(std::abs(l_sh_ws.y - r_sh_ws.y)), l_drop_deg,
-        r_drop_deg);
+    std::printf("[NEUTRAL-POSE] delta_deg(head=%.3f neck=%.3f chest=%.3f spine=%.3f) sh_dy=%.4f arm_drop=(L=%.2f, "
+                "R=%.2f deg)\n",
+                head_deg, neck_deg, chest_deg, spine_deg, static_cast<double>(std::abs(l_sh_ws.y - r_sh_ws.y)),
+                l_drop_deg, r_drop_deg);
 
     // Head/neck carry only the ~1.1 deg the user turned (HUD P+0.6 Y-0.8 R-0.4); the torso stays at rest.
     CHECK(head_deg < 1.8);
@@ -316,8 +316,8 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
         const Vec3 cam_fwd{0.0f, 0.0f, -1.0f};
         const float* hm = skin.bone_matrices[AETHER_BONE_HEAD];
         const Vec3 head_up = aether::animation::normalize_safe(Vec3{hm[1], hm[5], hm[9]});
-        const Vec3 eye_left = aether::animation::normalize_safe(skinned(AETHER_BONE_LEFT_EYE) -
-                                                                skinned(AETHER_BONE_RIGHT_EYE));
+        const Vec3 eye_left =
+            aether::animation::normalize_safe(skinned(AETHER_BONE_LEFT_EYE) - skinned(AETHER_BONE_RIGHT_EYE));
         const Vec3 head_fwd = aether::animation::normalize_safe(aether::animation::cross(eye_left, head_up));
         const Vec3 chest_left = aether::animation::normalize_safe(skinned(AETHER_BONE_LEFT_UPPER_ARM) -
                                                                   skinned(AETHER_BONE_RIGHT_UPPER_ARM));
@@ -355,7 +355,6 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
             req.frame_slot = static_cast<uint32_t>(fidx & 1ULL);
             req.rt_enabled = rt_enabled && rhi->rt_supported();
             req.show_checkerboard = false;
-            req.show_orbit_orb = false;
             req.render_csm_shadow = true;
             REQUIRE(renderer.render_headless_frame(req).has_value());
             ++fidx;
@@ -367,12 +366,12 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
         const auto st = analyze_rgba8(px.value(), kW, kH);
         const auto& snap = renderer.graph().timing().latest_snapshot();
         const auto& dm = renderer.graph().denoiser();
-        std::printf(
-            "[SHOT %s_%s] fg=%u mean_luma=%.1f p95_luma=%.1f white_clip=%u denoise=%.3fms (p95=%.3fms, active=%s, fallback=%d/%d)\n",
-            prefix.c_str(), suffix, st.fg_pixels, st.mean_luma, st.p95_luma, st.white_clipped_pixels,
-            static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Denoise)]),
-            static_cast<double>(dm.rolling_p95_ms()), dm.active_name(), dm.fallback_triggered() ? 1 : 0,
-            static_cast<int>(dm.fallback_reason()));
+        std::printf("[SHOT %s_%s] fg=%u mean_luma=%.1f p95_luma=%.1f white_clip=%u denoise=%.3fms (p95=%.3fms, "
+                    "active=%s, fallback=%d/%d)\n",
+                    prefix.c_str(), suffix, st.fg_pixels, st.mean_luma, st.p95_luma, st.white_clipped_pixels,
+                    static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Denoise)]),
+                    static_cast<double>(dm.rolling_p95_ms()), dm.active_name(), dm.fallback_triggered() ? 1 : 0,
+                    static_cast<int>(dm.fallback_reason()));
         const std::filesystem::path out_path = snap_dir / (prefix + "_" + suffix + ".png");
         REQUIRE(aether::test::save_rgba8_png(out_path, kW, kH, px.value().data()));
     };
@@ -440,7 +439,6 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
                 req.lighting_mode = lm;
                 req.rt_enabled = (lm > 0u) && rhi->rt_supported();
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.render_csm_shadow = true;
                 REQUIRE(renderer.render_headless_frame(req).has_value());
                 ++fidx;
@@ -456,8 +454,8 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
                         static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Denoise)]),
                         static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::Live2dNpr)]),
                         static_cast<double>(snap.pass_ms[static_cast<size_t>(aether::rhi::GpuPassId::ToneMap)]));
-            REQUIRE(aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH,
-                                                  px.value().data()));
+            REQUIRE(
+                aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH, px.value().data()));
         };
         capture_mode("mode0_traditional", 0u, false, false);
         capture_mode("preset_wuthering_waves", 1u, false, true);
@@ -497,7 +495,6 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
                 req.lighting_mode = lm;
                 req.rt_enabled = (lm > 0u) && rhi->rt_supported();
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.render_csm_shadow = true;
                 REQUIRE(renderer.render_headless_frame(req).has_value());
                 ++fidx;
@@ -509,8 +506,8 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
             const auto st = analyze_rgba8(px.value(), kW, kH);
             std::printf("[SIDE %s] mode=%u fg=%u mean_luma=%.1f p95_luma=%.1f\n", suffix, static_cast<unsigned>(lm),
                         st.fg_pixels, st.mean_luma, st.p95_luma);
-            REQUIRE(aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH,
-                                                  px.value().data()));
+            REQUIRE(
+                aether::test::save_rgba8_png(snap_dir / (prefix + "_" + suffix + ".png"), kW, kH, px.value().data()));
         };
         capture_side("side_face_mode0_traditional", face, 0u);
         capture_side("side_face_mode1_hybrid_rt", face, 1u);
@@ -525,8 +522,8 @@ TEST_CASE("Real VRM 8590256991748008892.vrm headless snapshots and shading diagn
 
     std::array<float, aether::animation::kMaxMorphs> expr{};
     std::copy_n(skin.morph_weights, std::min<size_t>(expr.size(), skin.morph_count), expr.begin());
-    expr[0] = 1.0f;  // eyeBlinkLeft  -> VRM Blink_L
-    expr[7] = 1.0f;  // eyeBlinkRight -> VRM Blink_R
+    expr[0] = 1.0f;                                        // eyeBlinkLeft  -> VRM Blink_L
+    expr[7] = 1.0f;                                        // eyeBlinkRight -> VRM Blink_R
     expr[aether::animation::kVisemeSlotOffset + 0] = 1.0f; // VRM "A"
     avatar->update_pose(0, 2, skin.bone_matrices, skin.bone_count, expr.data(), skin.morph_count, true);
     avatar->update_pose(1, 2, skin.bone_matrices, skin.bone_count, expr.data(), skin.morph_count, true);
@@ -761,10 +758,10 @@ TEST_CASE("120-frame idle steady state on 8590256991748008892.vrm (330 Hz SimEng
         }
     }
 
-    std::printf(
-        "[STEADY-STATE 120f] max_bone_mat_var=%.2e sim_tip_vel=%.2e m/s (333Hz=%.2e, worst j=%u %.2e) vrm_tip_vel=%.2e m/s (worst j=%u %.2e) (vrm_springs=%u cols=%u)\n",
-        max_bone_mat_var, max_sim_tip_vel, max_333hz_tip_vel, worst_sim_j, worst_sim_v, max_vrm_tip_vel, worst_vrm_j,
-        worst_vrm_v, vrm_spring.joint_count(), vrm_spring.collider_count());
+    std::printf("[STEADY-STATE 120f] max_bone_mat_var=%.2e sim_tip_vel=%.2e m/s (333Hz=%.2e, worst j=%u %.2e) "
+                "vrm_tip_vel=%.2e m/s (worst j=%u %.2e) (vrm_springs=%u cols=%u)\n",
+                max_bone_mat_var, max_sim_tip_vel, max_333hz_tip_vel, worst_sim_j, worst_sim_v, max_vrm_tip_vel,
+                worst_vrm_j, worst_vrm_v, vrm_spring.joint_count(), vrm_spring.collider_count());
     CHECK(max_bone_mat_var < 1e-5);
     CHECK(max_sim_tip_vel < 1e-5);
     CHECK(max_333hz_tip_vel < 1e-5);
@@ -881,8 +878,8 @@ TEST_CASE("8590256991748008892.vrm: zero stationary jitter and smooth Spine->Che
     CHECK(peak[2] > peak[1]);
     CHECK(peak[3] > peak[2]);
     CHECK(peak[3] > 15.0f);
-    CHECK(peak[3] < 20.5f);    // critically damped: no overshoot beyond the tracked 20 deg
-    CHECK(max_jerk < 0.35f);   // C2-smooth: no per-frame acceleration spikes from the 30 Hz camera steps
+    CHECK(peak[3] < 20.5f);  // critically damped: no overshoot beyond the tracked 20 deg
+    CHECK(max_jerk < 0.35f); // C2-smooth: no per-frame acceleration spikes from the 30 Hz camera steps
 
     avatar.reset();
     rhi->destroy();
@@ -900,8 +897,7 @@ TEST_CASE("Real Windows Media Foundation webcam enumeration and live capture", "
     REQUIRE_FALSE(devs.empty());
 
     // Physical camera should be ordered ahead of virtual camera drivers.
-    const bool has_physical =
-        std::any_of(devs.begin(), devs.end(), [](const auto& d) { return !d.likely_virtual; });
+    const bool has_physical = std::any_of(devs.begin(), devs.end(), [](const auto& d) { return !d.likely_virtual; });
     if (has_physical) {
         CHECK_FALSE(devs.front().likely_virtual);
     }
@@ -940,8 +936,9 @@ TEST_CASE("Real Windows Media Foundation webcam enumeration and live capture", "
     CHECK_FALSE(src->is_open());
 }
 
-TEST_CASE("Task 4: 8590256991748008892.vrm binds Live2D brow/vowel parameters and supports !has_split_brow_morphs fallback",
-          "[vrm][live2d][brow]") {
+TEST_CASE(
+    "Task 4: 8590256991748008892.vrm binds Live2D brow/vowel parameters and supports !has_split_brow_morphs fallback",
+    "[vrm][live2d][brow]") {
     const auto vrm_path = find_user_vrm_path();
     if (vrm_path.empty()) {
         SKIP("Real user VRM 8590256991748008892.vrm not found in Downloads");
@@ -1031,15 +1028,16 @@ TEST_CASE("Task 4: 8590256991748008892.vrm binds Live2D brow/vowel parameters an
     // Exercise GpuAvatar::update_pose with opt_live2d and verify clean morphs/brow bones
     avatar->update_pose(0U, 1U, s_split.bone_matrices, s_split.bone_count, s_split.arkit_preview,
                         AETHER_EXPRESSION_SLOT_COUNT, true, &s_split.live2d);
-    avatar->update_pose(1U, 2U, s_fb.bone_matrices, s_fb.bone_count, s_fb.arkit_preview,
-                        AETHER_EXPRESSION_SLOT_COUNT, true, &s_fb.live2d);
+    avatar->update_pose(1U, 2U, s_fb.bone_matrices, s_fb.bone_count, s_fb.arkit_preview, AETHER_EXPRESSION_SLOT_COUNT,
+                        true, &s_fb.live2d);
 
     avatar.reset();
     rhi->destroy();
     aether_runtime_shutdown();
 }
 
-TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, SpringBone collider penetrations, 30->240Hz pacing, and Rust graph",
+TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, SpringBone collider penetrations, 30->240Hz "
+          "pacing, and Rust graph",
           "[forensic][vrm]") {
     const auto vrm_path = find_user_vrm_path();
     if (vrm_path.empty()) {
@@ -1077,44 +1075,52 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
     };
 
     std::printf("\n=== [FORENSIC] MODEL INVENTORY (%s) ===\n", vrm_path.string().c_str());
-    std::printf("source_format=%u verts=%zu tris=%zu joints=%zu springs=%zu colliders=%zu morphs=%zu expr_bindings=%zu split_brow=%d brow_bones=%zu\n",
+    std::printf("source_format=%u verts=%zu tris=%zu joints=%zu springs=%zu colliders=%zu morphs=%zu expr_bindings=%zu "
+                "split_brow=%d brow_bones=%zu\n",
                 avatar->desc.source_format, avatar->rest_vertices.size(), avatar->rest_indices.size() / 3,
-                avatar->joints.size(), avatar->springs.size(), avatar->colliders.size(),
-                avatar->morph_ranges.size(), avatar->expressions.size(),
-                avatar->has_split_brow_morphs ? 1 : 0, avatar->brow_bones.size());
+                avatar->joints.size(), avatar->springs.size(), avatar->colliders.size(), avatar->morph_ranges.size(),
+                avatar->expressions.size(), avatar->has_split_brow_morphs ? 1 : 0, avatar->brow_bones.size());
 
     // Resolve joint world rotations for collider transforms
     std::vector<aether::animation::Quat> j_world_rot(avatar->joints.size(), aether::animation::Quat::identity());
     std::vector<uint8_t> j_done(avatar->joints.size(), 0U);
     auto resolve_jrot = [&](auto& self, size_t idx, int depth) -> aether::animation::Quat {
-        if (idx >= avatar->joints.size() || depth > 128) return aether::animation::Quat::identity();
-        if (j_done[idx] != 0U) return j_world_rot[idx];
+        if (idx >= avatar->joints.size() || depth > 128)
+            return aether::animation::Quat::identity();
+        if (j_done[idx] != 0U)
+            return j_world_rot[idx];
         const auto& j = avatar->joints[idx];
         const float* br = j.bind_rotation_quat;
-        const float q2 = br[0]*br[0] + br[1]*br[1] + br[2]*br[2] + br[3]*br[3];
-        const aether::animation::Quat ql = (q2 > 1e-6f) ? aether::animation::normalize({br[0], br[1], br[2], br[3]}) : aether::animation::Quat::identity();
-        const aether::animation::Quat qp = (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar->joints.size())
-                                               ? self(self, static_cast<size_t>(j.parent_index), depth + 1)
-                                               : aether::animation::Quat::identity();
+        const float q2 = br[0] * br[0] + br[1] * br[1] + br[2] * br[2] + br[3] * br[3];
+        const aether::animation::Quat ql = (q2 > 1e-6f) ? aether::animation::normalize({br[0], br[1], br[2], br[3]})
+                                                        : aether::animation::Quat::identity();
+        const aether::animation::Quat qp =
+            (j.parent_index >= 0 && static_cast<size_t>(j.parent_index) < avatar->joints.size())
+                ? self(self, static_cast<size_t>(j.parent_index), depth + 1)
+                : aether::animation::Quat::identity();
         j_world_rot[idx] = aether::animation::normalize(qp * ql);
         j_done[idx] = 1U;
         return j_world_rot[idx];
     };
-    for (size_t i = 0; i < avatar->joints.size(); ++i) (void)resolve_jrot(resolve_jrot, i, 0);
+    for (size_t i = 0; i < avatar->joints.size(); ++i)
+        (void)resolve_jrot(resolve_jrot, i, 0);
 
     // 1. Expression Bindings & Morph Vertex Overlap Audit
     std::printf("\n=== [FORENSIC] EXPRESSION BINDINGS & MORPH OVERLAPS ===\n");
     auto collect_slot_verts = [&](uint32_t slot) -> std::vector<uint32_t> {
         std::vector<uint32_t> verts;
         for (const auto& eb : avatar->expressions) {
-            if (eb.input_slot != slot || eb.morph_index >= avatar->morph_ranges.size()) continue;
+            if (eb.input_slot != slot || eb.morph_index >= avatar->morph_ranges.size())
+                continue;
             const auto& mr = avatar->morph_ranges[eb.morph_index];
             const size_t start = mr.delta_offset;
             const size_t end = std::min(start + mr.delta_count, avatar->morph_deltas.size());
             for (size_t di = start; di < end; ++di) {
                 const auto& d = avatar->morph_deltas[di];
-                const float mag2 = d.d_position[0]*d.d_position[0] + d.d_position[1]*d.d_position[1] + d.d_position[2]*d.d_position[2];
-                if (mag2 > 1e-10f) verts.push_back(d.vertex_index);
+                const float mag2 = d.d_position[0] * d.d_position[0] + d.d_position[1] * d.d_position[1] +
+                                   d.d_position[2] * d.d_position[2];
+                if (mag2 > 1e-10f)
+                    verts.push_back(d.vertex_index);
             }
         }
         std::sort(verts.begin(), verts.end());
@@ -1137,36 +1143,43 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
             const size_t end = std::min<size_t>(mr.delta_offset + mr.delta_count, avatar->morph_deltas.size());
             for (size_t di = mr.delta_offset; di < end; ++di) {
                 const auto& d = avatar->morph_deltas[di];
-                max_disp = std::max(max_disp, std::sqrt(d.d_position[0]*d.d_position[0] + d.d_position[1]*d.d_position[1] + d.d_position[2]*d.d_position[2]));
+                max_disp =
+                    std::max(max_disp, std::sqrt(d.d_position[0] * d.d_position[0] + d.d_position[1] * d.d_position[1] +
+                                                 d.d_position[2] * d.d_position[2]));
             }
         }
-        std::printf("  expr[%2zu]: slot=%2u preset='%s' morph[%u]='%s' weight=%.3f deltas=%u max_disp=%.4fm is_face=%u\n",
-                    ei, eb.input_slot, p_name.c_str(), eb.morph_index, m_name.c_str(), eb.weight, d_cnt, max_disp, is_face);
+        std::printf(
+            "  expr[%2zu]: slot=%2u preset='%s' morph[%u]='%s' weight=%.3f deltas=%u max_disp=%.4fm is_face=%u\n", ei,
+            eb.input_slot, p_name.c_str(), eb.morph_index, m_name.c_str(), eb.weight, d_cnt, max_disp, is_face);
     }
 
-    struct SlotTag { uint32_t slot; const char* name; };
+    struct SlotTag {
+        uint32_t slot;
+        const char* name;
+    };
     const SlotTag check_slots[] = {
-        {0, "Blink_L(0)"}, {7, "Blink_R(7)"},
-        {17, "jawOpen(17)"}, {23, "SmileL(23)"}, {24, "SmileR(24)"},
+        {0, "Blink_L(0)"},   {7, "Blink_R(7)"},   {17, "jawOpen(17)"},  {23, "SmileL(23)"},     {24, "SmileR(24)"},
         {41, "BrowDnL(41)"}, {42, "BrowDnR(42)"}, {43, "BrowInUp(43)"}, {44, "BrowOutUpL(44)"}, {45, "BrowOutUpR(45)"},
-        {52, "Vis_A(52)"}, {53, "Vis_I(53)"}, {54, "Vis_U(54)"}, {55, "Vis_E(55)"}, {56, "Vis_O(56)"},
-        {57, "Joy(57)"}, {58, "Angry(58)"}, {59, "Sorrow(59)"}, {60, "Surprised(60)"}, {61, "Blush(61)"}, {62, "Sparkle(62)"}, {63, "Custom(63)"},
+        {52, "Vis_A(52)"},   {53, "Vis_I(53)"},   {54, "Vis_U(54)"},    {55, "Vis_E(55)"},      {56, "Vis_O(56)"},
+        {57, "Joy(57)"},     {58, "Angry(58)"},   {59, "Sorrow(59)"},   {60, "Surprised(60)"},  {61, "Blush(61)"},
+        {62, "Sparkle(62)"}, {63, "Custom(63)"},
     };
     const auto v_blink_l = collect_slot_verts(0);
     const auto v_blink_r = collect_slot_verts(7);
     for (const auto& st : check_slots) {
         const auto sv = collect_slot_verts(st.slot);
-        if (sv.empty()) continue;
+        if (sv.empty())
+            continue;
         std::vector<uint32_t> inter_l, inter_r;
         std::set_intersection(sv.begin(), sv.end(), v_blink_l.begin(), v_blink_l.end(), std::back_inserter(inter_l));
         std::set_intersection(sv.begin(), sv.end(), v_blink_r.begin(), v_blink_r.end(), std::back_inserter(inter_r));
-        std::printf("  slot_verts %-16s: non_zero_verts=%zu overlap_BlinkL=%zu overlap_BlinkR=%zu\n",
-                    st.name, sv.size(), inter_l.size(), inter_r.size());
+        std::printf("  slot_verts %-16s: non_zero_verts=%zu overlap_BlinkL=%zu overlap_BlinkR=%zu\n", st.name,
+                    sv.size(), inter_l.size(), inter_r.size());
     }
 
     // 2. VRMC_springBone / Colliders Rest-Pose Penetration Audit
-    std::printf("\n=== [FORENSIC] VRM COLLIDERS (%zu) & SPRING CHAINS (%zu) ===\n",
-                avatar->colliders.size(), avatar->springs.size());
+    std::printf("\n=== [FORENSIC] VRM COLLIDERS (%zu) & SPRING CHAINS (%zu) ===\n", avatar->colliders.size(),
+                avatar->springs.size());
     for (size_t ci = 0; ci < avatar->colliders.size(); ++ci) {
         const auto& c = avatar->colliders[ci];
         std::string jname = "<root>";
@@ -1175,20 +1188,22 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
         if (c.joint_index < avatar->joints.size()) {
             const auto& j = avatar->joints[c.joint_index];
             jname = str_slice(j.name_offset, j.name_len);
-            jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1], avatar->joint_rest_world_pos[c.joint_index][2]};
+            jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1],
+                    avatar->joint_rest_world_pos[c.joint_index][2]};
             jrot = j_world_rot[c.joint_index];
         }
         const auto wa = jpos + aether::animation::rotate_vec(jrot, {c.offset[0], c.offset[1], c.offset[2]});
         const auto wb = jpos + aether::animation::rotate_vec(jrot, {c.tail[0], c.tail[1], c.tail[2]});
-        std::printf("  col[%2zu]: group=%2u shape=%s j=%u('%s') r=%.4fm a=(%.3f,%.3f,%.3f) b=(%.3f,%.3f,%.3f)\n",
-                    ci, c.group_bit, (c.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE ? "CAPS" : "SPH "),
-                    c.joint_index, jname.c_str(), c.radius, wa.x, wa.y, wa.z, wb.x, wb.y, wb.z);
+        std::printf("  col[%2zu]: group=%2u shape=%s j=%u('%s') r=%.4fm a=(%.3f,%.3f,%.3f) b=(%.3f,%.3f,%.3f)\n", ci,
+                    c.group_bit, (c.shape_kind == AETHER_COLLIDER_SHAPE_CAPSULE ? "CAPS" : "SPH "), c.joint_index,
+                    jname.c_str(), c.radius, wa.x, wa.y, wa.z, wb.x, wb.y, wb.z);
     }
 
     auto closest_pt_seg = [](aether::animation::Vec3 a, aether::animation::Vec3 b, aether::animation::Vec3 p) {
         const auto ab = b - a;
         const float len2 = aether::animation::dot(ab, ab);
-        if (len2 < 1e-12f) return a;
+        if (len2 < 1e-12f)
+            return a;
         const float t = std::clamp(aether::animation::dot(p - a, ab) / len2, 0.0f, 1.0f);
         return a + ab * t;
     };
@@ -1202,18 +1217,21 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
         if (sp.joint_index < avatar->joints.size()) {
             const auto& j = avatar->joints[sp.joint_index];
             jname = str_slice(j.name_offset, j.name_len);
-            jp = {avatar->joint_rest_world_pos[sp.joint_index][0], avatar->joint_rest_world_pos[sp.joint_index][1], avatar->joint_rest_world_pos[sp.joint_index][2]};
+            jp = {avatar->joint_rest_world_pos[sp.joint_index][0], avatar->joint_rest_world_pos[sp.joint_index][1],
+                  avatar->joint_rest_world_pos[sp.joint_index][2]};
         }
         float min_clear = 999.0f;
         int min_ci = -1;
         for (size_t ci = 0; ci < avatar->colliders.size(); ++ci) {
             const auto& c = avatar->colliders[ci];
             const uint64_t bit = (c.group_bit < 64U) ? (1ULL << c.group_bit) : 0ULL;
-            if ((sp.collider_group_mask & bit) == 0ULL) continue;
+            if ((sp.collider_group_mask & bit) == 0ULL)
+                continue;
             aether::animation::Vec3 jpos{0, 0, 0};
             aether::animation::Quat jrot = aether::animation::Quat::identity();
             if (c.joint_index < avatar->joints.size()) {
-                jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1], avatar->joint_rest_world_pos[c.joint_index][2]};
+                jpos = {avatar->joint_rest_world_pos[c.joint_index][0], avatar->joint_rest_world_pos[c.joint_index][1],
+                        avatar->joint_rest_world_pos[c.joint_index][2]};
                 jrot = j_world_rot[c.joint_index];
             }
             const auto wa = jpos + aether::animation::rotate_vec(jrot, {c.offset[0], c.offset[1], c.offset[2]});
@@ -1224,18 +1242,26 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
             const float dist = aether::animation::length(jp - cp);
             const float clearance = dist - (sp.hit_radius + c.radius);
             if (clearance < 0.002f) {
-                if (clearance < 0.0f) ++penetrating_pairs;
-                else ++near_touch_pairs;
-                std::printf("  [COLLISION-REST] spring[%3zu] chain=%2u depth=%u j=%u('%s') vs col[%2zu] (grp=%u): dist=%.4fm sum_r=%.4fm CLEARANCE=%.4fm\n",
-                            si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(), ci, c.group_bit, dist, sp.hit_radius + c.radius, clearance);
+                if (clearance < 0.0f)
+                    ++penetrating_pairs;
+                else
+                    ++near_touch_pairs;
+                std::printf("  [COLLISION-REST] spring[%3zu] chain=%2u depth=%u j=%u('%s') vs col[%2zu] (grp=%u): "
+                            "dist=%.4fm sum_r=%.4fm CLEARANCE=%.4fm\n",
+                            si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(), ci, c.group_bit, dist,
+                            sp.hit_radius + c.radius, clearance);
             }
-            if (clearance < min_clear) { min_clear = clearance; min_ci = static_cast<int>(ci); }
+            if (clearance < min_clear) {
+                min_clear = clearance;
+                min_ci = static_cast<int>(ci);
+            }
         }
         if (sp.depth_level <= 1U) {
-            std::printf("  spring[%3zu] chain=%2u d=%u j=%3u('%s') hitR=%.3f stiff=%.2f drag=%.2f grav=%.2f mask=0x%llx min_clear=%.4fm(c=%d)\n",
-                        si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(),
-                        sp.hit_radius, sp.stiffness, sp.drag_force, sp.gravity_power,
-                        static_cast<unsigned long long>(sp.collider_group_mask), min_clear, min_ci);
+            std::printf("  spring[%3zu] chain=%2u d=%u j=%3u('%s') hitR=%.3f stiff=%.2f drag=%.2f grav=%.2f "
+                        "mask=0x%llx min_clear=%.4fm(c=%d)\n",
+                        si, sp.chain_id, sp.depth_level, sp.joint_index, jname.c_str(), sp.hit_radius, sp.stiffness,
+                        sp.drag_force, sp.gravity_power, static_cast<unsigned long long>(sp.collider_group_mask),
+                        min_clear, min_ci);
         }
     }
     std::printf("  Summary: penetrating_pairs=%u near_touch(<2mm)_pairs=%u\n", penetrating_pairs, near_touch_pairs);
@@ -1244,10 +1270,10 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
         const auto& j = avatar->joints[ji];
         const std::string jn = str_slice(j.name_offset, j.name_len);
         if (jn.find("J_Sec") != std::string::npos || j.humanoid_bone >= AETHER_HUMANOID_BONE_COUNT) {
-            std::printf("    joint[%2zu] parent=%2d hum=%3u pos=(%.3f,%.3f,%.3f) tail=%.3f name='%s'\n",
-                        ji, j.parent_index, j.humanoid_bone,
-                        avatar->joint_rest_world_pos[ji][0], avatar->joint_rest_world_pos[ji][1], avatar->joint_rest_world_pos[ji][2],
-                        j.tail_length, jn.c_str());
+            std::printf("    joint[%2zu] parent=%2d hum=%3u pos=(%.3f,%.3f,%.3f) tail=%.3f name='%s'\n", ji,
+                        j.parent_index, j.humanoid_bone, avatar->joint_rest_world_pos[ji][0],
+                        avatar->joint_rest_world_pos[ji][1], avatar->joint_rest_world_pos[ji][2], j.tail_length,
+                        jn.c_str());
         }
     }
 
@@ -1266,7 +1292,8 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
     tf_test.upper_body_confidence = 0.0f; // intentionally 0 while face valid!
     tf_test.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
     tf_test.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
-    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) tf_test.joint_rotations_quat[b][3] = 1.0f;
+    for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b)
+        tf_test.joint_rotations_quat[b][3] = 1.0f;
     const auto qyaw = aether::animation::from_euler_xyz(0.0f, 15.0f * aether::animation::kDegToRad, 0.0f);
     tf_test.joint_rotations_quat[AETHER_BONE_HEAD][0] = qyaw.x;
     tf_test.joint_rotations_quat[AETHER_BONE_HEAD][1] = qyaw.y;
@@ -1286,16 +1313,18 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
     int32_t eval_rc = AETHER_E_INTERNAL;
     for (int wait_i = 0; wait_i < 200; ++wait_i) {
         eval_rc = aether_host_evaluate_active(host, &gin, &gout);
-        if (eval_rc == AETHER_OK) break;
+        if (eval_rc == AETHER_OK)
+            break;
         timer.sleep_us(2000);
     }
     REQUIRE(eval_rc == AETHER_OK);
     aether_set_thread_role(AETHER_THREAD_ROLE_MAIN);
-    std::printf("  Rust default graph output: bone_rot_off[HEAD]=(%.4f,%.4f,%.4f,%.4f) ik[HEAD].w=%.3f expr[0]=%.3f expr[24]=%.3f expr[52]=%.3f override[0]=%.3f override[24]=%.3f\n",
+    std::printf("  Rust default graph output: bone_rot_off[HEAD]=(%.4f,%.4f,%.4f,%.4f) ik[HEAD].w=%.3f expr[0]=%.3f "
+                "expr[24]=%.3f expr[52]=%.3f override[0]=%.3f override[24]=%.3f\n",
                 gout.bone_rotation_offsets[AETHER_BONE_HEAD][0], gout.bone_rotation_offsets[AETHER_BONE_HEAD][1],
                 gout.bone_rotation_offsets[AETHER_BONE_HEAD][2], gout.bone_rotation_offsets[AETHER_BONE_HEAD][3],
-                gout.ik_targets[0][7], gout.expression_weights[0], gout.expression_weights[24], gout.expression_weights[52],
-                gout.expression_override[0], gout.expression_override[24]);
+                gout.ik_targets[0][7], gout.expression_weights[0], gout.expression_weights[24],
+                gout.expression_weights[52], gout.expression_override[0], gout.expression_override[24]);
     aether_host_destroy(host);
 
     // 4. Current SimEngine 30 Hz camera -> 240 Hz sim -> 60 Hz sample logging
@@ -1308,12 +1337,15 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
     AetherGraphOutputs gout_zero{};
     aether::animation::SkinningFrame skin{};
 
-    std::printf("  SimEngine 30Hz cam -> 240Hz tick -> 60Hz render sample (constant 20 deg/s yaw ramp with 0.08 deg cam jitter):\n");
-    for (int t2 = 0; t2 < 48; ++t2) { // 12 camera intervals * 4 ticks? At 240Hz, 30Hz = every 8 ticks; 48 ticks = 0.2s (12 render frames)
+    std::printf("  SimEngine 30Hz cam -> 240Hz tick -> 60Hz render sample (constant 20 deg/s yaw ramp with 0.08 deg "
+                "cam jitter):\n");
+    for (int t2 = 0; t2 < 48;
+         ++t2) { // 12 camera intervals * 4 ticks? At 240Hz, 30Hz = every 8 ticks; 48 ticks = 0.2s (12 render frames)
         const uint32_t cam_seq = static_cast<uint32_t>(t2 / 8 + 1);
         const double cam_t_s = static_cast<double>(cam_seq - 1U) * (1.0 / 30.0);
         const double yaw_deg = 20.0 * cam_t_s + ((cam_seq & 1U) ? 0.08 : -0.08);
-        const auto q = aether::animation::from_euler_xyz(0.0f, static_cast<float>(yaw_deg * aether::animation::kDegToRad), 0.0f);
+        const auto q =
+            aether::animation::from_euler_xyz(0.0f, static_cast<float>(yaw_deg * aether::animation::kDegToRad), 0.0f);
         AetherTrackingFrame tf{};
         tf.frame_sequence = cam_seq;
         tf.capture_timestamp_us = static_cast<uint64_t>(t2 + 1) * 4167ULL;
@@ -1321,7 +1353,8 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
         tf.valid_flags = 0x01U;
         tf.joint_positions_ws[AETHER_BONE_HEAD][1] = 1.50f;
         tf.joint_positions_ws[AETHER_BONE_HEAD][3] = 0.99f;
-        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b) tf.joint_rotations_quat[b][3] = 1.0f;
+        for (size_t b = 0; b < AETHER_HUMANOID_BONE_COUNT; ++b)
+            tf.joint_rotations_quat[b][3] = 1.0f;
         tf.joint_rotations_quat[AETHER_BONE_HEAD][0] = q.x;
         tf.joint_rotations_quat[AETHER_BONE_HEAD][1] = q.y;
         tf.joint_rotations_quat[AETHER_BONE_HEAD][2] = q.z;
@@ -1329,8 +1362,9 @@ TEST_CASE("Task 1 Forensic Audit: 8590256991748008892.vrm morph overlaps, Spring
         sim.tick(tf, dsp, gout_zero, tf.capture_timestamp_us, 0.0f, scfg, skin);
         if ((t2 % 4) == 3) {
             const double h_ang = mat3x4_delta_angle_deg(skin.bone_matrices[AETHER_BONE_HEAD]);
-            std::printf("    rFrame=%2d t2=%2d cam_seq=%u cam_yaw=%.3f deg -> rendered_head_angle=%.4f deg spring_ms=%.4f\n",
-                        t2 / 4, t2, cam_seq, yaw_deg, h_ang, skin.spring_sim_ms);
+            std::printf(
+                "    rFrame=%2d t2=%2d cam_seq=%u cam_yaw=%.3f deg -> rendered_head_angle=%.4f deg spring_ms=%.4f\n",
+                t2 / 4, t2, cam_seq, yaw_deg, h_ang, skin.spring_sim_ms);
         }
     }
 
@@ -1412,10 +1446,12 @@ void rotate_point_euler(float yaw, float pitch, float roll, const float p[3], fl
     out[2] = -x2 * sy + z2 * cy;
 }
 
-std::array<float, 478 * 3> project_synthetic_face_landmarks(
-    float yaw_rad, float pitch_rad, float roll_rad, float ear_scale_l, float ear_scale_r,
-    float mouth_open_m, float mouth_corner_dx_m, const aether::tracking::RoiRectNorm& roi, uint32_t cam_w,
-    uint32_t cam_h, std::mt19937* opt_rng = nullptr, float gaussian_px_std = 0.0f) {
+std::array<float, 478 * 3> project_synthetic_face_landmarks(float yaw_rad, float pitch_rad, float roll_rad,
+                                                            float ear_scale_l, float ear_scale_r, float mouth_open_m,
+                                                            float mouth_corner_dx_m,
+                                                            const aether::tracking::RoiRectNorm& roi, uint32_t cam_w,
+                                                            uint32_t cam_h, std::mt19937* opt_rng = nullptr,
+                                                            float gaussian_px_std = 0.0f) {
     using namespace aether::tracking;
     constexpr float kFocalPx = 900.0f;
     std::array<float, 478 * 3> lm{};
@@ -1424,10 +1460,9 @@ std::array<float, 478 * 3> project_synthetic_face_landmarks(
     const float cy_r = 0.5f * (kCanonicalFaceVerticesM[386][1] + kCanonicalFaceVerticesM[374][1]);
 
     for (uint32_t i = 0; i < 478U; ++i) {
-        const float* base =
-            (i < kCanonicalFaceVertexCount)
-                ? kCanonicalFaceVerticesM[i]
-                : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
+        const float* base = (i < kCanonicalFaceVertexCount)
+                                ? kCanonicalFaceVerticesM[i]
+                                : ((i < 473U) ? kCanonicalFaceVerticesM[159] : kCanonicalFaceVerticesM[386]);
         float p3[3]{base[0], base[1], base[2]};
         if (i == 159U || i == 145U || i == 160U || i == 144U || i == 158U || i == 153U) {
             p3[1] = cy_l + (p3[1] - cy_l) * ear_scale_l;
@@ -1445,10 +1480,10 @@ std::array<float, 478 * 3> project_synthetic_face_landmarks(
         float rot[3]{};
         rotate_point_euler(yaw_rad, pitch_rad, roll_rad, p3, rot);
         const float z = -0.55f + rot[2];
-        float u_px = (0.5f + (rot[0] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_w))) *
-                     static_cast<float>(cam_w);
-        float v_px = (0.5f - (rot[1] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_h))) *
-                     static_cast<float>(cam_h);
+        float u_px =
+            (0.5f + (rot[0] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_w))) * static_cast<float>(cam_w);
+        float v_px =
+            (0.5f - (rot[1] * kFocalPx) / (std::max(-z, 0.2f) * static_cast<float>(cam_h))) * static_cast<float>(cam_h);
         if (opt_rng != nullptr && gaussian_px_std > 0.0f) {
             u_px += px_noise(*opt_rng);
             v_px += px_noise(*opt_rng);
@@ -1520,8 +1555,8 @@ TEST_CASE("Task 6.1: 8590256991748008892.vrm idle stability under +-1.5 px Gauss
     // 180 simulation frames @ 60 Hz with 30 Hz noisy webcam packets (+-1.5 px 3-sigma -> std 0.50 px)
     for (int f = 0; f < 180; ++f) {
         if ((f % 2) == 0) {
-            const auto lm_noisy = project_synthetic_face_landmarks(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, roi,
-                                                                   kCamW, kCamH, &rng, 0.50f);
+            const auto lm_noisy = project_synthetic_face_landmarks(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, roi, kCamW,
+                                                                   kCamH, &rng, 0.50f);
             const uint32_t seq = static_cast<uint32_t>(26 + f / 2);
             const uint64_t ts = static_cast<uint64_t>(26 + f) * 16667ULL;
             solver.populate_tracking_frame(roi, lm_noisy.data(), 0.96f, nullptr, nullptr, nullptr, 0.0f, false, false,
@@ -1548,12 +1583,10 @@ TEST_CASE("Task 6.1: 8590256991748008892.vrm idle stability under +-1.5 px Gauss
                 const uint32_t hb = (j < fx.rm.custom_spring_count)
                                         ? static_cast<uint32_t>(fx.rm.custom_springs[j].skin_base_humanoid)
                                         : AETHER_BONE_HEAD;
-                const Quat p_rot =
-                    (hb < AETHER_HUMANOID_BONE_COUNT) ? engine.bone_rot_ws()[hb] : Quat::identity();
+                const Quat p_rot = (hb < AETHER_HUMANOID_BONE_COUNT) ? engine.bone_rot_ws()[hb] : Quat::identity();
                 const Quat rel_rot = normalize(conjugate(p_rot) * engine.bone_rot_ws()[b]);
                 const float d_rad = angle_between(rel_rot, prev_spring_local_rot[j]);
-                const float blen =
-                    (j < fx.rm.custom_spring_count) ? fx.rm.custom_springs[j].bone_length : 0.10f;
+                const float blen = (j < fx.rm.custom_spring_count) ? fx.rm.custom_springs[j].bone_length : 0.10f;
                 max_spring_local_vel = std::max(max_spring_local_vel, d_rad * blen * 60.0f);
             }
         }
@@ -1570,11 +1603,10 @@ TEST_CASE("Task 6.1: 8590256991748008892.vrm idle stability under +-1.5 px Gauss
         }
     }
 
-    std::printf(
-        "[TASK6-IDLE] max_head_jitter=%.6f deg head_pos_vel=%.2e m/s max_blink=%.5f max_vowel=%.5f "
-        "bone_pos_vel=%.2e sim_vel=%.2e local_swing_vel=%.2e m/s\n",
-        max_head_jitter_deg, max_head_pos_vel, max_blink, max_vowel, max_spring_tip_vel, max_spring_sim_vel,
-        max_spring_local_vel);
+    std::printf("[TASK6-IDLE] max_head_jitter=%.6f deg head_pos_vel=%.2e m/s max_blink=%.5f max_vowel=%.5f "
+                "bone_pos_vel=%.2e sim_vel=%.2e local_swing_vel=%.2e m/s\n",
+                max_head_jitter_deg, max_head_pos_vel, max_blink, max_vowel, max_spring_tip_vel, max_spring_sim_vel,
+                max_spring_local_vel);
     CHECK(max_head_jitter_deg <= 0.002f);
     CHECK(max_blink == 0.0f);
     CHECK(max_vowel == 0.0f);
@@ -1699,14 +1731,15 @@ TEST_CASE("Task 6.3: Hybrid WASAPI Audio-Visual Lip-Sync Formants, Silence Lock,
         const auto pcm = gen_tone(freq_hz, 0.35f, kBlock, kSr);
         AudioLipSyncFrame f{};
         for (int b = 0; b < 8; ++b) {
-            f = dsp_proc.process_pcm_block(pcm.data(), kBlock, kSr, 1.0f, -52.0f, static_cast<uint64_t>(b + 1) * 21333ULL);
+            f = dsp_proc.process_pcm_block(pcm.data(), kBlock, kSr, 1.0f, -52.0f,
+                                           static_cast<uint64_t>(b + 1) * 21333ULL);
         }
         return f;
     };
 
-    const AudioLipSyncFrame low_u = run_tone(350.0f);  // B1 250-650 Hz (F1 / U,O)
-    const AudioLipSyncFrame mid_a = run_tone(950.0f);  // B2 700-1600 Hz (A)
-    const AudioLipSyncFrame hi_i = run_tone(2400.0f);  // B3 1700-3200 Hz (F2 / I,E)
+    const AudioLipSyncFrame low_u = run_tone(350.0f); // B1 250-650 Hz (F1 / U,O)
+    const AudioLipSyncFrame mid_a = run_tone(950.0f); // B2 700-1600 Hz (A)
+    const AudioLipSyncFrame hi_i = run_tone(2400.0f); // B3 1700-3200 Hz (F2 / I,E)
 
     CHECK(low_u.vad > 0.70f);
     CHECK(low_u.audio_open_y > 0.25f);
@@ -1715,8 +1748,8 @@ TEST_CASE("Task 6.3: Hybrid WASAPI Audio-Visual Lip-Sync Formants, Silence Lock,
     CHECK(mid_a.vowel_probs[0] > mid_a.vowel_probs[1]);
     CHECK(hi_i.vad > 0.70f);
     CHECK((hi_i.vowel_probs[1] + hi_i.vowel_probs[3]) > (hi_i.vowel_probs[2] + hi_i.vowel_probs[4]));
-    const float sum_hi = hi_i.vowel_probs[0] + hi_i.vowel_probs[1] + hi_i.vowel_probs[2] + hi_i.vowel_probs[3] +
-                         hi_i.vowel_probs[4];
+    const float sum_hi =
+        hi_i.vowel_probs[0] + hi_i.vowel_probs[1] + hi_i.vowel_probs[2] + hi_i.vowel_probs[3] + hi_i.vowel_probs[4];
     CHECK(sum_hi <= 1.001f);
 
     // Hybrid ExpressionMixer fusion checks:
@@ -1814,8 +1847,8 @@ TEST_CASE("Task 6.4: 8590256991748008892.vrm morph mutual exclusivity & per-regi
     expr[56] = 0.7f; // O
     expr[57] = 1.0f; // Joy
     expr[60] = 1.0f; // Surprised
-    fx.avatar->update_pose(0U, 1U, skin.bone_matrices, skin.bone_count, expr.data(),
-                           static_cast<uint32_t>(expr.size()), true);
+    fx.avatar->update_pose(0U, 1U, skin.bone_matrices, skin.bone_count, expr.data(), static_cast<uint32_t>(expr.size()),
+                           true);
 
     using Region = aether::renderer::GpuAvatar::MorphRegion;
     double sum_eyel = 0.0;
@@ -1830,11 +1863,20 @@ TEST_CASE("Task 6.4: 8590256991748008892.vrm morph mutual exclusivity & per-regi
             max_eyelid_affecting_emotion = std::max(max_eyelid_affecting_emotion, w);
         }
         switch (meta.region) {
-        case Region::EyeL: sum_eyel += w; break;
-        case Region::EyeR: sum_eyer += w; break;
-        case Region::Brow: sum_brow += w; break;
-        case Region::Mouth: sum_mouth += w; break;
-        default: break;
+        case Region::EyeL:
+            sum_eyel += w;
+            break;
+        case Region::EyeR:
+            sum_eyer += w;
+            break;
+        case Region::Brow:
+            sum_brow += w;
+            break;
+        case Region::Mouth:
+            sum_mouth += w;
+            break;
+        default:
+            break;
         }
     }
     CHECK(max_eyelid_affecting_emotion == 0.0f);
@@ -1846,8 +1888,8 @@ TEST_CASE("Task 6.4: 8590256991748008892.vrm morph mutual exclusivity & per-regi
     // Partial blink (0.5) attenuates overlapping emotion morphs proportionally (<= 0.5)
     expr[0] = 0.5f;
     expr[7] = 0.5f;
-    fx.avatar->update_pose(1U, 2U, skin.bone_matrices, skin.bone_count, expr.data(),
-                           static_cast<uint32_t>(expr.size()), true);
+    fx.avatar->update_pose(1U, 2U, skin.bone_matrices, skin.bone_count, expr.data(), static_cast<uint32_t>(expr.size()),
+                           true);
     float partial_eyelid_emotion = 0.0f;
     for (size_t mi = 0; mi < fx.avatar->morph_weights_scratch.size(); ++mi) {
         const auto& meta = fx.avatar->morph_meta[mi];
@@ -2018,10 +2060,10 @@ TEST_CASE("Real VRM 8590256991748008892.vrm Camera SmoothDamp transition & Self-
 
     float min_sd_vrm = 1e9f;
     const std::array<std::pair<Vec3, Vec3>, 3> vrm_sweeps = {{
-        {vrm_chest, vrm_chest},                                            // Straight through VRM chest capsule (+3.5 cm margin)
-        {vrm_head, vrm_head},                                              // Straight through VRM neck/head capsule
+        {vrm_chest, vrm_chest}, // Straight through VRM chest capsule (+3.5 cm margin)
+        {vrm_head, vrm_head},   // Straight through VRM neck/head capsule
         {{vrm_chest.x - 0.03f, vrm_chest.y, vrm_chest.z + 0.14f},
-         {vrm_chest.x + 0.03f, vrm_chest.y, vrm_chest.z + 0.14f}},         // Bilateral hand overlap
+         {vrm_chest.x + 0.03f, vrm_chest.y, vrm_chest.z + 0.14f}}, // Bilateral hand overlap
     }};
     for (const auto& sw : vrm_sweeps) {
         tf.joint_positions_ws[AETHER_BONE_LEFT_HAND][0] = sw.first.x;
@@ -2186,8 +2228,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
         pivot_ws[1] = hp[1];
         pivot_ws[2] = hp[2];
     }
-    const float pivot_vz = m_view.col0[2] * pivot_ws[0] + m_view.col1[2] * pivot_ws[1] +
-                           m_view.col2[2] * pivot_ws[2] + m_view.col3[2];
+    const float pivot_vz =
+        m_view.col0[2] * pivot_ws[0] + m_view.col1[2] * pivot_ws[1] + m_view.col2[2] * pivot_ws[2] + m_view.col3[2];
 
     auto project_point = [&](const float p[3], float z_flat_w, int& out_px, int& out_py, float& out_ndc_z) -> bool {
         const float vx = m_view.col0[0] * p[0] + m_view.col1[0] * p[1] + m_view.col2[0] * p[2] + m_view.col3[0];
@@ -2330,7 +2372,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
             for (int px = 4; px < static_cast<int>(kW) - 4; ++px) {
                 const size_t pidx = static_cast<size_t>(py) * kW + px;
                 const int32_t si = tri_submesh[pidx];
-                if (si < 0) continue;
+                if (si < 0)
+                    continue;
                 // Require 5x5 neighborhood to belong to the same submesh so we avoid silhouette edges
                 bool interior = true;
                 for (int dy = -2; dy <= 2 && interior; ++dy) {
@@ -2341,7 +2384,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
                         }
                     }
                 }
-                if (!interior) continue;
+                if (!interior)
+                    continue;
                 const auto& sm = avatar->submeshes[static_cast<size_t>(si)];
                 const uint32_t tri_base = tri_idx_buf[pidx];
                 const uint32_t v0 = avatar->rest_indices[tri_base + 0u];
@@ -2374,9 +2418,11 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
                 uint8_t tsrgb[4]{};
                 float tlin[3]{};
                 sample_raw_tex(mat.tex_base, tri_u_buf[pidx], tri_v_buf[pidx], tsrgb, tlin);
-                if (tsrgb[3] < 200) continue;
+                if (tsrgb[3] < 200)
+                    continue;
                 const std::string mname = aether::renderer::read_material_cstr(*avatar, mat.name_offset);
-                if (!pred(mname, sv, tsrgb)) continue;
+                if (!pred(mname, sv, tsrgb))
+                    continue;
                 const float sc = score_fn(sv, tsrgb, px, py);
                 if (sc > best_score) {
                     best_score = sc;
@@ -2404,8 +2450,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
     find_best(
         "1b_Face_Forehead",
         [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
-            return m.find("Face_00_SKIN") != std::string::npos && v.position[1] > 1.43f && std::abs(v.position[0]) < 0.025f &&
-                   c[0] > 235 && c[1] > 195;
+            return m.find("Face_00_SKIN") != std::string::npos && v.position[1] > 1.43f &&
+                   std::abs(v.position[0]) < 0.025f && c[0] > 235 && c[1] > 195;
         },
         [](const AetherVertex25D& v, const uint8_t[4], int, int) { return v.position[2] - std::abs(v.position[0]); });
     find_best(
@@ -2426,8 +2472,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
         "2c_Lit_Neck_Side",
         [](const std::string& m, const AetherVertex25D& v, const uint8_t c[4]) {
             return m.find("Body_00_SKIN") != std::string::npos && v.position[1] > 1.245f && v.position[1] < 1.28f &&
-                   std::abs(v.position[0]) < 0.045f && v.true_normal[2] > 0.65f &&
-                   c[0] >= 246 && c[1] >= 230 && c[2] >= 210;
+                   std::abs(v.position[0]) < 0.045f && v.true_normal[2] > 0.65f && c[0] >= 246 && c[1] >= 230 &&
+                   c[2] >= 210;
         },
         [](const AetherVertex25D& v, const uint8_t c[4], int, int) -> float {
             return v.position[2] * 5.0f + static_cast<float>(c[1]) * 0.01f;
@@ -2447,8 +2493,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
             const float ndl =
                 v.true_normal[0] * key_dir_s.x + v.true_normal[1] * key_dir_s.y + v.true_normal[2] * key_dir_s.z;
             return m.find("Bottoms_01_CLOTH") != std::string::npos && v.position[1] > 0.96f && v.position[1] < 1.24f &&
-                   v.position[0] < -0.05f && v.true_normal[2] > 0.12f && ndl < 0.05f &&
-                   c[0] > 225 && c[1] > 210 && c[2] > 195;
+                   v.position[0] < -0.05f && v.true_normal[2] > 0.12f && ndl < 0.05f && c[0] > 225 && c[1] > 210 &&
+                   c[2] > 195;
         },
         [&](const AetherVertex25D& v, const uint8_t[4], int, int) -> float {
             const float ndl =
@@ -2481,7 +2527,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
 
     uint64_t fidx = 0;
     auto render_probe_pass = [&](const aether::renderer::LightingRig& test_rig, aether::renderer::ShadingDebugView dv,
-                                 int warmup_frames, std::vector<float>& out_f16, std::vector<uint8_t>* out_u8 = nullptr) {
+                                 int warmup_frames, std::vector<float>& out_f16,
+                                 std::vector<uint8_t>* out_u8 = nullptr) {
         for (int w = 0; w < warmup_frames; ++w) {
             aether::renderer::FrameRenderRequest req{};
             req.avatar = avatar.get();
@@ -2493,7 +2540,6 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
             req.lighting_mode = test_rig.lighting_mode;
             req.rt_enabled = (test_rig.lighting_mode > 0u) && rhi->rt_supported();
             req.show_checkerboard = false;
-            req.show_orbit_orb = false;
             req.render_csm_shadow = true;
             REQUIRE(renderer.render_headless_frame(req).has_value());
             ++fidx;
@@ -2564,8 +2610,7 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
         const auto& mat = avatar->materials[pr.mat_id];
         const float gn[3] = {buf_normals[i4 + 0] * 2.0f - 1.0f, buf_normals[i4 + 1] * 2.0f - 1.0f,
                              buf_normals[i4 + 2] * 2.0f - 1.0f};
-        const float spec_rim[3] = {buf_hdr_full[i4 + 0] - buf_direct[i4 + 0],
-                                   buf_hdr_full[i4 + 1] - buf_direct[i4 + 1],
+        const float spec_rim[3] = {buf_hdr_full[i4 + 0] - buf_direct[i4 + 0], buf_hdr_full[i4 + 1] - buf_direct[i4 + 1],
                                    buf_hdr_full[i4 + 2] - buf_direct[i4 + 2]};
         const auto lab = lin_to_oklab(buf_final_lin[i4 + 0], buf_final_lin[i4 + 1], buf_final_lin[i4 + 2]);
         const float fin_luma =
@@ -2589,7 +2634,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
             "  MToon _Color=(%.2f,%.2f,%.2f) _ShadeColor=(%.2f,%.2f,%.2f) shift=%.2f toony=%.2f\n"
             "  WorldN=(%.3f,%.3f,%.3f) ProxyN=(%.3f,%.3f,%.3f) | GB_ViewN=(%.3f,%.3f,%.3f)\n"
             "  RT_Shadow=%.3f | DirectLin=(%.3f,%.3f,%.3f) | PT_Bounce=(%.3f,%.3f,%.3f)\n"
-            "  Spec+Rim=(%.3f,%.3f,%.3f) | Final_HDR=(%.3f,%.3f,%.3f) | Final_sRGB=(%u,%u,%u) | OKLab=(L=%.3f,C=%.4f)\n",
+            "  Spec+Rim=(%.3f,%.3f,%.3f) | Final_HDR=(%.3f,%.3f,%.3f) | Final_sRGB=(%u,%u,%u) | "
+            "OKLab=(L=%.3f,C=%.4f)\n",
             pr.name, pr.px, pr.py, pr.mat_id, pr.mat_name.c_str(), pr.tex_srgb[0], pr.tex_srgb[1], pr.tex_srgb[2],
             static_cast<double>(pr.tex_lin[0]), static_cast<double>(pr.tex_lin[1]), static_cast<double>(pr.tex_lin[2]),
             static_cast<double>(buf_albedo[i4 + 0]), static_cast<double>(buf_albedo[i4 + 1]),
@@ -2611,20 +2657,19 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
         CHECK(pr.px >= 0);
     }
 
-    const float de_face_collar =
-        std::sqrt((face_lab[0] - collar_lab[0]) * (face_lab[0] - collar_lab[0]) +
-                  (face_lab[1] - collar_lab[1]) * (face_lab[1] - collar_lab[1]) +
-                  (face_lab[2] - collar_lab[2]) * (face_lab[2] - collar_lab[2]));
+    const float de_face_collar = std::sqrt((face_lab[0] - collar_lab[0]) * (face_lab[0] - collar_lab[0]) +
+                                           (face_lab[1] - collar_lab[1]) * (face_lab[1] - collar_lab[1]) +
+                                           (face_lab[2] - collar_lab[2]) * (face_lab[2] - collar_lab[2]));
     const float de_face_neck = std::sqrt((face_lab[0] - neck_lit_lab[0]) * (face_lab[0] - neck_lit_lab[0]) +
                                          (face_lab[1] - neck_lit_lab[1]) * (face_lab[1] - neck_lit_lab[1]) +
                                          (face_lab[2] - neck_lit_lab[2]) * (face_lab[2] - neck_lit_lab[2]));
     const float luma_diff_pct = 100.0f * std::abs(face_rel_luma - neck_lit_rel_luma) / std::max(face_rel_luma, 1e-4f);
-    std::printf(
-        "\n[SKIN_PARITY] Face vs LitNeck OKLab DeltaE=%.4f (%.2f%%), RelLumaDiff=%.2f%% | Face vs Collarbone DeltaE=%.4f (%.2f%%) L_diff=%.2f%%\n",
-        static_cast<double>(de_face_neck), static_cast<double>(de_face_neck * 100.0f),
-        static_cast<double>(luma_diff_pct), static_cast<double>(de_face_collar),
-        static_cast<double>(de_face_collar * 100.0f),
-        static_cast<double>(100.0f * std::abs(face_lab[0] - collar_lab[0]) / std::max(face_lab[0], 1e-4f)));
+    std::printf("\n[SKIN_PARITY] Face vs LitNeck OKLab DeltaE=%.4f (%.2f%%), RelLumaDiff=%.2f%% | Face vs Collarbone "
+                "DeltaE=%.4f (%.2f%%) L_diff=%.2f%%\n",
+                static_cast<double>(de_face_neck), static_cast<double>(de_face_neck * 100.0f),
+                static_cast<double>(luma_diff_pct), static_cast<double>(de_face_collar),
+                static_cast<double>(de_face_collar * 100.0f),
+                static_cast<double>(100.0f * std::abs(face_lab[0] - collar_lab[0]) / std::max(face_lab[0], 1e-4f)));
     std::printf("[CARDIGAN_CONTRAST] Lit OKLab L=%.3f C=%.4f vs Shaded OKLab L=%.3f C=%.4f\n",
                 static_cast<double>(card_lit_lab[0]), static_cast<double>(card_lit_lab[3]),
                 static_cast<double>(card_sh_lab[0]), static_cast<double>(card_sh_lab[3]));
@@ -2633,7 +2678,7 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
     // Phase 2 Photometric Fixtures Exposure & Catchlight Verification (all 6 fixtures @ 1.0 EV)
     {
         static constexpr const char* kFixNames[6] = {
-            "0_ARRI_SkyPanel_S60C", "1_ARRI_Fresnel_T2", "2_Dedolight_DLED7",
+            "0_ARRI_SkyPanel_S60C",  "1_ARRI_Fresnel_T2",      "2_Dedolight_DLED7",
             "3_Broadcast_RingLight", "4_Natural_Sunlight_CIE", "5_Natural_Window_Portal",
         };
         std::printf("\n=== PHASE 2 PHOTOMETRIC FIXTURES (6 profiles @ 1.0 EV) ===\n");
@@ -2657,13 +2702,14 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
             const auto st = analyze_rgba8(fix_u8, kW, kH);
             const size_t c_idx = (static_cast<size_t>(probes[0].py) * kW + static_cast<size_t>(probes[0].px)) * 4ULL;
             const size_t k_idx = (static_cast<size_t>(probes[5].py) * kW + static_cast<size_t>(probes[5].px)) * 4ULL;
-            std::printf("  Fixture %-26s : fg=%u mean_luma=%.1f p95_luma=%.1f cheek_sRGB=(%u,%u,%u) card_lit_sRGB=(%u,%u,%u)\n",
-                        kFixNames[fi], st.fg_pixels, st.mean_luma, st.p95_luma, fix_u8[c_idx + 0],
-                        fix_u8[c_idx + 1], fix_u8[c_idx + 2], fix_u8[k_idx + 0], fix_u8[k_idx + 1], fix_u8[k_idx + 2]);
+            std::printf(
+                "  Fixture %-26s : fg=%u mean_luma=%.1f p95_luma=%.1f cheek_sRGB=(%u,%u,%u) card_lit_sRGB=(%u,%u,%u)\n",
+                kFixNames[fi], st.fg_pixels, st.mean_luma, st.p95_luma, fix_u8[c_idx + 0], fix_u8[c_idx + 1],
+                fix_u8[c_idx + 2], fix_u8[k_idx + 0], fix_u8[k_idx + 1], fix_u8[k_idx + 2]);
             CHECK(st.mean_luma > 95.0);
             CHECK(st.p95_luma < 248.0);
             REQUIRE(aether::test::save_rgba8_png(snap_dir / (std::string("probe_fixture_") + kFixNames[fi] + ".png"),
-                                                  kW, kH, fix_u8.data()));
+                                                 kW, kH, fix_u8.data()));
         }
 
         // Catchlight intensity mute vs ON verification
@@ -2700,7 +2746,6 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
                 req.lighting_mode = r.lighting_mode;
                 req.rt_enabled = (r.lighting_mode > 0u) && rhi->rt_supported();
                 req.show_checkerboard = false;
-                req.show_orbit_orb = false;
                 req.render_csm_shadow = true;
                 REQUIRE(renderer.render_headless_frame(req).has_value());
             }
@@ -2743,8 +2788,8 @@ TEST_CASE("Phase 0/4 Quantitative Pixel & G-Buffer Probe on 8590256991748008892.
                 sum_on_vs_off += std::abs(static_cast<int>(u_on[i + c]) - static_cast<int>(u_off[i + c]));
             }
         }
-        std::printf("[CREASE_DISGUISE] RuleA max_diff(OFF vs str=0)=%d | diff(ON=1.0 vs OFF)=%.0f\n",
-                    max_off_vs_zero, sum_on_vs_off);
+        std::printf("[CREASE_DISGUISE] RuleA max_diff(OFF vs str=0)=%d | diff(ON=1.0 vs OFF)=%.0f\n", max_off_vs_zero,
+                    sum_on_vs_off);
         CHECK(max_off_vs_zero == 0);
         CHECK(sum_on_vs_off > 100.0);
         REQUIRE(aether::test::save_rgba8_png(snap_dir / "probe_crease_off.png", kW, kH, u_off.data()));

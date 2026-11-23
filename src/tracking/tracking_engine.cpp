@@ -124,8 +124,8 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
     // 1. Acquire / verify face ROI (`M0_face_detector` runs ONLY on initialization or ROI loss `§8.3`)
     if (!face_roi_.valid) {
         roi_reset_this_frame = true;
-        warp_frame_to_nchw(*cam_frame, lb_roi, 128, 128, RoiNormRange::NegOneToPosOne,
-                           router_.buffers().m0_in.data(), false);
+        warp_frame_to_nchw(*cam_frame, lb_roi, 128, 128, RoiNormRange::NegOneToPosOne, router_.buffers().m0_in.data(),
+                           false);
         fill_letterbox_bands_nchw(router_.buffers().m0_in.data(), 128, 128, cam_frame->width, cam_frame->height,
                                   RoiNormRange::NegOneToPosOne);
         const uint64_t t_m0_0 = aether::now_us();
@@ -155,7 +155,8 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
     }
 
     // 2. Run M1_body on 2-frame cadence (always on first frame or face loss) and M2 face warp every frame
-    const bool run_body_this_frame = ((frame_seq_ & 1U) == 0U) || roi_reset_this_frame || !roi_locked_.load(std::memory_order_acquire);
+    const bool run_body_this_frame =
+        ((frame_seq_ & 1U) == 0U) || roi_reset_this_frame || !roi_locked_.load(std::memory_order_acquire);
     if (run_body_this_frame) {
         warp_frame_to_nchw(*cam_frame, lb_roi, 256, 256, RoiNormRange::ZeroToOne, router_.buffers().m1_body_in.data(),
                            false);
@@ -244,8 +245,8 @@ bool TrackingEngine::step_once(LockFreeTripleBuffer<AetherTrackingFrame>& out_bu
         router_.buffers().m1_body_world.data(), router_.buffers().m1_body_lm.data(), pose_flag, hand_rois.run_left,
         hand_rois.run_right, router_.buffers().m1_hands_lm.data(), router_.buffers().m1_hands_flag.data(),
         router_.buffers().m1_hands_handed.data(), cam_frame->capture_timestamp_us, t_inf_end, router_.active_ep(),
-        ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height, hands_enabled,
-        cam_frame, &hand_rois.left_roi, &hand_rois.right_roi, router_.buffers().m1_hands_world.data());
+        ++frame_seq_, roi_reset_this_frame, out_frame, cam_frame->width, cam_frame->height, hands_enabled, cam_frame,
+        &hand_rois.left_roi, &hand_rois.right_roi, router_.buffers().m1_hands_world.data());
 
     (void)bounds_config_buf_.read_latest(active_bounds_cfg_);
     const NpuPostProcessDiagnostics post_diag = npu_post_.process(out_frame, active_bounds_cfg_);

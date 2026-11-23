@@ -42,14 +42,14 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
     const bool audio_vad = audio_fusion && (in_audio->vad > 0.0f);
     const float cam_open_y_raw =
         std::clamp((in_live2d != nullptr) ? in_live2d->param_mouth_open_y : arkit_cam[17], 0.0f, 1.0f);
-    const float cam_form_raw =
-        std::clamp((in_live2d != nullptr) ? in_live2d->param_mouth_form
-                                         : (0.5f * (arkit_cam[23] + arkit_cam[24]) - arkit_cam[20]),
-                   -1.0f, 1.0f);
+    const float cam_form_raw = std::clamp(
+        (in_live2d != nullptr) ? in_live2d->param_mouth_form : (0.5f * (arkit_cam[23] + arkit_cam[24]) - arkit_cam[20]),
+        -1.0f, 1.0f);
     const bool silence_lock_mouth = audio_fusion && !audio_vad && (cam_open_y_raw < 0.22f);
     const bool silent_smile_preserved = silence_lock_mouth && (cam_form_raw > 0.20f);
 
-    // Warudo per-channel SmoothDamp on camera signals (blink 28 ms, mouth/vowels 38-45 ms, brows 45 ms + 0.015 deadzone)
+    // Warudo per-channel SmoothDamp on camera signals (blink 28 ms, mouth/vowels 38-45 ms, brows 45 ms + 0.015
+    // deadzone)
     for (size_t i = 0; i < kArkitSlotCount; ++i) {
         float target = std::clamp(arkit_cam[i], 0.0f, 1.0f);
         if (is_brow_arkit_slot(i)) {
@@ -126,15 +126,13 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
         const float brow_r_ang = live2d_val_[3];
         cam_val_[41] = std::max(cam_val_[41], std::clamp(-brow_l_y, 0.0f, 1.0f));
         cam_val_[42] = std::max(cam_val_[42], std::clamp(-brow_r_y, 0.0f, 1.0f));
-        cam_val_[43] = std::max(
-            cam_val_[43],
-            std::clamp(0.5f * (std::max(0.0f, brow_l_y) + std::max(0.0f, brow_r_y)) +
-                           0.25f * std::max(0.0f, brow_l_ang + brow_r_ang),
-                       0.0f, 1.0f));
-        cam_val_[44] = std::max(
-            cam_val_[44], std::clamp(std::max(0.0f, brow_l_y) - 0.35f * std::max(0.0f, brow_l_ang), 0.0f, 1.0f));
-        cam_val_[45] = std::max(
-            cam_val_[45], std::clamp(std::max(0.0f, brow_r_y) - 0.35f * std::max(0.0f, brow_r_ang), 0.0f, 1.0f));
+        cam_val_[43] = std::max(cam_val_[43], std::clamp(0.5f * (std::max(0.0f, brow_l_y) + std::max(0.0f, brow_r_y)) +
+                                                             0.25f * std::max(0.0f, brow_l_ang + brow_r_ang),
+                                                         0.0f, 1.0f));
+        cam_val_[44] = std::max(cam_val_[44],
+                                std::clamp(std::max(0.0f, brow_l_y) - 0.35f * std::max(0.0f, brow_l_ang), 0.0f, 1.0f));
+        cam_val_[45] = std::max(cam_val_[45],
+                                std::clamp(std::max(0.0f, brow_r_y) - 0.35f * std::max(0.0f, brow_r_ang), 0.0f, 1.0f));
 
         if (!audio_fusion) {
             const float open_y = live2d_val_[6];
@@ -156,9 +154,10 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
 
     if (audio_fusion) {
         // Task 4 Hybrid Camera + Audio Lip-Sync Fusion:
-        // Rule 1 (Silence Lock): !vad && Cam_OpenY < 0.22 -> gate Final_OpenY -> 0.0 (preserving >= 0.25 yawns & smiles)
-        // Rule 2 (Speech OpenY): clamp(0.45 * Cam_OpenY + 0.65 * Audio_OpenY, 0, 1) w/ 25 ms attack / 65 ms release
-        // Rule 3 (Vowels): lerp(Cam_Vowel, Audio_Vowel, Audio_Assist_Weight) w/ 45 ms SmoothDamp, < 0.03 -> 0, sum <= 1
+        // Rule 1 (Silence Lock): !vad && Cam_OpenY < 0.22 -> gate Final_OpenY -> 0.0 (preserving >= 0.25 yawns &
+        // smiles) Rule 2 (Speech OpenY): clamp(0.45 * Cam_OpenY + 0.65 * Audio_OpenY, 0, 1) w/ 25 ms attack / 65 ms
+        // release Rule 3 (Vowels): lerp(Cam_Vowel, Audio_Vowel, Audio_Assist_Weight) w/ 45 ms SmoothDamp, < 0.03 -> 0,
+        // sum <= 1
         float target_open_y = 0.0f;
         if (audio_vad) {
             const float audio_open = std::clamp(in_audio->audio_open_y, 0.0f, 1.0f);
@@ -169,8 +168,8 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
         }
 
         const float tau_open = (target_open_y > smooth_open_y_) ? 0.025f : 0.065f;
-        smooth_open_y_ = primed_ ? smooth_damp(smooth_open_y_, target_open_y, open_y_vel_, tau_open, safe_dt)
-                                 : target_open_y;
+        smooth_open_y_ =
+            primed_ ? smooth_damp(smooth_open_y_, target_open_y, open_y_vel_, tau_open, safe_dt) : target_open_y;
         if (target_open_y <= 0.0f && smooth_open_y_ < 1e-4f) {
             smooth_open_y_ = 0.0f;
             open_y_vel_ = 0.0f;
@@ -329,10 +328,13 @@ void ExpressionMixer::update(const float arkit_cam[52], const AetherDspSyncPacke
             out_live2d->param_eye_ball_x = live2d_val_[8];
             out_live2d->param_eye_ball_y = live2d_val_[9];
         } else {
-            out_live2d->param_brow_l_y = std::clamp(0.6f * out_morphs[43] + 0.6f * out_morphs[44] - out_morphs[41], -1.0f, 1.0f);
-            out_live2d->param_brow_r_y = std::clamp(0.6f * out_morphs[43] + 0.6f * out_morphs[45] - out_morphs[42], -1.0f, 1.0f);
+            out_live2d->param_brow_l_y =
+                std::clamp(0.6f * out_morphs[43] + 0.6f * out_morphs[44] - out_morphs[41], -1.0f, 1.0f);
+            out_live2d->param_brow_r_y =
+                std::clamp(0.6f * out_morphs[43] + 0.6f * out_morphs[45] - out_morphs[42], -1.0f, 1.0f);
             out_live2d->param_mouth_open_y = std::clamp(out_morphs[17], 0.0f, 1.0f);
-            out_live2d->param_mouth_form = std::clamp(0.5f * (out_morphs[23] + out_morphs[24]) - out_morphs[20], -1.0f, 1.0f);
+            out_live2d->param_mouth_form =
+                std::clamp(0.5f * (out_morphs[23] + out_morphs[24]) - out_morphs[20], -1.0f, 1.0f);
         }
         out_live2d->param_eye_l_open = std::clamp(1.0f - out_morphs[0], 0.0f, 1.0f);
         out_live2d->param_eye_r_open = std::clamp(1.0f - out_morphs[7], 0.0f, 1.0f);
